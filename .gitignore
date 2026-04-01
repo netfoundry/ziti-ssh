@@ -1,0 +1,34 @@
+# Binaries (root-level only — leading / prevents matching cmd/ziti-ssh/ etc.)
+/ziti-ssh-ca
+/ziti-ssh-host
+/ziti-ssh
+
+# Build output
+dist/
+
+# Go build cache and module cache
+*.test
+*.out
+
+# Go vendor directory
+vendor/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+*.env
+*.pem
+*.key
+*.jwt
+
+# Claude Code — local settings and session memory (agent definitions are tracked)
+.claude/settings.local.json
+.claude/agent-memory/

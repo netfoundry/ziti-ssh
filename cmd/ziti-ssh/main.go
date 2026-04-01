@@ -1,0 +1,848 @@
+// Command ziti-ssh is a full SSH client over OpenZiti with certificate-based
+// authentication.
+//
+// Subcommands:
+//
+//	ziti-ssh [user@]<target>   — open an interactive SSH session (auto-signs cert)
+//	ziti-ssh connect           — same as the root command, explicit form
+//	ziti-ssh sign              — obtain/refresh a certificate from ziti-ssh-ca
+//	ziti-ssh enroll --jwt <f>  — enroll a Ziti identity from a JWT file
+//	ziti-ssh list              — list accessible Ziti services
+//	ziti-ssh mfa               — manage MFA TOTP on the Ziti identity
+//
+// Config file: ~/.config/ziti-ssh/config.yaml (respects XDG_CONFIG_HOME).
+// Precedence: CLI flag > config file > built-in default.
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/url"
+	"os"
+	"os/exec"
+	"os/user"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/openziti/edge-api/rest_model"
+	edgeapis "github.com/openziti/sdk-golang/edge-apis"
+	ziti "github.com/openziti/sdk-golang/ziti"
+	"github.com/openziti/sdk-golang/ziti/enroll"
+	"github.com/spf13/cobra"
+	"go.yaml.in/yaml/v3"
+
+	"github.com/edwardm/ziti-ssh/client"
+	"github.com/edwardm/ziti-ssh/config"
+)
+
+// ---------------------------------------------------------------------------
+// Config file types
+// ---------------------------------------------------------------------------
+
+// Config is the structure of ~/.config/ziti-ssh/config.yaml.
+type Config struct {
+	Identity   string     `yaml:"identity"`
+	CAService  string     `yaml:"ca_service"`
+	SSHService string     `yaml:"ssh_service"`
+	SSHKeyPath string     `yaml:"ssh_key_path"`
+	Mode       string     `yaml:"mode"`
+	OIDC       OIDCConfig `yaml:"oidc"`
+}
+
+// OIDCConfig holds OIDC-related configuration values.
+type OIDCConfig struct {
+	Issuer       string `yaml:"issuer"`
+	ClientID     string `yaml:"client_id"`
+	ClientSecret string `yaml:"client_secret"`
+	CallbackPort string `yaml:"callback_port"`
+}
+
+// loadConfig reads the YAML config file at cfgPath. If the file does not exist
+// an empty Config is returned without error.
+func loadConfig(cfgPath string) (*Config, error) {
+	data, err := os.ReadFile(cfgPath)
+	if os.IsNotExist(err) {
+		return &Config{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read config %q: %w", cfgPath, err)
+	}
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parse config %q: %w", cfgPath, err)
+	}
+	return &cfg, nil
+}
+
+// defaultConfigPath returns the path to the config file, honouring
+// XDG_CONFIG_HOME.
+func defaultConfigPath() string {
+	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" {
+		home, _ := os.UserHomeDir()
+		base = filepath.Join(home, ".config")
+	}
+	return filepath.Join(base, "ziti-ssh", "config.yaml")
+}
+
+// orDefault returns val if non-empty, otherwise fallback.
+func orDefault(val, fallback string) string {
+	if val != "" {
+		return val
+	}
+	return fallback
+}
+
+// ---------------------------------------------------------------------------
+// SSH key helpers
+// ---------------------------------------------------------------------------
+
+// candidateKeys is the ordered list of SSH key basenames searched in ~/.ssh/.
+var candidateKeys = []string{"id_ed25519", "id_ecdsa", "id_rsa"}
+
+// resolveKey returns the absolute path to the SSH private key to use.
+// If keyFile is non-empty it is used directly. Otherwise ~/.ssh/ is searched
+// in candidateKeys order. If no key exists the user is prompted to generate one.
+func resolveKey(keyFile string) (string, error) {
+	if keyFile != "" {
+		if _, err := os.Stat(keyFile); err != nil {
+			return "", fmt.Errorf("key file %q not found: %w", keyFile, err)
+		}
+		return keyFile, nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	sshDir := filepath.Join(home, ".ssh")
+
+	for _, name := range candidateKeys {
+		path := filepath.Join(sshDir, name)
+		if _, err := os.Stat(path); err == nil {
+			slog.Info("auto-detected SSH key", "path", path)
+			return path, nil
+		}
+	}
+
+	// No key found — offer to generate one.
+	fmt.Print("No SSH key found. Generate one now? [y/N] ")
+	var answer string
+	if _, err := fmt.Scanln(&answer); err != nil {
+		answer = ""
+	}
+	if strings.ToLower(strings.TrimSpace(answer)) != "y" {
+		return "", fmt.Errorf("no SSH key available; provide one with --key or run: ssh-keygen -t ed25519")
+	}
+
+	keyPath := filepath.Join(sshDir, "id_ed25519")
+	if err := os.MkdirAll(sshDir, 0700); err != nil {
+		return "", fmt.Errorf("create ~/.ssh directory: %w", err)
+	}
+	slog.Info("generating SSH key", "path", keyPath)
+	//nolint:gosec // arguments are constant or path-derived; no user-controlled shell injection.
+	cmd := exec.Command("ssh-keygen", "-t", "ed25519", "-f", keyPath, "-N", "")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("ssh-keygen failed: %w", err)
+	}
+	return keyPath, nil
+}
+
+// deriveCertPath returns the path where the SSH certificate for privKeyPath
+// should live (OpenSSH convention: <key>-cert.pub alongside the private key).
+func deriveCertPath(privKeyPath string) string {
+	return strings.TrimSuffix(privKeyPath, ".pub") + "-cert.pub"
+}
+
+// showCertDetails runs "ssh-keygen -L -f <certPath>" so the user can verify
+// the certificate immediately.
+func showCertDetails(certPath string) error {
+	//nolint:gosec // certPath is derived from a controlled path, not user shell input.
+	cmd := exec.Command("ssh-keygen", "-L", "-f", certPath)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("ssh-keygen -L failed: %w", err)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// sign subcommand logic
+// ---------------------------------------------------------------------------
+
+type signParams struct {
+	identityFile string
+	caService    string
+	keyFile      string
+}
+
+// runSign obtains a signed SSH certificate from the CA and writes it to disk.
+// It is used both by the `sign` subcommand and by runConnect for auto-sign.
+func runSign(p signParams) error {
+	privKeyPath, err := resolveKey(p.keyFile)
+	if err != nil {
+		return err
+	}
+
+	pubKeyPath := privKeyPath + ".pub"
+	pubKeyBytes, err := os.ReadFile(pubKeyPath)
+	if err != nil {
+		return fmt.Errorf("read public key %q: %w", pubKeyPath, err)
+	}
+	pubKeyLine := strings.TrimSpace(string(pubKeyBytes))
+	if pubKeyLine == "" {
+		return fmt.Errorf("public key file %q is empty", pubKeyPath)
+	}
+
+	slog.Info("using SSH key", "private", privKeyPath, "public", pubKeyPath)
+
+	zitiCtx, err := ziti.NewContextFromFile(p.identityFile)
+	if err != nil {
+		return fmt.Errorf("init Ziti context from %q: %w", p.identityFile, err)
+	}
+	defer zitiCtx.Close()
+
+	if err := zitiCtx.Authenticate(); err != nil {
+		return fmt.Errorf("Ziti authenticate: %w", err)
+	}
+
+	slog.Info("dialing CA service", "service", p.caService)
+	conn, err := zitiCtx.Dial(p.caService)
+	if err != nil {
+		return fmt.Errorf("dial Ziti service %q: %w", p.caService, err)
+	}
+	defer conn.Close()
+
+	if _, err := fmt.Fprintf(conn, "%s\n", pubKeyLine); err != nil {
+		return fmt.Errorf("send public key to CA: %w", err)
+	}
+
+	reader := bufio.NewReader(conn)
+	certLine, err := reader.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("read certificate from CA: %w", err)
+	}
+	certLine = strings.TrimSpace(certLine)
+	if certLine == "" {
+		return fmt.Errorf("CA returned no certificate")
+	}
+
+	certPath := deriveCertPath(privKeyPath)
+	if err := os.WriteFile(certPath, []byte(certLine+"\n"), 0644); err != nil {
+		return fmt.Errorf("write certificate to %q: %w", certPath, err)
+	}
+
+	fmt.Printf("Certificate written to %s\n", certPath)
+	return showCertDetails(certPath)
+}
+
+// ---------------------------------------------------------------------------
+// connect subcommand logic
+// ---------------------------------------------------------------------------
+
+// parseTarget splits "[user@]target" into (user, target). If no "@" is
+// present the current OS user is returned as the default username.
+func parseTarget(arg string) (username, target string, err error) {
+	if idx := strings.IndexByte(arg, '@'); idx >= 0 {
+		return arg[:idx], arg[idx+1:], nil
+	}
+	cur, err := user.Current()
+	if err != nil {
+		return "", "", fmt.Errorf("determine current user: %w", err)
+	}
+	return cur.Username, arg, nil
+}
+
+// connectParams holds all resolved settings for the connect command.
+type connectParams struct {
+	identityFile string
+	caService    string
+	sshService   string
+	service      string // explicit override (--service)
+	keyFile      string
+	oidcIssuer   string
+	target       string // raw "[user@]target" argument
+}
+
+func runConnect(p connectParams) error {
+	username, host, err := parseTarget(p.target)
+	if err != nil {
+		return err
+	}
+
+	// Resolve SSH key path before touching the network so we can check cert
+	// freshness without authenticating twice.
+	privKeyPath, err := resolveKey(p.keyFile)
+	if err != nil {
+		return err
+	}
+	certPath := deriveCertPath(privKeyPath)
+
+	// Auto-sign if the cert is missing or expiring within 30 minutes.
+	if client.CertNeedsRefresh(certPath) {
+		slog.Info("certificate missing or expiring soon — obtaining fresh certificate")
+		if err := runSign(signParams{
+			identityFile: p.identityFile,
+			caService:    p.caService,
+			keyFile:      privKeyPath,
+		}); err != nil {
+			return fmt.Errorf("auto-sign: %w", err)
+		}
+	}
+
+	// Load signer (private key + cert).
+	signer, err := client.NewCertSigner(privKeyPath)
+	if err != nil {
+		return fmt.Errorf("load SSH key: %w", err)
+	}
+
+	// Authenticate to Ziti.
+	if p.oidcIssuer != "" {
+		slog.Warn("--oidc-issuer is not yet supported; proceeding with certificate auth", "issuer", p.oidcIssuer)
+	}
+	zitiCtx, err := ziti.NewContextFromFile(p.identityFile)
+	if err != nil {
+		return fmt.Errorf("init Ziti context from %q: %w", p.identityFile, err)
+	}
+	defer zitiCtx.Close()
+
+	if err := zitiCtx.Authenticate(); err != nil {
+		return fmt.Errorf("Ziti authenticate: %w", err)
+	}
+
+	// Resolve the Ziti service and optional terminator address.
+	dialService := p.sshService
+	terminatorAddr := host
+
+	if p.service != "" {
+		// Explicit --service override: dial it without a terminator.
+		dialService = p.service
+		terminatorAddr = ""
+	} else if _, ok := zitiCtx.GetService(host); ok {
+		// Target matches a known service name: dial it directly.
+		dialService = host
+		terminatorAddr = ""
+	}
+
+	var netConn net.Conn
+
+	if terminatorAddr != "" {
+		slog.Info("dialing SSH service", "service", dialService, "terminator", terminatorAddr)
+		dialOpts := &ziti.DialOptions{
+			Identity: terminatorAddr,
+		}
+		netConn, err = zitiCtx.DialWithOptions(dialService, dialOpts)
+	} else {
+		slog.Info("dialing SSH service", "service", dialService)
+		netConn, err = zitiCtx.Dial(dialService)
+	}
+	if err != nil {
+		return fmt.Errorf("dial Ziti service %q: %w", dialService, err)
+	}
+
+	slog.Info("SSH session starting", "user", username, "host", host)
+	return client.RunSession(netConn, username, host, signer)
+}
+
+// ---------------------------------------------------------------------------
+// enroll subcommand logic
+// ---------------------------------------------------------------------------
+
+func runEnroll(jwtPath, outPath string) error {
+	jwtBytes, err := os.ReadFile(jwtPath)
+	if err != nil {
+		return fmt.Errorf("read JWT from %q: %w", jwtPath, err)
+	}
+	jwtString := strings.TrimSpace(string(jwtBytes))
+
+	token, jwtToken, err := enroll.ParseToken(jwtString)
+	if err != nil {
+		return fmt.Errorf("parse enrollment JWT: %w", err)
+	}
+
+	keyAlg := ziti.KeyAlgVar("EC")
+	enrollFlags := enroll.EnrollmentFlags{
+		Token:     token,
+		JwtToken:  jwtToken,
+		JwtString: jwtString,
+		KeyAlg:    keyAlg,
+	}
+
+	slog.Info("enrolling Ziti identity", "jwt", jwtPath, "out", outPath)
+	cfg, err := enroll.Enroll(enrollFlags)
+	if err != nil {
+		return fmt.Errorf("enroll: %w", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(outPath), 0700); err != nil {
+		return fmt.Errorf("create output directory: %w", err)
+	}
+	cfgJSON, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal identity config: %w", err)
+	}
+	if err := os.WriteFile(outPath, cfgJSON, 0600); err != nil {
+		return fmt.Errorf("write identity file %q: %w", outPath, err)
+	}
+
+	slog.Info("identity enrolled", "path", outPath)
+	fmt.Printf("Identity enrolled and written to %s\n", outPath)
+	return nil
+}
+
+// defaultEnrollOut returns the default output path for an enrolled identity:
+// ~/.config/ziti-ssh/<basename-of-jwt>.json
+func defaultEnrollOut(jwtPath string) string {
+	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" {
+		home, _ := os.UserHomeDir()
+		base = filepath.Join(home, ".config")
+	}
+	dir := filepath.Join(base, "ziti-ssh")
+	name := strings.TrimSuffix(filepath.Base(jwtPath), filepath.Ext(jwtPath)) + ".json"
+	return filepath.Join(dir, name)
+}
+
+// ---------------------------------------------------------------------------
+// list subcommand logic
+// ---------------------------------------------------------------------------
+
+func runList(identityFile string) error {
+	zitiCtx, err := ziti.NewContextFromFile(identityFile)
+	if err != nil {
+		return fmt.Errorf("init Ziti context from %q: %w", identityFile, err)
+	}
+	defer zitiCtx.Close()
+
+	if err := zitiCtx.Authenticate(); err != nil {
+		return fmt.Errorf("Ziti authenticate: %w", err)
+	}
+
+	services, err := zitiCtx.GetServices()
+	if err != nil {
+		return fmt.Errorf("get services: %w", err)
+	}
+
+	if len(services) == 0 {
+		fmt.Println("No accessible services found.")
+		return nil
+	}
+
+	fmt.Printf("%-40s  %s\n", "SERVICE NAME", "PERMISSIONS")
+	fmt.Println(strings.Repeat("-", 60))
+	for i := range services {
+		svc := &services[i]
+		name := ""
+		if svc.Name != nil {
+			name = *svc.Name
+		}
+		var perms []string
+		for _, p := range svc.Permissions {
+			perms = append(perms, string(p))
+		}
+		fmt.Printf("%-40s  %s\n", name, strings.Join(perms, ", "))
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// MFA helpers
+// ---------------------------------------------------------------------------
+
+func readMFACode(allowEmpty bool) string {
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Print("MFA TOTP code: ")
+		code, _ := reader.ReadString('\n')
+		code = strings.TrimSpace(code)
+		if code != "" || allowEmpty {
+			return code
+		}
+	}
+}
+
+// mfaTotpListener returns a listener function compatible with
+// ziti.Events().AddMfaTotpCodeListener.
+func mfaTotpListener(_ ziti.Context, _ *rest_model.AuthQueryDetail, response ziti.MfaCodeResponse) {
+	for {
+		fmt.Println("MFA TOTP required to fully authenticate.")
+		code := readMFACode(false)
+		if err := response(code); err != nil {
+			fmt.Println("error verifying MFA TOTP:", err)
+			continue
+		}
+		break
+	}
+}
+
+func runMFAEnable(identityFile string, showQR bool) error {
+	zitiCtx, err := ziti.NewContextFromFile(identityFile)
+	if err != nil {
+		return fmt.Errorf("init Ziti context from %q: %w", identityFile, err)
+	}
+	defer zitiCtx.Close()
+
+	// Register MFA listener before authenticating in case it fires during auth.
+	zitiCtx.Events().AddMfaTotpCodeListener(mfaTotpListener)
+
+	if err := zitiCtx.Authenticate(); err != nil {
+		return fmt.Errorf("Ziti authenticate: %w", err)
+	}
+
+	deet, err := zitiCtx.EnrollZitiMfa()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Attempting to enroll for MFA TOTP failed.")
+		fmt.Fprintln(os.Stderr, "This identity is likely already enrolled or in the process of being enrolled.")
+		fmt.Fprintln(os.Stderr, "Run \"ziti-ssh mfa remove\" to clear the current state, then try again.")
+		return fmt.Errorf("enroll MFA: %w", err)
+	}
+
+	parsedURL, err := url.Parse(deet.ProvisioningURL)
+	if err != nil {
+		return fmt.Errorf("parse provisioning URL: %w", err)
+	}
+	secret := parsedURL.Query().Get("secret")
+
+	fmt.Println()
+	fmt.Println("Generate and enter the correct code to continue.")
+	fmt.Println("Add this secret to your TOTP generator and verify the code.")
+	fmt.Println()
+	fmt.Println("  MFA TOTP Secret:", secret)
+	if showQR {
+		fmt.Printf("  Provisioning URL: %s\n", deet.ProvisioningURL)
+		fmt.Println("  (Copy this URL into a TOTP app that accepts provisioning URLs or a QR-code generator.)")
+	}
+	fmt.Println()
+
+	code := readMFACode(false)
+	if err := zitiCtx.VerifyZitiMfa(code); err != nil {
+		return fmt.Errorf("verify MFA code: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Println("Code verified. These are your recovery codes. Save them somewhere safe.")
+	fmt.Println("If you lose your TOTP generator, these codes let you re-authenticate.")
+	fmt.Println()
+
+	codes := deet.RecoveryCodes
+	fmt.Println("┌────────┬────────┬────────┬────────┬────────┐")
+	for i := 0; i < len(codes); i += 5 {
+		for j := 0; j < 5 && i+j < len(codes); j++ {
+			fmt.Printf("│ %6s ", codes[i+j])
+		}
+		fmt.Println("│")
+		if i+5 < len(codes) {
+			fmt.Println("├────────┼────────┼────────┼────────┼────────┤")
+		}
+	}
+	fmt.Println("└────────┴────────┴────────┴────────┴────────┘")
+
+	return nil
+}
+
+func runMFAVerify(identityFile string) error {
+	zitiCtx, err := ziti.NewContextFromFile(identityFile)
+	if err != nil {
+		return fmt.Errorf("init Ziti context from %q: %w", identityFile, err)
+	}
+	defer zitiCtx.Close()
+
+	zitiCtx.Events().AddMfaTotpCodeListener(mfaTotpListener)
+
+	if err := zitiCtx.Authenticate(); err != nil {
+		return fmt.Errorf("Ziti authenticate: %w", err)
+	}
+
+	fmt.Println("MFA TOTP verification succeeded.")
+	return nil
+}
+
+func runMFARemove(identityFile string) error {
+	zitiCtx, err := ziti.NewContextFromFile(identityFile)
+	if err != nil {
+		return fmt.Errorf("init Ziti context from %q: %w", identityFile, err)
+	}
+	defer zitiCtx.Close()
+
+	done := make(chan error, 1)
+
+	zitiCtx.Events().AddAuthenticationStateFullListener(func(c ziti.Context, _ edgeapis.ApiSession) {
+		go func() {
+			fmt.Println()
+			fmt.Println("If MFA TOTP is enrolled, enter a valid code or recovery code.")
+			fmt.Println("Otherwise, enter any value to continue.")
+			fmt.Println()
+			code := readMFACode(true)
+			if err := c.RemoveZitiMfa(code); err != nil {
+				done <- fmt.Errorf("remove MFA: %w", err)
+				return
+			}
+			fmt.Println("MFA TOTP removed.")
+			done <- nil
+		}()
+	})
+
+	if err := zitiCtx.Authenticate(); err != nil {
+		return fmt.Errorf("Ziti authenticate: %w", err)
+	}
+
+	return <-done
+}
+
+// ---------------------------------------------------------------------------
+// main — cobra command tree
+// ---------------------------------------------------------------------------
+
+// connectCmd is declared at package scope so that the root command's RunE can
+// reference it after it is assigned in main().
+var connectCmd *cobra.Command
+
+func main() {
+	var (
+		// Persistent flags (available to every subcommand).
+		identityFlag string
+		configFlag   string
+
+		// Populated by PersistentPreRunE from the config file.
+		cfg *Config
+	)
+
+	root := &cobra.Command{
+		Use:   "ziti-ssh [user@]<target>",
+		Short: "SSH client over OpenZiti with certificate-based authentication",
+		Long: `ziti-ssh is a full SSH client that operates over an OpenZiti network.
+
+When invoked with a target argument it opens an interactive SSH session using
+short-lived SSH certificates. Certificates are obtained from the ziti-ssh-ca
+service and cached in ~/.ssh/<key>-cert.pub. They are refreshed automatically
+when fewer than 30 minutes of validity remain.
+
+Usage:
+
+  ziti-ssh alice@web-server-prod         # interactive session
+  ziti-ssh connect alice@web-server-prod # same (explicit subcommand)
+  ziti-ssh sign                          # obtain/refresh certificate only
+  ziti-ssh enroll --jwt alice.jwt        # enroll a new Ziti identity
+  ziti-ssh list                          # list accessible services
+  ziti-ssh mfa enable                    # enable MFA TOTP`,
+		Args: cobra.MaximumNArgs(1),
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			cfgPath := configFlag
+			if cfgPath == "" {
+				cfgPath = defaultConfigPath()
+			}
+			var err error
+			cfg, err = loadConfig(cfgPath)
+			if err != nil {
+				return err
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return cmd.Help()
+			}
+			// Delegate to connectCmd so all connect flags are honoured.
+			return connectCmd.RunE(cmd, args)
+		},
+	}
+
+	root.PersistentFlags().StringVar(&identityFlag, "identity", "", "Ziti identity file path (or ZITI_IDENTITY)")
+	root.PersistentFlags().StringVar(&configFlag, "config", "", "Config file path (default: ~/.config/ziti-ssh/config.yaml)")
+
+	// ---------------------------------------------------------------- connect
+	var (
+		caServiceFlag  string
+		sshServiceFlag string
+		serviceFlag    string
+		keyFlag        string
+		modeFlag       string
+		oidcIssuerFlag string
+	)
+	connectCmd = &cobra.Command{
+		Use:   "connect [user@]<target>",
+		Short: "Open an interactive SSH session (the default action)",
+		Long: `connect dials the specified target over an OpenZiti network and opens an
+interactive SSH session. If the local SSH certificate is missing or will expire
+within 30 minutes it is automatically refreshed via the ziti-ssh-ca service.
+
+The target may be given as:
+  user@identity-name    — SSH as <user> to the host with Ziti identity <identity-name>
+  identity-name         — SSH as the current OS user
+
+If the target exactly matches a Ziti service name it is dialled directly. Otherwise
+it is used as a terminator address on the --ssh-service.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			identityFile := config.EnvOrFlag(identityFlag, "ZITI_IDENTITY", cfg.Identity)
+			if identityFile == "" {
+				return fmt.Errorf("--identity (or ZITI_IDENTITY) is required")
+			}
+			caService := config.EnvOrFlag(caServiceFlag, "ZITI_CA_SERVICE", orDefault(cfg.CAService, "ssh-ca"))
+			sshService := config.EnvOrFlag(sshServiceFlag, "ZITI_SSH_SERVICE", orDefault(cfg.SSHService, "ssh"))
+			resolvedKey := keyFlag
+			if resolvedKey == "" {
+				resolvedKey = cfg.SSHKeyPath
+			}
+			_ = config.EnvOrFlag(modeFlag, "ZITI_SSH_MODE", orDefault(cfg.Mode, "shared")) // resolved for future use
+
+			return runConnect(connectParams{
+				identityFile: identityFile,
+				caService:    caService,
+				sshService:   sshService,
+				service:      serviceFlag,
+				keyFile:      resolvedKey,
+				oidcIssuer:   oidcIssuerFlag,
+				target:       args[0],
+			})
+		},
+	}
+	connectCmd.Flags().StringVar(&caServiceFlag, "ca-service", "", "CA service name (or ZITI_CA_SERVICE, default: ssh-ca)")
+	connectCmd.Flags().StringVar(&sshServiceFlag, "ssh-service", "", "SSH service name (or ZITI_SSH_SERVICE, default: ssh)")
+	connectCmd.Flags().StringVar(&serviceFlag, "service", "", "Explicit Ziti service to dial (overrides --ssh-service + target lookup)")
+	connectCmd.Flags().StringVar(&keyFlag, "key", "", "SSH private key path (default: auto-detect from ~/.ssh/)")
+	connectCmd.Flags().StringVar(&modeFlag, "mode", "", "Mode: shared or per-identity (or ZITI_SSH_MODE, informational only for client)")
+	connectCmd.Flags().StringVar(&oidcIssuerFlag, "oidc-issuer", "", "OIDC issuer URL (reserved for future OIDC auth flow support)")
+	root.AddCommand(connectCmd)
+
+	// ------------------------------------------------------------------ sign
+	var (
+		signCaServiceFlag string
+		signKeyFlag       string
+	)
+	signCmd := &cobra.Command{
+		Use:   "sign",
+		Short: "Obtain or refresh an SSH certificate from ziti-ssh-ca",
+		Long: `sign connects to the ziti-ssh-ca service over the Ziti network, sends your
+SSH public key, and writes the signed certificate to ~/.ssh/<key>-cert.pub.
+
+The certificate details are printed via ssh-keygen -L immediately after writing
+so you can verify the principal, validity window, and extensions.
+
+Certificates expire after the TTL configured on the CA (default: 8 h). Run
+"ziti-ssh sign" again to renew before the old one expires.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			identityFile := config.EnvOrFlag(identityFlag, "ZITI_IDENTITY", cfg.Identity)
+			if identityFile == "" {
+				return fmt.Errorf("--identity (or ZITI_IDENTITY) is required")
+			}
+			caService := config.EnvOrFlag(signCaServiceFlag, "ZITI_CA_SERVICE", orDefault(cfg.CAService, "ssh-ca"))
+			resolvedKey := signKeyFlag
+			if resolvedKey == "" {
+				resolvedKey = cfg.SSHKeyPath
+			}
+			return runSign(signParams{
+				identityFile: identityFile,
+				caService:    caService,
+				keyFile:      resolvedKey,
+			})
+		},
+	}
+	signCmd.Flags().StringVar(&signCaServiceFlag, "ca-service", "", "CA service name (or ZITI_CA_SERVICE, default: ssh-ca)")
+	signCmd.Flags().StringVar(&signKeyFlag, "key", "", "SSH private key path (default: auto-detect from ~/.ssh/)")
+	root.AddCommand(signCmd)
+
+	// ---------------------------------------------------------------- enroll
+	var (
+		enrollJWTFlag string
+		enrollOutFlag string
+	)
+	enrollCmd := &cobra.Command{
+		Use:   "enroll",
+		Short: "Enroll a Ziti identity from a JWT file",
+		Long: `enroll reads the one-time enrollment JWT produced by "ziti edge create identity"
+and produces an enrolled identity JSON file that can be used with --identity.
+
+The output path defaults to ~/.config/ziti-ssh/<jwt-basename>.json.
+
+Example:
+  ziti-ssh enroll --jwt alice.jwt
+  ziti-ssh enroll --jwt alice.jwt --out ~/.config/ziti-ssh/alice.json`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			outPath := enrollOutFlag
+			if outPath == "" {
+				outPath = defaultEnrollOut(enrollJWTFlag)
+			}
+			return runEnroll(enrollJWTFlag, outPath)
+		},
+	}
+	enrollCmd.Flags().StringVar(&enrollJWTFlag, "jwt", "", "Path to enrollment JWT file (required)")
+	enrollCmd.Flags().StringVar(&enrollOutFlag, "out", "", "Output path for identity JSON (default: ~/.config/ziti-ssh/<name>.json)")
+	_ = enrollCmd.MarkFlagRequired("jwt")
+	root.AddCommand(enrollCmd)
+
+	// ------------------------------------------------------------------ list
+	listCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List Ziti services accessible to this identity",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			identityFile := config.EnvOrFlag(identityFlag, "ZITI_IDENTITY", cfg.Identity)
+			if identityFile == "" {
+				return fmt.Errorf("--identity (or ZITI_IDENTITY) is required")
+			}
+			return runList(identityFile)
+		},
+	}
+	root.AddCommand(listCmd)
+
+	// ------------------------------------------------------------------- mfa
+	mfaCmd := &cobra.Command{
+		Use:   "mfa",
+		Short: "Manage MFA TOTP for the Ziti identity",
+	}
+
+	var mfaShowQR bool
+	mfaEnableCmd := &cobra.Command{
+		Use:   "enable",
+		Short: "Enable MFA TOTP for the Ziti identity",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			identityFile := config.EnvOrFlag(identityFlag, "ZITI_IDENTITY", cfg.Identity)
+			if identityFile == "" {
+				return fmt.Errorf("--identity (or ZITI_IDENTITY) is required")
+			}
+			return runMFAEnable(identityFile, mfaShowQR)
+		},
+	}
+	mfaEnableCmd.Flags().BoolVarP(&mfaShowQR, "qr-code", "q", false, "Print the provisioning URL (paste into a TOTP app or QR-code generator)")
+
+	mfaVerifyCmd := &cobra.Command{
+		Use:   "verify",
+		Short: "Verify MFA TOTP authentication (smoke-test)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			identityFile := config.EnvOrFlag(identityFlag, "ZITI_IDENTITY", cfg.Identity)
+			if identityFile == "" {
+				return fmt.Errorf("--identity (or ZITI_IDENTITY) is required")
+			}
+			return runMFAVerify(identityFile)
+		},
+	}
+
+	mfaRemoveCmd := &cobra.Command{
+		Use:   "remove",
+		Short: "Remove MFA TOTP from the Ziti identity",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			identityFile := config.EnvOrFlag(identityFlag, "ZITI_IDENTITY", cfg.Identity)
+			if identityFile == "" {
+				return fmt.Errorf("--identity (or ZITI_IDENTITY) is required")
+			}
+			return runMFARemove(identityFile)
+		},
+	}
+
+	mfaCmd.AddCommand(mfaEnableCmd, mfaVerifyCmd, mfaRemoveCmd)
+	root.AddCommand(mfaCmd)
+
+	if err := root.Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+// Compile-time assertion: confirm the time package is referenced.
+var _ = time.Now
