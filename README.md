@@ -35,7 +35,7 @@ For a detailed technical reference see [ARCHITECTURE.md](ARCHITECTURE.md).
 ## Building
 
 ```sh
-git clone https://github.com/edwardm/ziti-ssh.git
+git clone https://github.com/netfoundry/ziti-ssh.git
 cd ziti-ssh
 go build -o ziti-ssh-ca   ./cmd/ziti-ssh-ca
 go build -o ziti-ssh-host ./cmd/ziti-ssh-host
