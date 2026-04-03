@@ -12,6 +12,7 @@ All binaries resolve each setting in the same order: CLI flag > environment vari
 |---|---|---|---|
 | `--identity` | `ZITI_IDENTITY` | — | Path to Ziti identity JSON file |
 | `--config` | — | `~/.config/ziti-ssh/config.yaml` | Config file path |
+| `--ziti-timeout` | `ZITI_TIMEOUT` | `30s` | Timeout for blocking Ziti network operations (authenticate, dial). Accepts any `time.Duration` string, e.g. `30s`, `1m`. |
 | `--verbose` / `-v` | — | false | Enable Info-level logging (plumbing details, key paths, service names) |
 
 ### `ziti-ssh connect` / root
@@ -59,6 +60,7 @@ All binaries resolve each setting in the same order: CLI flag > environment vari
 | `--cert-ttl` | `ZITI_CERT_TTL` | `8h` | No | Certificate validity duration (e.g. `4h`, `12h`, `24h`); must be > 0 |
 | `--rate-limit` | `ZITI_RATE_LIMIT` | `5` | No | Maximum cert signing requests per minute per identity (decimal values accepted for sub-minute rates) |
 | `--rate-burst` | `ZITI_RATE_BURST` | `3` | No | Burst allowance for the per-identity token-bucket rate limiter |
+| `--ziti-timeout` | `ZITI_TIMEOUT` | `30s` | No | Timeout for blocking Ziti network operations (authenticate, listen). Accepts any `time.Duration` string, e.g. `30s`, `1m`. |
 
 ---
 
@@ -71,6 +73,7 @@ These flags are persistent (accepted by both `enroll` and `run`):
 | `--identity` | `ZITI_IDENTITY` | `/etc/ziti-ssh-host/identity.json` | Path to Ziti identity JSON file |
 | `--ca-service` | `ZITI_CA_SERVICE` | `ssh-ca` | Ziti service name for the CA (used during `enroll`) |
 | `--ssh-service` | `ZITI_SSH_SERVICE` | `ssh` | Ziti service name to proxy (used during `run`) |
+| `--ziti-timeout` | `ZITI_TIMEOUT` | `30s` | Timeout for blocking Ziti network operations (authenticate, listen). Accepts any `time.Duration` string, e.g. `30s`, `1m`. |
 
 The `run` subcommand also accepts:
 
@@ -81,6 +84,36 @@ The `run` subcommand also accepts:
 | — | `ZITI_USER_CLEANUP` | `true` | Set to `false` to keep the Linux account after the last session closes rather than running `userdel -r` (per-identity mode only) |
 
 `enroll` also requires `--jwt <path>` (no environment variable equivalent).
+
+---
+
+## `ziti-scp`
+
+### Persistent flags (available to all subcommands)
+
+| Flag | Env | Default | Description |
+|---|---|---|---|
+| `--identity` | `ZITI_IDENTITY` | — | Path to Ziti identity JSON file |
+| `--config` | — | `~/.config/ziti-ssh/config.yaml` | Config file path |
+| `--ziti-timeout` | `ZITI_TIMEOUT` | `30s` | Timeout for blocking Ziti network operations (authenticate, dial). Accepts any `time.Duration` string, e.g. `30s`, `1m`. |
+
+### Copy flags (root command)
+
+| Flag | Env | Default | Description |
+|---|---|---|---|
+| `--ca-service` | `ZITI_CA_SERVICE` | `ssh-ca` | CA service name |
+| `--ssh-service` | `ZITI_SSH_SERVICE` | `ssh` | SSH service name |
+| `--key` | — | auto-detect | SSH private key path |
+| `-r` / `--recursive` | — | false | Recursively copy entire directories |
+| `-p` / `--preserve` | — | false | Preserve file timestamps and permissions |
+| `-q` / `--quiet` | — | false | Suppress per-file progress output |
+
+### `ziti-scp enroll`
+
+| Flag | Env | Default | Description |
+|---|---|---|---|
+| `--jwt` | — | — | Enrollment JWT file path (required) |
+| `--out` | — | `~/.config/ziti-ssh/<name>.json` | Output path for identity JSON |
 
 ---
 
