@@ -243,7 +243,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
 User=ziti
 EnvironmentFile=/etc/ziti-ssh-ca/env
 ExecStart=/usr/local/bin/ziti-ssh-ca
@@ -253,6 +253,8 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 ```
+
+`Type=notify` is supported — `ziti-ssh-ca` sends `READY=1` via `sd_notify` once the listener is bound and ready to accept connections. systemd will not consider dependent units satisfied until the notification is received.
 
 The Debian package creates `/etc/ziti-ssh-ca/env` (mode 0640) automatically on first install. Edit it to configure the service before starting:
 
@@ -322,7 +324,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
 User=root
 EnvironmentFile=-/etc/ziti-ssh-host/env
 ExecStart=/usr/local/bin/ziti-ssh-host run
@@ -332,6 +334,8 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 ```
+
+`Type=notify` is supported — `ziti-ssh-host run` sends `READY=1` via `sd_notify` once the Ziti listener is bound.
 
 The Debian package creates `/etc/ziti-ssh-host/env` (mode 0640) automatically on first install. Edit it to configure the service before starting:
 
@@ -527,6 +531,30 @@ If the certificate is missing or will expire within 30 minutes, `ziti-ssh connec
 
 If the SSH private key is passphrase-protected, `ziti-ssh connect` falls back to the SSH agent (`SSH_AUTH_SOCK`). It locates the matching key in the agent and, if a certificate is present on disk, wraps it as an `ssh.CertSigner` so the certificate is offered during authentication. The passphrase is never exposed to this process. If the key is passphrase-protected and `SSH_AUTH_SOCK` is not set (or the key has not been added with `ssh-add`), `ziti-ssh connect` exits with an actionable error.
 
+### Non-interactive command execution
+
+To run a single command on a remote host without opening an interactive shell, append the command after the target (use `--` to separate it from any `ziti-ssh` flags):
+
+```sh
+# Run a command non-interactively
+ziti-ssh ziggy@web-server-prod "ls -al"
+ziti-ssh ziggy@web-server-prod "ls -la /tmp"
+
+
+# Explicit seperator form
+ziti-ssh ziggy@web-server-prod -- df -h
+ziti-ssh ziggy@web-server-prod -- systemctl status nginx
+ziti-ssh ziggy@web-server-prod -- "echo hello world"
+```
+
+No PTY is allocated for non-interactive commands. `stdin`, `stdout`, and `stderr` are wired directly so you can pipe output normally:
+
+```sh
+ziti-ssh ziggy@web-server-prod -- cat /etc/os-release | grep VERSION
+```
+
+The remote process exit code is propagated: if the remote command exits non-zero, `ziti-ssh` exits with that same code. This makes it suitable for use in scripts.
+
 ### Listing accessible services
 
 ```sh
@@ -561,7 +589,87 @@ ca_service: ssh-ca
 ssh_service: ssh
 ```
 
+To enable OIDC authentication, add an `oidc` block (see [OIDC authentication](#oidc-authentication) below):
+
+```yaml
+identity: ~/.config/ziti-ssh/alice.json
+ca_service: ssh-ca
+ssh_service: ssh
+oidc:
+  issuer: https://your-idp.example.com
+  client_id: ziti-ssh
+  client_secret: ""        # leave empty for PKCE (public client)
+  callback_port: "63275"   # optional; 63275 is the default
+```
+
 Precedence: CLI flag > config file > built-in default.
+
+---
+
+## OIDC authentication
+
+`ziti-ssh` supports browser-based OIDC authentication as a secondary credential layer on top of the Ziti mTLS identity. This satisfies **ext-jwt-signer** policies on the Ziti controller — useful when your organization requires that SSH access also be gated by an SSO provider (e.g. Okta, Keycloak, Azure AD).
+
+OIDC authentication is entirely optional. When no issuer is configured the behavior is unchanged.
+
+### How it works
+
+When an OIDC issuer is configured:
+
+1. Before dialling any Ziti service, `ziti-ssh connect` (and `ziti-ssh sign`) starts a temporary HTTP server on `localhost:<callback_port>` and opens your browser to the authorization URL.
+2. You log in through your identity provider's normal web UI.
+3. The provider redirects to the local callback server with an authorization code.
+4. `ziti-ssh` exchanges the code for an access token and adds it to the Ziti context via `GetCredentials().AddJWT()` before calling `Authenticate()`.
+5. The Ziti controller validates the JWT against the configured ext-jwt-signer. If the JWT is accepted, the controller grants the session additional permissions beyond what the mTLS identity alone would receive.
+
+The OIDC flow times out after 2 minutes. If the browser does not complete authentication within that window, `ziti-ssh` exits with an error.
+
+If no client secret is provided (empty string or omitted), PKCE is used automatically — suitable for public clients that cannot safely store a secret.
+
+### Provisioning the Ziti controller side
+
+The controller must have an **ext-jwt-signer** configured and linked to the identities or service policies you want to protect. Using the `ziti` CLI:
+
+```sh
+# 1. Create an ext-jwt-signer referencing your OIDC issuer's JWKS endpoint
+ziti edge create ext-jwt-signer my-oidc-signer \
+  --issuer https://your-idp.example.com \
+  --jwks-endpoint https://your-idp.example.com/.well-known/jwks.json \
+  --audience ziti-ssh \
+  --claims-property email
+
+# 2. Create an auth policy that requires both the Ziti mTLS cert AND the JWT
+ziti edge create auth-policy ssh-oidc-policy \
+  --primary-cert-allowed \
+  --secondary-req-ext-jwt-signer my-oidc-signer
+
+# 3. Apply that auth policy to the identities that must use OIDC
+ziti edge update identity alice --auth-policy ssh-oidc-policy
+```
+
+Consult the [OpenZiti ext-jwt-signer documentation](https://openziti.io/docs/reference/configuration/conventions#external-jwt-signers) for the full list of options.
+
+Your OIDC provider must have `http://localhost:<callback_port>/auth/callback` registered as an allowed redirect URI. The default callback port is `63275`.
+
+### Configuring `ziti-ssh` to use OIDC
+
+Via the config file (`~/.config/ziti-ssh/config.yaml`):
+
+```yaml
+oidc:
+  issuer: https://your-idp.example.com
+  client_id: ziti-ssh
+  client_secret: ""      # omit or leave empty to use PKCE
+  callback_port: "63275" # optional
+```
+
+Or via the CLI flag (overrides the config file):
+
+```sh
+ziti-ssh connect --oidc-issuer https://your-idp.example.com alice@web-server-prod
+```
+
+`client_id` and `client_secret` can only be set through the config file. If `client_id` is not set the OIDC flow will fail; ensure it is present in the config when using OIDC.
 
 ---
 
@@ -585,7 +693,7 @@ All binaries resolve each setting in the same order: CLI flag > environment vari
 | `--service` | — | — | Explicit Ziti service to dial (overrides `--ssh-service`) |
 | `--key` | — | auto-detect | SSH private key path |
 | `--mode` | `ZITI_SSH_MODE` | `shared` | Mode hint (informational for client) |
-| `--oidc-issuer` | — | — | OIDC issuer URL (reserved; not yet implemented) |
+| `--oidc-issuer` | — | — | OIDC issuer URL; triggers browser-based OIDC auth (overrides `oidc.issuer` in config) |
 
 ### `ziti-ssh sign`
 
@@ -617,6 +725,8 @@ All binaries resolve each setting in the same order: CLI flag > environment vari
 | `--principal` | `ZITI_SSH_PRINCIPAL` | `ziggy` | No | Linux username placed in `ValidPrincipals` (shared mode only) |
 | `--mode` | `ZITI_SSH_MODE` | `shared` | No | Principal mode: `shared` or `per-identity` |
 | `--cert-ttl` | `ZITI_CERT_TTL` | `8h` | No | Certificate validity duration (e.g. `4h`, `12h`, `24h`); must be > 0 |
+| `--rate-limit` | `ZITI_RATE_LIMIT` | `5` | No | Maximum cert signing requests per minute per identity (decimal values accepted for sub-minute rates) |
+| `--rate-burst` | `ZITI_RATE_BURST` | `3` | No | Burst allowance for the per-identity token-bucket rate limiter |
 
 ### `ziti-ssh-host`
 
@@ -668,6 +778,25 @@ After the controller intermediate CA key is rotated:
 2. Run `ziti-ssh-host enroll` again on each host (or distribute the new intermediate CA public key and update `/etc/ssh/ziti_ca.pub` manually, then reload sshd). Since `enroll` extracts the CA public key from the enrollment response, re-enrolling automatically picks up the new key.
 
 Outstanding SSH certificates signed with the old intermediate CA key stop working once sshd no longer trusts the old CA public key. Issue new certificates to users after rotation.
+
+---
+
+## Graceful shutdown
+
+Both `ziti-ssh-ca` and `ziti-ssh-host run` handle `SIGTERM` and `SIGINT` gracefully:
+
+1. On receiving a signal the Ziti listener is closed, so no new connections are accepted.
+2. All in-flight connections (active cert signing or SSH proxy sessions) are allowed to finish normally.
+3. If in-flight connections do not finish within **30 seconds** of the signal, the process exits anyway with a warning log. Per-identity mode users whose sessions were severed by the timeout are cleaned up by `CleanupOrphans` on the next startup.
+
+The services support `Type=notify` in systemd unit files — each process sends `READY=1` via `sd_notify` after the Ziti listener is bound and ready to accept connections, and `STOPPING=1` when a shutdown signal is received. To use this, change `Type=simple` to `Type=notify` in the systemd unit:
+
+```ini
+[Service]
+Type=notify
+```
+
+See [Setting up `ziti-ssh-ca`](#setting-up-ziti-ssh-ca) and [Setting up `ziti-ssh-host`](#setting-up-ziti-ssh-host-on-a-target-machine) for the full unit file examples.
 
 ---
 

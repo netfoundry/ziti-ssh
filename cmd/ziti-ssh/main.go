@@ -274,6 +274,7 @@ type connectParams struct {
 	keyFile      string
 	oidc         oidcFlowParams
 	target       string // raw "[user@]target" argument
+	command      string // optional remote command; empty means interactive shell
 }
 
 func runConnect(p connectParams) error {
@@ -352,6 +353,11 @@ func runConnect(p connectParams) error {
 	}
 	if err != nil {
 		return fmt.Errorf("dial Ziti service %q: %w", dialService, err)
+	}
+
+	if p.command != "" {
+		slog.Info("running remote command", "user", username, "host", host, "command", p.command)
+		return client.RunCommand(netConn, username, host, p.command, signer)
 	}
 
 	slog.Info("SSH session starting", "user", username, "host", host)
@@ -622,7 +628,7 @@ func main() {
 	)
 
 	root := &cobra.Command{
-		Use:   "ziti-ssh [user@]<target>",
+		Use:   "ziti-ssh [user@]<target> [-- <command> [args...]]",
 		Short: "SSH client over OpenZiti with certificate-based authentication",
 		Long: `ziti-ssh is a full SSH client that operates over an OpenZiti network.
 
@@ -631,15 +637,20 @@ short-lived SSH certificates. Certificates are obtained from the ziti-ssh-ca
 service and cached in ~/.ssh/<key>-cert.pub. They are refreshed automatically
 when fewer than 30 minutes of validity remain.
 
+If a command is provided after the target (after -- or as trailing arguments),
+it is executed non-interactively on the remote host instead of opening a shell.
+The remote exit code is propagated to the local process.
+
 Usage:
 
-  ziti-ssh alice@web-server-prod         # interactive session
-  ziti-ssh connect alice@web-server-prod # same (explicit subcommand)
-  ziti-ssh sign                          # obtain/refresh certificate only
-  ziti-ssh enroll --jwt alice.jwt        # enroll a new Ziti identity
-  ziti-ssh list                          # list accessible services
-  ziti-ssh mfa enable                    # enable MFA TOTP`,
-		Args: cobra.MaximumNArgs(1),
+  ziti-ssh alice@web-server-prod                    # interactive session
+  ziti-ssh alice@web-server-prod -- ls -la /tmp     # non-interactive command
+  ziti-ssh connect alice@web-server-prod            # same (explicit subcommand)
+  ziti-ssh sign                                     # obtain/refresh certificate only
+  ziti-ssh enroll --jwt alice.jwt                   # enroll a new Ziti identity
+  ziti-ssh list                                     # list accessible services
+  ziti-ssh mfa enable                               # enable MFA TOTP`,
+		Args: cobra.ArbitraryArgs,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			cfgPath := configFlag
 			if cfgPath == "" {
@@ -674,19 +685,28 @@ Usage:
 		oidcIssuerFlag string
 	)
 	connectCmd = &cobra.Command{
-		Use:   "connect [user@]<target>",
-		Short: "Open an interactive SSH session (the default action)",
+		Use:   "connect [user@]<target> [-- <command> [args...]]",
+		Short: "Open an interactive SSH session or run a remote command (the default action)",
 		Long: `connect dials the specified target over an OpenZiti network and opens an
-interactive SSH session. If the local SSH certificate is missing or will expire
-within 30 minutes it is automatically refreshed via the ziti-ssh-ca service.
+interactive SSH session. If a command is provided after the target (separated by
+-- or as trailing arguments), it is executed non-interactively on the remote host
+instead of opening a shell. The remote exit code is propagated to the local process.
+
+If the local SSH certificate is missing or will expire within 30 minutes it is
+automatically refreshed via the ziti-ssh-ca service before connecting.
 
 The target may be given as:
   user@identity-name    — SSH as <user> to the host with Ziti identity <identity-name>
   identity-name         — SSH as the current OS user
 
 If the target exactly matches a Ziti service name it is dialled directly. Otherwise
-it is used as a terminator address on the --ssh-service.`,
-		Args: cobra.ExactArgs(1),
+it is used as a terminator address on the --ssh-service.
+
+Examples:
+  ziti-ssh connect alice@web-server-prod
+  ziti-ssh connect alice@web-server-prod -- ls -la /tmp
+  ziti-ssh connect alice@web-server-prod -- systemctl status nginx`,
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			identityFile := config.EnvOrFlag(identityFlag, "ZITI_IDENTITY", cfg.Identity)
 			if identityFile == "" {
@@ -704,6 +724,13 @@ it is used as a terminator address on the --ssh-service.`,
 			if oidcCallbackPort == "" {
 				oidcCallbackPort = defaultCallbackPort
 			}
+
+			// args[0] is always the target; any remaining args form the remote command.
+			var remoteCommand string
+			if len(args) > 1 {
+				remoteCommand = strings.Join(args[1:], " ")
+			}
+
 			return runConnect(connectParams{
 				identityFile: identityFile,
 				caService:    caService,
@@ -716,7 +743,8 @@ it is used as a terminator address on the --ssh-service.`,
 					clientSecret: cfg.OIDC.ClientSecret,
 					callbackPort: oidcCallbackPort,
 				},
-				target: args[0],
+				target:  args[0],
+				command: remoteCommand,
 			})
 		},
 	}

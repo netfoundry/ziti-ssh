@@ -3,6 +3,7 @@ module github.com/edwardm/ziti-ssh
 go 1.25.0
 
 require (
+	github.com/coreos/go-systemd/v22 v22.7.0
 	github.com/gorilla/securecookie v1.1.2
 	github.com/openziti/edge-api v0.27.5
 	github.com/openziti/sdk-golang v1.6.0

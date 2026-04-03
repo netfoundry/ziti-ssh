@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/coreos/go-systemd/v22/daemon"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 
@@ -301,6 +302,12 @@ func runProxy(identityFile, sshService, mode string) error {
 
 	slog.Info("proxying", "service", sshService, "target", defaultSSHTarget, "mode", mode)
 
+	// Notify systemd that the service is ready to accept connections.
+	// This is a no-op when not running under systemd (NOTIFY_SOCKET is unset).
+	if _, err := daemon.SdNotify(false, daemon.SdNotifyReady); err != nil {
+		slog.Debug("sd_notify READY failed (not running under systemd?)", "err", err)
+	}
+
 	var hooks *host.ProxyHooks
 
 	if mode == "per-identity" {
@@ -349,6 +356,10 @@ func runProxy(identityFile, sshService, mode string) error {
 	go func() {
 		sig := <-sigCh
 		slog.Info("received signal, stopping proxy listener", "signal", sig)
+		// Notify systemd that the service is beginning to shut down.
+		if _, err := daemon.SdNotify(false, "STOPPING=1"); err != nil {
+			slog.Debug("sd_notify STOPPING failed", "err", err)
+		}
 		if err := listener.Close(); err != nil {
 			slog.Debug("listener close on signal", "err", err)
 		}

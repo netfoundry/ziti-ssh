@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/coreos/go-systemd/v22/daemon"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 
@@ -141,6 +142,12 @@ func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL t
 
 	slog.Info("listening", "service", serviceName)
 
+	// Notify systemd that the service is ready to accept connections.
+	// This is a no-op when not running under systemd (NOTIFY_SOCKET is unset).
+	if _, err := daemon.SdNotify(false, daemon.SdNotifyReady); err != nil {
+		slog.Debug("sd_notify READY failed (not running under systemd?)", "err", err)
+	}
+
 	// Build per-identity rate limiter. The eviction goroutine is stopped when
 	// the stop channel is closed, which happens after the accept loop exits.
 	stopLimiter := make(chan struct{})
@@ -160,6 +167,10 @@ func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL t
 	go func() {
 		sig := <-sigCh
 		slog.Info("received signal, stopping listener", "signal", sig)
+		// Notify systemd that the service is beginning to shut down.
+		if _, err := daemon.SdNotify(false, "STOPPING=1"); err != nil {
+			slog.Debug("sd_notify STOPPING failed", "err", err)
+		}
 		if err := listener.Close(); err != nil {
 			slog.Debug("listener close on signal", "err", err)
 		}

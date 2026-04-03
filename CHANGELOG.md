@@ -6,6 +6,40 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+#### `ziti-ssh` — non-interactive remote command execution
+- `client.RunCommand(conn, user, host, command, signer)` added to `client/ssh.go`: sets up the SSH client connection identically to `RunSession` but does not request a PTY; wires `os.Stdin`/`os.Stdout`/`os.Stderr` directly; executes the command via `session.Run`; propagates the remote exit code via `os.Exit` when the error is `*ssh.ExitError`, and returns other errors normally
+- `connectParams.command` field added; `runConnect` branches on whether `command` is non-empty — calls `client.RunCommand` if so, `client.RunSession` otherwise
+- `connect` cobra command updated from `cobra.ExactArgs(1)` to `cobra.MinimumNArgs(1)`: `args[0]` remains the target; any remaining args are joined with spaces and used as the remote command
+- Root command updated from `cobra.MaximumNArgs(1)` to `cobra.ArbitraryArgs` so bare invocations such as `ziti-ssh alice@host -- ls -la` also work
+- `Use` and `Long` help text on both the root command and `connect` subcommand updated to document the new `[-- <command> [args...]]` form
+- README "Connecting to a host" section extended with a "Non-interactive command execution" subsection covering usage, piping, and exit-code propagation
+
+
+
+### Added
+
+#### `ziti-ssh-ca` and `ziti-ssh-host` — systemd sd_notify integration
+- Both binaries now import `github.com/coreos/go-systemd/v22/daemon` (promoted from indirect to direct dependency, upgraded to v22.7.0)
+- `ziti-ssh-ca`: calls `daemon.SdNotify(false, daemon.SdNotifyReady)` immediately after the Ziti listener is bound; calls `daemon.SdNotify(false, "STOPPING=1")` in the signal watcher goroutine before closing the listener
+- `ziti-ssh-host run`: same pattern — `READY=1` after `ListenWithOptions` succeeds, `STOPPING=1` when SIGTERM/SIGINT is received
+- Both calls are no-ops when `NOTIFY_SOCKET` is unset (i.e. when not running under systemd); errors are logged at Debug level only
+- Systemd unit file examples in README updated from `Type=simple` to `Type=notify`
+
+#### README — OIDC authentication documentation
+- New [OIDC authentication](#oidc-authentication) section covering: how the browser flow works, what to provision on the Ziti controller side (ext-jwt-signer + auth policy), and how to configure `oidc.*` in the config file or via `--oidc-issuer`
+- Config file example updated to show the `oidc:` block with all four fields (`issuer`, `client_id`, `client_secret`, `callback_port`)
+- `--oidc-issuer` description in the configuration reference table corrected (was incorrectly marked "not yet implemented")
+
+#### README — rate limiting documentation
+- `--rate-limit` / `ZITI_RATE_LIMIT` and `--rate-burst` / `ZITI_RATE_BURST` added to the `ziti-ssh-ca` configuration reference table
+
+#### README — graceful shutdown documentation
+- New [Graceful shutdown](#graceful-shutdown) section describing the 30-second drain window and `Type=notify` support
+
+---
+
+### Added
+
 #### `ziti-ssh-ca` — per-identity rate limiting
 - `internal/ratelimit`: new package providing a per-identity token-bucket rate limiter backed by `golang.org/x/time/rate`
 - Each Ziti identity gets an independent `rate.Limiter`; one abusive caller cannot exhaust the allowance of any other identity

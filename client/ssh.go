@@ -1,6 +1,6 @@
 // Package client provides SSH session helpers for the ziti-ssh CLI.
 //
-// Three exported functions cover the lifecycle of a certificate-backed SSH
+// Four exported functions cover the lifecycle of a certificate-backed SSH
 // session over a pre-dialed net.Conn:
 //
 //   - NewCertSigner   — loads a private key and, if a matching -cert.pub file
@@ -12,6 +12,10 @@
 //
 //   - RunSession       — runs a full interactive SSH session with PTY over a
 //     net.Conn that has already been dialled (e.g. via ziti.Dial).
+//
+//   - RunCommand       — runs a single non-interactive remote command over a
+//     net.Conn that has already been dialled. No PTY is allocated.
+//     The remote exit code is propagated via os.Exit.
 package client
 
 import (
@@ -26,6 +30,7 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/term"
 )
+
 
 // NewCertSigner loads the SSH private key at keyPath and, if a corresponding
 // certificate file (<keyPath>-cert.pub) is present on disk, wraps the signer
@@ -271,4 +276,58 @@ func RunSession(conn net.Conn, user, host string, signer ssh.Signer) error {
 	}
 
 	return session.Wait()
+}
+
+// RunCommand runs a single non-interactive remote command over conn.
+//
+// conn must already be a connected net.Conn (e.g. returned by ziti.Dial).
+// user is the remote username; host is used only as the hostname passed to
+// ssh.NewClientConn (it does not perform DNS resolution here). command is the
+// shell command string to execute on the remote host. signer provides the
+// public-key / certificate auth credential.
+//
+// No PTY is allocated. os.Stdin, os.Stdout, and os.Stderr are wired directly
+// to the session so the caller can pipe data or capture output normally.
+//
+// If the remote command exits with a non-zero status, RunCommand calls
+// os.Exit with that status code rather than returning an error, matching the
+// behaviour of standard ssh(1). Other errors (handshake failure, session
+// open failure, etc.) are returned normally so the caller can log them.
+//
+// Host key verification is intentionally skipped for the same reason as
+// RunSession — the Ziti overlay enforces mutual TLS before any SSH bytes are
+// exchanged.
+func RunCommand(conn net.Conn, user, host, command string, signer ssh.Signer) error {
+	cfg := &ssh.ClientConfig{
+		User:            user,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec
+	}
+
+	clientConn, chans, reqs, err := ssh.NewClientConn(conn, host, cfg)
+	if err != nil {
+		return fmt.Errorf("SSH handshake with %q: %w", host, err)
+	}
+	c := ssh.NewClient(clientConn, chans, reqs)
+	defer c.Close()
+
+	session, err := c.NewSession()
+	if err != nil {
+		return fmt.Errorf("open SSH session: %w", err)
+	}
+	defer session.Close()
+
+	// Wire I/O without requesting a PTY.
+	session.Stdout = os.Stdout
+	session.Stderr = os.Stderr
+	session.Stdin = os.Stdin
+
+	if err := session.Run(command); err != nil {
+		var exitErr *ssh.ExitError
+		if errors.As(err, &exitErr) {
+			os.Exit(exitErr.ExitStatus())
+		}
+		return fmt.Errorf("run remote command: %w", err)
+	}
+	return nil
 }

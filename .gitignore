@@ -28,6 +28,7 @@ Thumbs.db
 *.pem
 *.key
 *.jwt
+*.json
 
 # Claude Code — local settings and session memory (agent definitions are tracked)
 .claude/settings.local.json
