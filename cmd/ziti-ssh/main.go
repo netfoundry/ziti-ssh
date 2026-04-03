@@ -34,6 +34,7 @@ import (
 	"github.com/openziti/sdk-golang/ziti/enroll"
 	"github.com/spf13/cobra"
 	"go.yaml.in/yaml/v3"
+	"golang.org/x/crypto/ssh"
 
 	"github.com/edwardm/ziti-ssh/client"
 	"github.com/edwardm/ziti-ssh/config"
@@ -124,7 +125,7 @@ func resolveKey(keyFile string) (string, error) {
 	for _, name := range candidateKeys {
 		path := filepath.Join(sshDir, name)
 		if _, err := os.Stat(path); err == nil {
-			slog.Info("auto-detected SSH key", "path", path)
+			slog.Debug("auto-detected SSH key", "path", path)
 			return path, nil
 		}
 	}
@@ -182,6 +183,7 @@ type signParams struct {
 	caService    string
 	keyFile      string
 	oidc         oidcFlowParams
+	verbose      bool // when false, suppress "Certificate written" and showCertDetails
 }
 
 // runSign obtains a signed SSH certificate from the CA and writes it to disk.
@@ -202,7 +204,7 @@ func runSign(p signParams) error {
 		return fmt.Errorf("public key file %q is empty", pubKeyPath)
 	}
 
-	slog.Info("using SSH key", "private", privKeyPath, "public", pubKeyPath)
+	slog.Debug("using SSH key", "private", privKeyPath, "public", pubKeyPath)
 
 	zitiCtx, err := ziti.NewContextFromFile(p.identityFile)
 	if err != nil {
@@ -218,7 +220,7 @@ func runSign(p signParams) error {
 		return fmt.Errorf("Ziti authenticate: %w", err)
 	}
 
-	slog.Info("dialing CA service", "service", p.caService)
+	slog.Debug("dialing CA service", "service", p.caService)
 	conn, err := zitiCtx.Dial(p.caService)
 	if err != nil {
 		return fmt.Errorf("dial Ziti service %q: %w", p.caService, err)
@@ -244,8 +246,11 @@ func runSign(p signParams) error {
 		return fmt.Errorf("write certificate to %q: %w", certPath, err)
 	}
 
-	fmt.Printf("Certificate written to %s\n", certPath)
-	return showCertDetails(certPath)
+	if p.verbose {
+		fmt.Printf("Certificate written to %s\n", certPath)
+		return showCertDetails(certPath)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +280,36 @@ type connectParams struct {
 	oidc         oidcFlowParams
 	target       string // raw "[user@]target" argument
 	command      string // optional remote command; empty means interactive shell
+	verbose      bool
+}
+
+// certTimeRemaining parses the certificate at certPath and returns the time
+// remaining until it expires, formatted as "XhYm" (e.g. "7h32m"). If the cert
+// cannot be read or parsed, the second return value is false.
+func certTimeRemaining(certPath string) (string, bool) {
+	data, err := os.ReadFile(certPath)
+	if err != nil {
+		return "", false
+	}
+	pub, _, _, _, err := ssh.ParseAuthorizedKey(data)
+	if err != nil {
+		return "", false
+	}
+	cert, ok := pub.(*ssh.Certificate)
+	if !ok {
+		return "", false
+	}
+	if cert.ValidBefore == 0 || cert.ValidBefore == ssh.CertTimeInfinity {
+		return "", false
+	}
+	expiry := time.Unix(int64(cert.ValidBefore), 0)
+	remaining := time.Until(expiry)
+	if remaining <= 0 {
+		return "", false
+	}
+	h := int(remaining.Hours())
+	m := int(remaining.Minutes()) % 60
+	return fmt.Sprintf("%dh%dm", h, m), true
 }
 
 func runConnect(p connectParams) error {
@@ -291,16 +326,39 @@ func runConnect(p connectParams) error {
 	}
 	certPath := deriveCertPath(privKeyPath)
 
+	if p.verbose {
+		fmt.Fprintf(os.Stderr, "%-12s %s\n", "SSH key:", privKeyPath)
+	}
+
 	// Auto-sign if the cert is missing or expiring within 30 minutes.
-	if client.CertNeedsRefresh(certPath) {
-		slog.Info("certificate missing or expiring soon — obtaining fresh certificate")
+	needsRefresh := client.CertNeedsRefresh(certPath)
+	if needsRefresh {
+		if p.verbose {
+			fmt.Fprintf(os.Stderr, "%-12s missing or expiring — refreshing from %s\n", "Certificate:", p.caService)
+		} else {
+			fmt.Fprintf(os.Stderr, "certificate missing or expiring soon — obtaining fresh certificate\n")
+		}
 		if err := runSign(signParams{
 			identityFile: p.identityFile,
 			caService:    p.caService,
 			keyFile:      privKeyPath,
 			oidc:         p.oidc,
+			verbose:      false,
 		}); err != nil {
 			return fmt.Errorf("auto-sign: %w", err)
+		}
+		if p.verbose {
+			if remaining, ok := certTimeRemaining(certPath); ok {
+				fmt.Fprintf(os.Stderr, "%-12s written to %s (valid %s)\n", "Certificate:", certPath, remaining)
+			} else {
+				fmt.Fprintf(os.Stderr, "%-12s written to %s\n", "Certificate:", certPath)
+			}
+		}
+	} else if p.verbose {
+		if remaining, ok := certTimeRemaining(certPath); ok {
+			fmt.Fprintf(os.Stderr, "%-12s valid, expires in %s\n", "Certificate:", remaining)
+		} else {
+			fmt.Fprintf(os.Stderr, "%-12s valid\n", "Certificate:")
 		}
 	}
 
@@ -339,16 +397,20 @@ func runConnect(p connectParams) error {
 		terminatorAddr = ""
 	}
 
+	if p.verbose {
+		fmt.Fprintf(os.Stderr, "%-12s %s @ %s\n", "Connecting:", username, host)
+	}
+
 	var netConn net.Conn
 
 	if terminatorAddr != "" {
-		slog.Info("dialing SSH service", "service", dialService, "terminator", terminatorAddr)
+		slog.Debug("dialing SSH service", "service", dialService, "terminator", terminatorAddr)
 		dialOpts := &ziti.DialOptions{
 			Identity: terminatorAddr,
 		}
 		netConn, err = zitiCtx.DialWithOptions(dialService, dialOpts)
 	} else {
-		slog.Info("dialing SSH service", "service", dialService)
+		slog.Debug("dialing SSH service", "service", dialService)
 		netConn, err = zitiCtx.Dial(dialService)
 	}
 	if err != nil {
@@ -356,11 +418,11 @@ func runConnect(p connectParams) error {
 	}
 
 	if p.command != "" {
-		slog.Info("running remote command", "user", username, "host", host, "command", p.command)
+		slog.Debug("running remote command", "user", username, "host", host, "command", p.command)
 		return client.RunCommand(netConn, username, host, p.command, signer)
 	}
 
-	slog.Info("SSH session starting", "user", username, "host", host)
+	slog.Debug("SSH session starting", "user", username, "host", host)
 	return client.RunSession(netConn, username, host, signer)
 }
 
@@ -622,6 +684,7 @@ func main() {
 		// Persistent flags (available to every subcommand).
 		identityFlag string
 		configFlag   string
+		verbose      bool
 
 		// Populated by PersistentPreRunE from the config file.
 		cfg *Config
@@ -652,6 +715,13 @@ Usage:
   ziti-ssh mfa enable                               # enable MFA TOTP`,
 		Args: cobra.ArbitraryArgs,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			// Configure the default slog logger based on the --verbose flag.
+			level := slog.LevelWarn
+			if verbose {
+				level = slog.LevelInfo
+			}
+			slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+
 			cfgPath := configFlag
 			if cfgPath == "" {
 				cfgPath = defaultConfigPath()
@@ -674,6 +744,7 @@ Usage:
 
 	root.PersistentFlags().StringVar(&identityFlag, "identity", "", "Ziti identity file path (or ZITI_IDENTITY)")
 	root.PersistentFlags().StringVar(&configFlag, "config", "", "Config file path (default: ~/.config/ziti-ssh/config.yaml)")
+	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose (Info-level) logging")
 
 	// ---------------------------------------------------------------- connect
 	var (
@@ -743,8 +814,9 @@ Examples:
 					clientSecret: cfg.OIDC.ClientSecret,
 					callbackPort: oidcCallbackPort,
 				},
-				target:  args[0],
-				command: remoteCommand,
+				target:   args[0],
+				command:  remoteCommand,
+				verbose:  verbose,
 			})
 		},
 	}
@@ -796,6 +868,7 @@ Certificates expire after the TTL configured on the CA (default: 8 h). Run
 					clientSecret: cfg.OIDC.ClientSecret,
 					callbackPort: signCallbackPort,
 				},
+				verbose: true,
 			})
 		},
 	}

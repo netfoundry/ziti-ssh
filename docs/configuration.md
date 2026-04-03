@@ -12,6 +12,7 @@ All binaries resolve each setting in the same order: CLI flag > environment vari
 |---|---|---|---|
 | `--identity` | `ZITI_IDENTITY` | — | Path to Ziti identity JSON file |
 | `--config` | — | `~/.config/ziti-ssh/config.yaml` | Config file path |
+| `--verbose` / `-v` | — | false | Enable Info-level logging (plumbing details, key paths, service names) |
 
 ### `ziti-ssh connect` / root
 
