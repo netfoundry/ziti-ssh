@@ -181,6 +181,7 @@ type signParams struct {
 	identityFile string
 	caService    string
 	keyFile      string
+	oidc         oidcFlowParams
 }
 
 // runSign obtains a signed SSH certificate from the CA and writes it to disk.
@@ -208,6 +209,10 @@ func runSign(p signParams) error {
 		return fmt.Errorf("init Ziti context from %q: %w", p.identityFile, err)
 	}
 	defer zitiCtx.Close()
+
+	if err := addOIDCCredentials(zitiCtx, p.oidc); err != nil {
+		return err
+	}
 
 	if err := zitiCtx.Authenticate(); err != nil {
 		return fmt.Errorf("Ziti authenticate: %w", err)
@@ -267,7 +272,7 @@ type connectParams struct {
 	sshService   string
 	service      string // explicit override (--service)
 	keyFile      string
-	oidcIssuer   string
+	oidc         oidcFlowParams
 	target       string // raw "[user@]target" argument
 }
 
@@ -292,6 +297,7 @@ func runConnect(p connectParams) error {
 			identityFile: p.identityFile,
 			caService:    p.caService,
 			keyFile:      privKeyPath,
+			oidc:         p.oidc,
 		}); err != nil {
 			return fmt.Errorf("auto-sign: %w", err)
 		}
@@ -304,14 +310,15 @@ func runConnect(p connectParams) error {
 	}
 
 	// Authenticate to Ziti.
-	if p.oidcIssuer != "" {
-		slog.Warn("--oidc-issuer is not yet supported; proceeding with certificate auth", "issuer", p.oidcIssuer)
-	}
 	zitiCtx, err := ziti.NewContextFromFile(p.identityFile)
 	if err != nil {
 		return fmt.Errorf("init Ziti context from %q: %w", p.identityFile, err)
 	}
 	defer zitiCtx.Close()
+
+	if err := addOIDCCredentials(zitiCtx, p.oidc); err != nil {
+		return err
+	}
 
 	if err := zitiCtx.Authenticate(); err != nil {
 		return fmt.Errorf("Ziti authenticate: %w", err)
@@ -693,14 +700,23 @@ it is used as a terminator address on the --ssh-service.`,
 			}
 			_ = config.EnvOrFlag(modeFlag, "ZITI_SSH_MODE", orDefault(cfg.Mode, "shared")) // resolved for future use
 
+			oidcCallbackPort := cfg.OIDC.CallbackPort
+			if oidcCallbackPort == "" {
+				oidcCallbackPort = defaultCallbackPort
+			}
 			return runConnect(connectParams{
 				identityFile: identityFile,
 				caService:    caService,
 				sshService:   sshService,
 				service:      serviceFlag,
 				keyFile:      resolvedKey,
-				oidcIssuer:   oidcIssuerFlag,
-				target:       args[0],
+				oidc: oidcFlowParams{
+					issuer:       orDefault(oidcIssuerFlag, cfg.OIDC.Issuer),
+					clientID:     cfg.OIDC.ClientID,
+					clientSecret: cfg.OIDC.ClientSecret,
+					callbackPort: oidcCallbackPort,
+				},
+				target: args[0],
 			})
 		},
 	}
@@ -709,7 +725,7 @@ it is used as a terminator address on the --ssh-service.`,
 	connectCmd.Flags().StringVar(&serviceFlag, "service", "", "Explicit Ziti service to dial (overrides --ssh-service + target lookup)")
 	connectCmd.Flags().StringVar(&keyFlag, "key", "", "SSH private key path (default: auto-detect from ~/.ssh/)")
 	connectCmd.Flags().StringVar(&modeFlag, "mode", "", "Mode: shared or per-identity (or ZITI_SSH_MODE, informational only for client)")
-	connectCmd.Flags().StringVar(&oidcIssuerFlag, "oidc-issuer", "", "OIDC issuer URL (reserved for future OIDC auth flow support)")
+	connectCmd.Flags().StringVar(&oidcIssuerFlag, "oidc-issuer", "", "OIDC issuer URL; triggers browser-based OIDC auth before connecting (or set oidc.issuer in config)")
 	root.AddCommand(connectCmd)
 
 	// ------------------------------------------------------------------ sign
@@ -738,10 +754,20 @@ Certificates expire after the TTL configured on the CA (default: 8 h). Run
 			if resolvedKey == "" {
 				resolvedKey = cfg.SSHKeyPath
 			}
+			signCallbackPort := cfg.OIDC.CallbackPort
+			if signCallbackPort == "" {
+				signCallbackPort = defaultCallbackPort
+			}
 			return runSign(signParams{
 				identityFile: identityFile,
 				caService:    caService,
 				keyFile:      resolvedKey,
+				oidc: oidcFlowParams{
+					issuer:       cfg.OIDC.Issuer,
+					clientID:     cfg.OIDC.ClientID,
+					clientSecret: cfg.OIDC.ClientSecret,
+					callbackPort: signCallbackPort,
+				},
 			})
 		},
 	}

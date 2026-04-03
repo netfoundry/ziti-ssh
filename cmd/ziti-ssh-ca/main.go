@@ -14,7 +14,10 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -83,6 +86,8 @@ func main() {
 	}
 }
 
+const drainTimeout = 30 * time.Second
+
 func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL time.Duration) error {
 	// Load CA key.
 	signer, caPub, err := ca.LoadKey(caKeyFile)
@@ -109,18 +114,58 @@ func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL t
 	if err != nil {
 		return fmt.Errorf("listen on Ziti service %q: %w", serviceName, err)
 	}
-	defer listener.Close()
 
 	slog.Info("listening", "service", serviceName)
 
+	// Install signal handler. On SIGTERM or SIGINT, close the listener so
+	// that the accept loop exits. In-flight handlers are allowed to finish
+	// for up to drainTimeout before we return.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+
+	var wg sync.WaitGroup
+
+	// Signal watcher: close listener on first signal.
+	go func() {
+		sig := <-sigCh
+		slog.Info("received signal, stopping listener", "signal", sig)
+		if err := listener.Close(); err != nil {
+			slog.Debug("listener close on signal", "err", err)
+		}
+	}()
+
+	// Accept loop.
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			slog.Error("accept failed", "err", err)
-			return fmt.Errorf("accept: %w", err)
+			// listener.Close() causes Accept to return an error — this is the
+			// normal graceful shutdown path.
+			slog.Info("listener closed, draining in-flight connections")
+			break
 		}
-		go handleConn(conn, signer, caPubBytes, principal, mode, certTTL)
+		wg.Add(1)
+		go func(c net.Conn) {
+			defer wg.Done()
+			handleConn(c, signer, caPubBytes, principal, mode, certTTL)
+		}(conn)
 	}
+
+	// Wait for in-flight handlers with a drain timeout.
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		slog.Info("all connections drained, exiting cleanly")
+	case <-time.After(drainTimeout):
+		slog.Warn("drain timeout exceeded; some connections may have been dropped", "timeout", drainTimeout)
+	}
+
+	signal.Stop(sigCh)
+	return nil
 }
 
 // handleConn serves a single incoming Ziti connection.

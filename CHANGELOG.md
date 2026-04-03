@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased] - 2026-04-03
+
+### Added
+
+#### `ziti-ssh` — OIDC authentication
+- Browser-based OIDC authorization code flow (with PKCE when no client secret is set) implemented in `cmd/ziti-ssh/oidc.go`
+- `runOIDCFlow` starts a local HTTP server on the callback port, opens the browser, and blocks until the user completes authentication or the 2-minute timeout elapses
+- `addOIDCCredentials` wires the resulting access token into the Ziti context via `GetCredentials().AddJWT()` before `Authenticate()` — satisfies ext-jwt-signer secondary authentication on the controller
+- Both `connect` and `sign` commands run the OIDC flow when `oidc.issuer` is configured (config file) or `--oidc-issuer` is passed; when no issuer is set the behavior is unchanged
+- OIDC parameters (`issuer`, `client_id`, `client_secret`, `callback_port`) are read from the existing `oidc.*` config file block; `callback_port` defaults to `63275`
+- `--oidc-issuer` flag on `connect` overrides `oidc.issuer` from the config file
+- Dependencies promoted from indirect: `github.com/gorilla/securecookie`, `github.com/zitadel/oidc/v3`
+
+#### `ziti-ssh-ca` and `ziti-ssh-host` — graceful shutdown
+- Both binaries now catch `SIGTERM` and `SIGINT` via `signal.Notify`
+- On signal: the Ziti listener is closed, stopping new connections from being accepted
+- In-flight connections are tracked with a `sync.WaitGroup` and allowed up to 30 seconds to finish before the process exits
+- `ziti-ssh-ca`: WaitGroup wraps each `handleConn` goroutine; drain happens in `run()` after the accept loop exits
+- `ziti-ssh-host`: `host.Proxy` gains an optional `*sync.WaitGroup` parameter (nil-safe); `runProxy` passes a WaitGroup and drains it after the listener closes; signal handling is wired in `runProxy`
+- Per-identity mode: active sessions call `OnDisconnect` via the existing `ProxyHooks` when connections close naturally during the drain window; orphaned users (if the drain timeout fires) are cleaned up by `CleanupOrphans` on the next startup
+
 ## [0.1.0] - 2026-04-01
 
 ### Added

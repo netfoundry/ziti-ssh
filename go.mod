@@ -3,9 +3,11 @@ module github.com/edwardm/ziti-ssh
 go 1.25.0
 
 require (
+	github.com/gorilla/securecookie v1.1.2
 	github.com/openziti/edge-api v0.27.5
 	github.com/openziti/sdk-golang v1.6.0
 	github.com/spf13/cobra v1.10.2
+	github.com/zitadel/oidc/v3 v3.45.5
 	go.yaml.in/yaml/v3 v3.0.4
 	golang.org/x/crypto v0.49.0
 	golang.org/x/term v0.41.0
@@ -48,7 +50,6 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
-	github.com/gorilla/securecookie v1.1.2 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/kataras/go-events v0.0.3 // indirect
@@ -82,7 +83,6 @@ require (
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	github.com/zitadel/logging v0.7.0 // indirect
-	github.com/zitadel/oidc/v3 v3.45.5 // indirect
 	github.com/zitadel/schema v1.3.2 // indirect
 	go.mozilla.org/pkcs7 v0.9.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect

@@ -43,7 +43,12 @@ type ProxyHooks struct {
 // passed to the hooks is extracted from the connection via the dialerNamer
 // interface (edge.Conn.GetDialerIdentityName); if the connection does not
 // implement that interface the hooks are skipped.
-func Proxy(listener net.Listener, target string, hooks *ProxyHooks) {
+//
+// wg is optional. When non-nil, each accepted connection increments wg before
+// starting and decrements it when the connection closes. Pass a WaitGroup to
+// enable graceful drain: after Proxy returns, call wg.Wait() (with a timeout
+// of your choice) to block until all in-flight connections have finished.
+func Proxy(listener net.Listener, target string, hooks *ProxyHooks, wg *sync.WaitGroup) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -51,7 +56,15 @@ func Proxy(listener net.Listener, target string, hooks *ProxyHooks) {
 			slog.Info("proxy listener closed", "err", err)
 			return
 		}
-		go proxyConn(conn, target, hooks)
+		if wg != nil {
+			wg.Add(1)
+		}
+		go func(c net.Conn) {
+			if wg != nil {
+				defer wg.Done()
+			}
+			proxyConn(c, target, hooks)
+		}(conn)
 	}
 }
 

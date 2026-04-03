@@ -16,8 +16,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
@@ -333,8 +337,42 @@ func runProxy(identityFile, sshService, mode string) error {
 		}
 	}
 
+	// Install signal handler. On SIGTERM or SIGINT, close the listener so
+	// that host.Proxy returns. In-flight connections are tracked via wg and
+	// drained for up to drainTimeout before we exit.
+	const drainTimeout = 30 * time.Second
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+
+	var wg sync.WaitGroup
+
+	go func() {
+		sig := <-sigCh
+		slog.Info("received signal, stopping proxy listener", "signal", sig)
+		if err := listener.Close(); err != nil {
+			slog.Debug("listener close on signal", "err", err)
+		}
+	}()
+
 	// host.Proxy blocks until the listener is closed.
-	host.Proxy(listener, defaultSSHTarget, hooks)
+	host.Proxy(listener, defaultSSHTarget, hooks, &wg)
+
+	signal.Stop(sigCh)
+	slog.Info("proxy listener closed, draining in-flight connections")
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		slog.Info("all connections drained, exiting cleanly")
+	case <-time.After(drainTimeout):
+		slog.Warn("drain timeout exceeded; some connections may have been dropped", "timeout", drainTimeout)
+	}
+
 	return nil
 }
 
