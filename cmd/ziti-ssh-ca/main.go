@@ -34,6 +34,9 @@ import (
 	ziti "github.com/openziti/sdk-golang/ziti"
 )
 
+// version is set at build time via -ldflags "-X main.version=<ver>".
+var version = "dev"
+
 func main() {
 	var (
 		identityFlag  string
@@ -44,11 +47,19 @@ func main() {
 		certTTLFlag   string
 		rateLimitFlag string
 		rateBurstFlag string
+		versionFlag   bool
 	)
 
 	root := &cobra.Command{
 		Use:   "ziti-ssh-ca",
 		Short: "SSH Certificate Authority service over OpenZiti",
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			if versionFlag {
+				fmt.Printf("ziti-ssh-ca version %s\n", version)
+				os.Exit(0)
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			identityFile := config.EnvOrFlag(identityFlag, "ZITI_IDENTITY", "")
 			caKeyFile := config.EnvOrFlag(caKeyFlag, "ZITI_CA_KEY", "")
@@ -99,6 +110,16 @@ func main() {
 	root.Flags().StringVar(&certTTLFlag, "cert-ttl", "", "Certificate validity duration (or set ZITI_CERT_TTL, default: 8h)")
 	root.Flags().StringVar(&rateLimitFlag, "rate-limit", "", "Max cert signing requests per minute per identity (or set ZITI_RATE_LIMIT, default: 5)")
 	root.Flags().StringVar(&rateBurstFlag, "rate-burst", "", "Burst allowance for per-identity rate limiter (or set ZITI_RATE_BURST, default: 3)")
+	root.PersistentFlags().BoolVarP(&versionFlag, "version", "V", false, "Print version and exit")
+
+	versionCmd := &cobra.Command{
+		Use:   "version",
+		Short: "Print version information",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Printf("ziti-ssh-ca version %s\n", version)
+		},
+	}
+	root.AddCommand(versionCmd)
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)

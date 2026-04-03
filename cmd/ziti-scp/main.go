@@ -451,6 +451,9 @@ func runSCP(p scpParams) error {
 		p.recursive, p.preserve, p.quiet)
 }
 
+// version is set at build time via -ldflags "-X main.version=<ver>".
+var version = "dev"
+
 // ---------------------------------------------------------------------------
 // main — cobra command tree
 // ---------------------------------------------------------------------------
@@ -459,6 +462,7 @@ func main() {
 	var (
 		identityFlag string
 		configFlag   string
+		versionFlag  bool
 
 		cfg *Config
 	)
@@ -493,9 +497,18 @@ Examples:
 Certificates are obtained from the ziti-ssh-ca service and cached in
 ~/.ssh/<key>-cert.pub, refreshed automatically when fewer than 30 minutes
 of validity remain.`,
-		Args:         cobra.MinimumNArgs(2),
+		Args: func(cmd *cobra.Command, args []string) error {
+			if versionFlag {
+				return nil
+			}
+			return cobra.MinimumNArgs(2)(cmd, args)
+		},
 		SilenceUsage: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			if versionFlag {
+				fmt.Printf("ziti-scp version %s\n", version)
+				os.Exit(0)
+			}
 			cfgPath := configFlag
 			if cfgPath == "" {
 				cfgPath = defaultConfigPath()
@@ -537,6 +550,7 @@ of validity remain.`,
 
 	root.PersistentFlags().StringVar(&identityFlag, "identity", "", "Ziti identity file path (or ZITI_IDENTITY)")
 	root.PersistentFlags().StringVar(&configFlag, "config", "", "Config file path (default: ~/.config/ziti-ssh/config.yaml)")
+	root.PersistentFlags().BoolVarP(&versionFlag, "version", "V", false, "Print version and exit")
 
 	root.Flags().StringVar(&caServiceFlag, "ca-service", "", "CA service name (or ZITI_CA_SERVICE, default: ssh-ca)")
 	root.Flags().StringVar(&sshServiceFlag, "ssh-service", "", "SSH service name (or ZITI_SSH_SERVICE, default: ssh)")
@@ -544,6 +558,16 @@ of validity remain.`,
 	root.Flags().BoolVarP(&recursiveFlag, "recursive", "r", false, "Recursively copy entire directories")
 	root.Flags().BoolVarP(&preserveFlag, "preserve", "p", false, "Preserve file timestamps and permissions")
 	root.Flags().BoolVarP(&quietFlag, "quiet", "q", false, "Suppress progress output")
+
+	// --------------------------------------------------------------- version
+	versionCmd := &cobra.Command{
+		Use:   "version",
+		Short: "Print version information",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Printf("ziti-scp version %s\n", version)
+		},
+	}
+	root.AddCommand(versionCmd)
 
 	// ---------------------------------------------------------------- enroll
 	var (

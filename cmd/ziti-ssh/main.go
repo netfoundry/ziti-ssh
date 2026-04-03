@@ -675,6 +675,9 @@ func runMFARemove(identityFile string) error {
 // main — cobra command tree
 // ---------------------------------------------------------------------------
 
+// version is set at build time via -ldflags "-X main.version=<ver>".
+var version = "dev"
+
 // connectCmd is declared at package scope so that the root command's RunE can
 // reference it after it is assigned in main().
 var connectCmd *cobra.Command
@@ -685,6 +688,7 @@ func main() {
 		identityFlag string
 		configFlag   string
 		verbose      bool
+		versionFlag  bool
 
 		// Populated by PersistentPreRunE from the config file.
 		cfg *Config
@@ -715,6 +719,11 @@ Usage:
   ziti-ssh mfa enable                               # enable MFA TOTP`,
 		Args: cobra.ArbitraryArgs,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			if versionFlag {
+				fmt.Printf("ziti-ssh version %s\n", version)
+				os.Exit(0)
+			}
+
 			// Configure the default slog logger based on the --verbose flag.
 			level := slog.LevelWarn
 			if verbose {
@@ -745,6 +754,7 @@ Usage:
 	root.PersistentFlags().StringVar(&identityFlag, "identity", "", "Ziti identity file path (or ZITI_IDENTITY)")
 	root.PersistentFlags().StringVar(&configFlag, "config", "", "Config file path (default: ~/.config/ziti-ssh/config.yaml)")
 	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose (Info-level) logging")
+	root.PersistentFlags().BoolVarP(&versionFlag, "version", "V", false, "Print version and exit")
 
 	// ---------------------------------------------------------------- connect
 	var (
@@ -965,6 +975,15 @@ Example:
 
 	mfaCmd.AddCommand(mfaEnableCmd, mfaVerifyCmd, mfaRemoveCmd)
 	root.AddCommand(mfaCmd)
+
+	versionCmd := &cobra.Command{
+		Use:   "version",
+		Short: "Print version information",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Printf("ziti-ssh version %s\n", version)
+		},
+	}
+	root.AddCommand(versionCmd)
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)

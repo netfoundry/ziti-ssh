@@ -46,21 +46,33 @@ const (
 	userManagerStateFile  = "/var/lib/ziti-ssh-host/managed-users"
 )
 
+// version is set at build time via -ldflags "-X main.version=<ver>".
+var version = "dev"
+
 func main() {
 	var (
 		identityFlag   string
 		caServiceFlag  string
 		sshServiceFlag string
+		versionFlag    bool
 	)
 
 	root := &cobra.Command{
 		Use:   "ziti-ssh-host",
 		Short: "SSH host daemon for OpenZiti networks",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if versionFlag {
+				fmt.Printf("ziti-ssh-host version %s\n", version)
+				return nil
+			}
+			return cmd.Help()
+		},
 	}
 
 	root.PersistentFlags().StringVar(&identityFlag, "identity", "", "Path to Ziti identity file (or ZITI_IDENTITY, default: "+defaultIdentityFile+")")
 	root.PersistentFlags().StringVar(&caServiceFlag, "ca-service", "", "Ziti service name for the SSH CA (or ZITI_CA_SERVICE, default: "+defaultCaService+")")
 	root.PersistentFlags().StringVar(&sshServiceFlag, "ssh-service", "", "Ziti service name for SSH (or ZITI_SSH_SERVICE, default: "+defaultSSHService+")")
+	root.PersistentFlags().BoolVarP(&versionFlag, "version", "V", false, "Print version and exit")
 
 	// ------------------------------------------------------------------ enroll
 	var jwtPath string
@@ -93,7 +105,15 @@ func main() {
 	}
 	runCmd.Flags().StringVar(&modeFlag, "mode", "", "Principal mode: \"shared\" (default) or \"per-identity\" (or set ZITI_SSH_MODE)")
 
-	root.AddCommand(enrollCmd, runCmd)
+	versionCmd := &cobra.Command{
+		Use:   "version",
+		Short: "Print version information",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Printf("ziti-ssh-host version %s\n", version)
+		},
+	}
+
+	root.AddCommand(enrollCmd, runCmd, versionCmd)
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
