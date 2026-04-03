@@ -1,10 +1,11 @@
 # ziti-ssh
 
-A complete SSH-over-Ziti system: short-lived certificate issuance, host proxy, and a full SSH client — all operating over an [OpenZiti](https://openziti.io) zero-trust network. Three binaries make up the system:
+A complete SSH-over-Ziti system: short-lived certificate issuance, host proxy, a full SSH client, and a file copy tool — all operating over an [OpenZiti](https://openziti.io) zero-trust network. Four binaries make up the system:
 
 - **`ziti-ssh-ca`** — an SSH Certificate Authority service. Ziti identities are used to issue short-lived SSH certificates; no credentials live on SSH hosts, no `authorized_keys` files, and port 22 is never exposed externally.
 - **`ziti-ssh-host`** — enrolls a machine as a Ziti identity, configures `sshd` to trust the CA, and proxies inbound Ziti connections to the local `sshd`.
 - **`ziti-ssh`** — the client binary. Handles identity enrollment, certificate signing, interactive SSH sessions, service listing, and MFA TOTP management — all over the Ziti overlay.
+- **`ziti-scp`** — a file copy tool over the Ziti overlay. Uses the SFTP subsystem. Mirrors `scp(1)` behaviour (upload, download, recursive directory copy, preserve mode). Shares the same identity, certificate, and config infrastructure as `ziti-ssh`.
 
 The Ziti network enforces who can reach which machines; `sshd` on each machine only needs to trust a single CA public key.
 
@@ -39,10 +40,11 @@ git clone https://github.com/netfoundry/ziti-ssh.git
 cd ziti-ssh
 go build -o ziti-ssh-ca   ./cmd/ziti-ssh-ca
 go build -o ziti-ssh-host ./cmd/ziti-ssh-host
-go build -o ziti-ssh       ./cmd/ziti-ssh
+go build -o ziti-ssh      ./cmd/ziti-ssh
+go build -o ziti-scp      ./cmd/ziti-scp
 ```
 
-All binaries are statically linked (no CGO). Copy each binary to the machine where it will run. `ziti-ssh` belongs on user machines; `ziti-ssh-ca` and `ziti-ssh-host` are server-side components.
+All binaries are statically linked (no CGO). Copy each binary to the machine where it will run. `ziti-ssh` and `ziti-scp` belong on user machines; `ziti-ssh-ca` and `ziti-ssh-host` are server-side components.
 
 ---
 
@@ -555,6 +557,73 @@ ziti-ssh ziggy@web-server-prod -- cat /etc/os-release | grep VERSION
 
 The remote process exit code is propagated: if the remote command exits non-zero, `ziti-ssh` exits with that same code. This makes it suitable for use in scripts.
 
+---
+
+## Copying files with `ziti-scp`
+
+`ziti-scp` copies files to and from remote hosts over the same Ziti overlay, using the SFTP subsystem. It mirrors `scp(1)` behaviour. The same identity, SSH certificate, and `~/.config/ziti-ssh/config.yaml` config file are shared with `ziti-ssh` — no additional enrollment is needed.
+
+Remote specifications use the same `[user@]host:path` format as `scp`. The host name is resolved the same way `ziti-ssh` resolves it: first checked against the Ziti service list for a direct match, then used as a terminator address on `--ssh-service` (default: `ssh`).
+
+### Upload (local to remote)
+
+```sh
+# Copy a single file
+ziti-scp /local/file.txt ziggy@web-server-prod:/remote/dir/
+
+# Copy multiple files
+ziti-scp file1.txt file2.txt ziggy@web-server-prod:/remote/dir/
+
+# Recursive directory copy
+ziti-scp -r /local/dir ziggy@web-server-prod:/remote/dir/
+```
+
+### Download (remote to local)
+
+```sh
+# Copy a single file
+ziti-scp ziggy@web-server-prod:/remote/file.txt /local/dir/
+
+# Recursive directory copy
+ziti-scp -r ziggy@web-server-prod:/remote/dir /local/dir/
+```
+
+### Flags
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--recursive` | `-r` | false | Recursively copy entire directories |
+| `--preserve` | `-p` | false | Preserve file timestamps and permissions |
+| `--quiet` | `-q` | false | Suppress progress output |
+| `--identity` | — | `ZITI_IDENTITY` | Ziti identity file path |
+| `--key` | — | auto-detect | SSH private key path |
+| `--ca-service` | — | `ssh-ca` | CA service name |
+| `--ssh-service` | — | `ssh` | SSH service name |
+| `--config` | — | `~/.config/ziti-ssh/config.yaml` | Config file path |
+
+If the certificate is missing or will expire within 30 minutes, `ziti-scp` automatically obtains a fresh certificate from the CA before connecting — the same auto-refresh behaviour as `ziti-ssh connect`.
+
+### Enroll a Ziti identity
+
+`ziti-scp` includes its own `enroll` subcommand for machines where only file copy is needed:
+
+```sh
+ziti-scp enroll --jwt alice.jwt
+# Identity written to ~/.config/ziti-ssh/alice.json
+```
+
+### Config file
+
+`ziti-scp` reads the same `~/.config/ziti-ssh/config.yaml` as `ziti-ssh`. No separate config file is required:
+
+```yaml
+identity: ~/.config/ziti-ssh/alice.json
+ca_service: ssh-ca
+ssh_service: ssh
+```
+
+---
+
 ### Listing accessible services
 
 ```sh
@@ -806,7 +875,10 @@ See [Setting up `ziti-ssh-ca`](#setting-up-ziti-ssh-ca) and [Setting up `ziti-ss
 ziti-ssh/
 ├── cmd/
 │   ├── ziti-ssh/
-│   │   └── main.go         # Full SSH client (connect, sign, enroll, list, mfa)
+│   │   ├── main.go         # Full SSH client (connect, sign, enroll, list, mfa)
+│   │   └── oidc.go         # Browser-based OIDC auth flow
+│   ├── ziti-scp/
+│   │   └── main.go         # SCP-style file copy tool (upload, download, recursive)
 │   ├── ziti-ssh-ca/
 │   │   └── main.go         # CA service entry point
 │   └── ziti-ssh-host/
@@ -815,13 +887,16 @@ ziti-ssh/
 │   ├── ca.go               # CA key loading, cert signing, DeriveUsername
 │   └── ca_test.go
 ├── client/
-│   └── ssh.go              # NewCertSigner, CertNeedsRefresh, RunSession
+│   ├── ssh.go              # NewCertSigner, CertNeedsRefresh, RunSession, RunCommand
+│   └── sftp.go             # RunSFTP — SFTP file copy over net.Conn
 ├── host/
 │   └── host.go             # sshd config, TCP proxy, UserManager
 ├── config/
 │   └── config.go           # Flag/env/default resolution
+├── internal/
+│   └── ratelimit/          # Per-identity token-bucket rate limiter
 ├── scripts/
-│   └── build-deb.sh        # Produces .deb packages for all three binaries
+│   └── build-deb.sh        # Produces .deb packages for all four binaries
 ├── go.mod
 ├── go.sum
 ├── README.md

@@ -7,6 +7,7 @@ require (
 	github.com/gorilla/securecookie v1.1.2
 	github.com/openziti/edge-api v0.27.5
 	github.com/openziti/sdk-golang v1.6.0
+	github.com/pkg/sftp v1.13.10
 	github.com/spf13/cobra v1.10.2
 	github.com/zitadel/oidc/v3 v3.45.5
 	go.yaml.in/yaml/v3 v3.0.4
@@ -55,6 +56,7 @@ require (
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/kataras/go-events v0.0.3 // indirect
+	github.com/kr/fs v0.1.0 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect

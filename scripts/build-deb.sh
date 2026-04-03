@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build-deb.sh — build .deb packages for ziti-ssh-ca, ziti-ssh-host, and ziti-ssh
+# build-deb.sh — build .deb packages for ziti-ssh-ca, ziti-ssh-host, ziti-ssh, and ziti-scp
 #
 # Usage:
 #   ./scripts/build-deb.sh
@@ -9,6 +9,7 @@
 # Produces: dist/ziti-ssh-ca_<version>_amd64.deb
 #           dist/ziti-ssh-host_<version>_amd64.deb
 #           dist/ziti-ssh_<version>_amd64.deb
+#           dist/ziti-scp_<version>_amd64.deb
 
 set -euo pipefail
 
@@ -67,6 +68,12 @@ GOARCH=amd64 GOOS=linux CGO_ENABLED=0 go build \
     -ldflags "-s -w -X main.version=${VERSION}" \
     -o "${STAGING_DIR}/binaries/ziti-ssh" \
     "${REPO_ROOT}/cmd/ziti-ssh"
+
+log "Building ziti-scp..."
+GOARCH=amd64 GOOS=linux CGO_ENABLED=0 go build \
+    -ldflags "-s -w -X main.version=${VERSION}" \
+    -o "${STAGING_DIR}/binaries/ziti-scp" \
+    "${REPO_ROOT}/cmd/ziti-scp"
 
 # ---------------------------------------------------------------------------
 # Package: ziti-ssh-ca
@@ -334,6 +341,56 @@ dpkg-deb --build --root-owner-group "${PKG_DIR}" \
 log "Created ${DIST_DIR}/${PKG}_${VERSION}_${ARCH}.deb"
 
 # ---------------------------------------------------------------------------
+# Package: ziti-scp
+# ---------------------------------------------------------------------------
+
+log "Packaging ziti-scp..."
+
+PKG="ziti-scp"
+PKG_DIR="${STAGING_DIR}/${PKG}"
+
+# Binary
+install -D -m 0755 \
+    "${STAGING_DIR}/binaries/ziti-scp" \
+    "${PKG_DIR}/usr/local/bin/ziti-scp"
+
+# Debian control file
+install -d "${PKG_DIR}/DEBIAN"
+cat > "${PKG_DIR}/DEBIAN/control" <<EOF
+Package: ${PKG}
+Version: ${VERSION}
+Architecture: ${ARCH}
+Maintainer: ${MAINTAINER}
+Depends: openssh-client
+Description: Ziti SCP file copy tool with certificate-based authentication
+ A secure file copy tool that operates over an OpenZiti network using the SFTP
+ subsystem. Mirrors scp(1) behaviour but all traffic flows through the Ziti
+ overlay — port 22 is never exposed externally. Shares the same identity,
+ certificate, and configuration infrastructure as ziti-ssh.
+ .
+ Usage: ziti-scp [flags] <src>... <dst>
+ .
+ Configuration is read from ~/.config/ziti-ssh/config.yaml (XDG_CONFIG_HOME
+ is respected). No long-lived credentials are stored on SSH hosts.
+EOF
+
+# postinst: no systemd service for a CLI tool.
+cat > "${PKG_DIR}/DEBIAN/postinst" <<'EOF'
+#!/bin/sh
+set -e
+
+# ziti-scp shares its config with ziti-ssh at ~/.config/ziti-ssh/config.yaml.
+# Create that directory the first time you run ziti-ssh or ziti-scp, or manually:
+#   mkdir -p ~/.config/ziti-ssh
+EOF
+chmod 0755 "${PKG_DIR}/DEBIAN/postinst"
+
+dpkg-deb --build --root-owner-group "${PKG_DIR}" \
+    "${DIST_DIR}/${PKG}_${VERSION}_${ARCH}.deb"
+
+log "Created ${DIST_DIR}/${PKG}_${VERSION}_${ARCH}.deb"
+
+# ---------------------------------------------------------------------------
 # Copy binaries to repo root for local testing
 # ---------------------------------------------------------------------------
 
@@ -341,6 +398,7 @@ log "Copying binaries to repo root for local testing..."
 cp "${STAGING_DIR}/binaries/ziti-ssh-ca"   "${REPO_ROOT}/ziti-ssh-ca"
 cp "${STAGING_DIR}/binaries/ziti-ssh-host" "${REPO_ROOT}/ziti-ssh-host"
 cp "${STAGING_DIR}/binaries/ziti-ssh"      "${REPO_ROOT}/ziti-ssh"
+cp "${STAGING_DIR}/binaries/ziti-scp"      "${REPO_ROOT}/ziti-scp"
 
 # ---------------------------------------------------------------------------
 # Cleanup and summary
@@ -354,4 +412,4 @@ log "Packages:"
 ls -lh "${DIST_DIR}/"*_"${VERSION}"_"${ARCH}".deb
 log ""
 log "Binaries (repo root):"
-ls -lh "${REPO_ROOT}/ziti-ssh-ca" "${REPO_ROOT}/ziti-ssh-host" "${REPO_ROOT}/ziti-ssh"
+ls -lh "${REPO_ROOT}/ziti-ssh-ca" "${REPO_ROOT}/ziti-ssh-host" "${REPO_ROOT}/ziti-ssh" "${REPO_ROOT}/ziti-scp"

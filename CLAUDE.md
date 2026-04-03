@@ -12,13 +12,15 @@ Both approaches are operationally expensive. The credentials-on-host requirement
 
 ## Solution
 
-Three cooperating binaries:
+Four cooperating binaries:
 
 1. **`ziti-ssh-ca`** — a CA service hosted as a Ziti service that signs short-lived SSH certificates for authorized callers. SSH hosts trust only the CA's public key — not a credential.
 
 2. **`ziti-ssh-host`** — a host daemon that enrolls the host into a Ziti network, configures sshd to trust the CA, and proxies Ziti connections to the local sshd.
 
 3. **`ziti-ssh`** — a full SSH client over OpenZiti. Subcommands: `connect` (default), `sign`, `enroll`, `list`, `mfa`. Obtains and caches SSH certificates from the CA; auto-refreshes when fewer than 30 minutes of validity remain.
+
+4. **`ziti-scp`** — a file copy tool over OpenZiti. Uses the SFTP subsystem over the same Ziti overlay. Mirrors `scp(1)` behaviour: upload, download, recursive directory copy, preserve mode. Shares the same identity, certificate, config infrastructure, and cert auto-refresh logic as `ziti-ssh`.
 
 No credentials on SSH hosts. No API calls at auth time. Port 22 is never exposed externally.
 
@@ -67,8 +69,10 @@ Any Ziti identity that can dial the `ssh-ca` service is authorized to receive a 
 ### Short-lived certificates (8h TTL)
 Certificates expire after 8 hours. No revocation infrastructure needed — compromised or removed identities lose access at expiry without any intervention on SSH hosts.
 
-### `ziti-ssh` as the client
-`ziti-ssh` is the client-side tool. It handles Ziti dialing, SSH certificate management, and interactive SSH sessions. The `sign` subcommand fetches certs from the CA; the `connect` subcommand (default) auto-refreshes the cert if needed and then opens an SSH session. The `enroll`, `list`, and `mfa` subcommands cover the full Ziti identity lifecycle on user machines.
+### `ziti-ssh` and `ziti-scp` as client tools
+`ziti-ssh` is the interactive client. It handles Ziti dialing, SSH certificate management, and interactive SSH sessions. The `sign` subcommand fetches certs from the CA; the `connect` subcommand (default) auto-refreshes the cert if needed and then opens an SSH session. The `enroll`, `list`, and `mfa` subcommands cover the full Ziti identity lifecycle on user machines.
+
+`ziti-scp` is the file copy companion. It uses the same identity, cert, and config infrastructure as `ziti-ssh` but opens an SFTP subsystem session instead of an interactive shell. The same cert auto-refresh logic applies (30-minute threshold), and the same Ziti service resolution (direct service name vs. terminator address on `--ssh-service`) is used.
 
 ### Addressable terminators for host routing
 Each `ziti-ssh-host` instance listens on the `ssh` Ziti service with its identity name as the terminator address. zssh dials the `ssh` service specifying the target identity name — no hostname resolution, no config file required.
@@ -96,11 +100,20 @@ Five subcommands:
 
 Config file at `~/.config/ziti-ssh/config.yaml` (XDG_CONFIG_HOME respected). Fields: `identity`, `ca_service`, `ssh_service`, `ssh_key_path`, `mode`, `oidc.*`. Three-tier precedence: CLI flag > config file > default.
 
-### SSH Session Library (`client/ssh.go`)
+### SSH Session / SFTP Library (`client/ssh.go`, `client/sftp.go`)
 
 - `NewCertSigner(keyPath string) (ssh.Signer, error)` — loads key and cert; returns `ssh.CertSigner` if cert present.
 - `CertNeedsRefresh(certPath string) bool` — true if cert absent or expires within 30 min.
 - `RunSession(conn net.Conn, user, host string, signer ssh.Signer) error` — PTY SSH session over an existing `net.Conn`.
+- `RunSFTP(conn, user, host, signer, isUpload, localPaths, remotePath, recursive, preserve, quiet) error` — SFTP file copy over an existing `net.Conn`; uses `github.com/pkg/sftp`.
+
+### File Copy Tool (`ziti-scp`)
+
+- Parses `[user@]host:path` remote specs and bare local paths from positional arguments (last arg is destination).
+- Same cert auto-refresh (30-minute threshold) and Ziti dial logic as `ziti-ssh`.
+- Flags: `-r` (recursive), `-p` (preserve timestamps/permissions), `-q` (quiet).
+- `enroll` subcommand for identity enrollment (mirrors `ziti-ssh enroll`).
+- Shared config file: `~/.config/ziti-ssh/config.yaml`.
 
 ### CA Service (`ziti-ssh-ca`)
 - Binds to a named Ziti service (default: `ssh-ca`)
@@ -249,10 +262,13 @@ The key file should remain mode 0600 and owned by the controller service user. `
 ## Project Structure
 
 ```
-ziti-ssh-ca/
+ziti-ssh/
 ├── cmd/
 │   ├── ziti-ssh/
-│   │   └── main.go         # Full SSH client (connect, sign, enroll, list, mfa)
+│   │   ├── main.go         # Full SSH client (connect, sign, enroll, list, mfa)
+│   │   └── oidc.go         # Browser-based OIDC auth flow
+│   ├── ziti-scp/
+│   │   └── main.go         # SCP-style file copy tool (upload, download, recursive)
 │   ├── ziti-ssh-ca/
 │   │   └── main.go         # CA service entry point
 │   └── ziti-ssh-host/
@@ -260,11 +276,14 @@ ziti-ssh-ca/
 ├── ca/
 │   └── ca.go               # CA key loading and cert signing
 ├── client/
-│   └── ssh.go              # NewCertSigner, CertNeedsRefresh, RunSession
+│   ├── ssh.go              # NewCertSigner, CertNeedsRefresh, RunSession, RunCommand
+│   └── sftp.go             # RunSFTP — SFTP file copy over net.Conn
 ├── host/
 │   └── host.go             # sshd config, proxy logic
 ├── config/
 │   └── config.go           # Shared configuration (flags + env vars)
+├── internal/
+│   └── ratelimit/          # Per-identity token-bucket rate limiter
 ├── go.mod
 ├── go.sum
 └── CLAUDE.md

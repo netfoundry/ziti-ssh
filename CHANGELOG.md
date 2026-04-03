@@ -6,6 +6,40 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+#### `ziti-scp` — new binary: SCP-style file copy over the Ziti overlay
+- New binary at `cmd/ziti-scp/main.go` mirroring `scp(1)` behaviour over the Ziti overlay using the SFTP subsystem
+- Parses `[user@]host:path` remote specs and bare local paths from positional arguments; the last argument is always the destination (same convention as `scp` and `rsync`)
+- Upload (local → remote) and download (remote → local) in a single binary; direction is determined by which side carries the `host:path` form
+- `-r` / `--recursive` flag for recursive directory copy
+- `-p` / `--preserve` flag to copy file timestamps and permissions (uses SFTP `Chtimes` on remote, `os.Chtimes` locally)
+- `-q` / `--quiet` flag to suppress per-file progress output
+- scp-style progress reporting to stderr: filename, percentage, bytes transferred, transfer rate, and ETA; updates at 500ms intervals, final line at 100%
+- Same cert auto-refresh logic as `ziti-ssh connect`: calls `client.CertNeedsRefresh` and auto-signs via the CA when fewer than 30 minutes of validity remain
+- Same Ziti service resolution: checks the service list for a direct service-name match, falls back to terminator address on `--ssh-service`
+- Same config file (`~/.config/ziti-ssh/config.yaml`) and same flag/env/default precedence via `config.EnvOrFlag`
+- `enroll` subcommand for identity enrollment (mirrors `ziti-ssh enroll`; writes identity JSON to `~/.config/ziti-ssh/<name>.json` by default)
+- Flags: `--identity` / `ZITI_IDENTITY`, `--ca-service` / `ZITI_CA_SERVICE`, `--ssh-service` / `ZITI_SSH_SERVICE`, `--key`, `--config`
+
+#### `client/sftp.go` — new library: SFTP file copy over net.Conn
+- `RunSFTP(conn, user, host, signer, isUpload, localPaths, remotePath, recursive, preserve, quiet) error` added to the `client` package
+- Establishes an SSH client connection over the pre-dialled `net.Conn` (same `ssh.ClientConfig` pattern as `RunSession` / `RunCommand`, with `InsecureIgnoreHostKey` — host identity is proven by Ziti mTLS)
+- Opens SFTP subsystem via `sftp.NewClient(sshClient)` from `github.com/pkg/sftp v1.13.10`
+- Upload path: walks local paths with `os.ReadDir`; creates remote directories with `sftp.MkdirAll`; writes files with `sftp.OpenFile(..., O_WRONLY|O_CREATE|O_TRUNC)`; applies chmod/chtimes when `preserve` is set
+- Download path: reads remote directories with `sftpClient.ReadDir`; creates local directories with `os.MkdirAll`; writes files with `os.OpenFile(..., O_WRONLY|O_CREATE|O_TRUNC)`; applies `os.Chtimes` when `preserve` is set
+- `progressWriter` wraps the destination `io.Writer`, tracks bytes written, and prints rate/ETA to stderr at 500ms intervals; `printFinalProgress` emits the 100% completion line
+- Helper functions: `formatBytes` (SI prefixes), `formatBytesRate`, `formatDuration`
+
+#### Build & packaging
+- `github.com/pkg/sftp v1.13.10` added as a direct dependency (`go.mod`); `github.com/kr/fs v0.1.0` added as indirect
+- `scripts/build-deb.sh` extended with a `ziti-scp` build step and a new `ziti-scp` Debian package section (control file, postinst); binary copied to repo root alongside the other three
+- `dist/ziti-scp_<version>_amd64.deb` produced by the build script
+
+#### Documentation
+- README: four-binary introduction, `go build` example updated, new "Copying files with `ziti-scp`" section with upload/download/recursive examples, flags table, config file note, and `enroll` subcommand note; project structure updated
+- CLAUDE.md: solution updated to four binaries; `ziti-ssh` and `ziti-scp` design rationale section; `client/sftp.go` added to component descriptions; project structure diagram updated
+
+### Added
+
 #### `ziti-ssh` — non-interactive remote command execution
 - `client.RunCommand(conn, user, host, command, signer)` added to `client/ssh.go`: sets up the SSH client connection identically to `RunSession` but does not request a PTY; wires `os.Stdin`/`os.Stdout`/`os.Stderr` directly; executes the command via `session.Run`; propagates the remote exit code via `os.Exit` when the error is `*ssh.ExitError`, and returns other errors normally
 - `connectParams.command` field added; `runConnect` branches on whether `command` is non-empty — calls `client.RunCommand` if so, `client.RunSession` otherwise
