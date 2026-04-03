@@ -6,6 +6,18 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+#### `ziti-ssh-ca` — per-identity rate limiting
+- `internal/ratelimit`: new package providing a per-identity token-bucket rate limiter backed by `golang.org/x/time/rate`
+- Each Ziti identity gets an independent `rate.Limiter`; one abusive caller cannot exhaust the allowance of any other identity
+- Idle entries are evicted by a background goroutine after 10 minutes of inactivity, bounding memory growth over long uptimes; the goroutine is stopped cleanly on graceful shutdown via a stop channel
+- Rate limiting applies only to cert signing requests; CA public key fetches (empty-line requests) are not rate-limited
+- When a request is denied, the client receives `error: rate limit exceeded\n` and a `Warn`-level log line records the identity name server-side
+- Two new flags and env vars following the existing `EnvOrFlag` pattern:
+  - `--rate-limit` / `ZITI_RATE_LIMIT`: maximum cert signing requests per minute per identity (default `5`; accepts decimal values for sub-minute rates)
+  - `--rate-burst` / `ZITI_RATE_BURST`: burst allowance (default `3`)
+- `golang.org/x/time v0.12.0` promoted from transitive to direct dependency in `go.mod`
+- Unit tests in `internal/ratelimit/ratelimit_test.go`: within-burst, burst-exhaustion, per-identity isolation, and idle-eviction cases
+
 #### `ziti-ssh` — OIDC authentication
 - Browser-based OIDC authorization code flow (with PKCE when no client secret is set) implemented in `cmd/ziti-ssh/oidc.go`
 - `runOIDCFlow` starts a local HTTP server on the callback port, opens the browser, and blocks until the user completes authentication or the 2-minute timeout elapses
