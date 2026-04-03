@@ -288,3 +288,13 @@ ziti-ssh/
 ├── go.sum
 └── CLAUDE.md
 ```
+
+## Documentation
+
+| File | Purpose |
+|---|---|
+| `README.md` | Project overview, prerequisites, building |
+| `docs/provisioning.md` | Ziti network setup, per-component installation |
+| `docs/usage.md` | End-user guide: certs, connecting, file copy, MFA |
+| `docs/configuration.md` | Full flag/env/config reference for all binaries |
+| `docs/operations.md` | Modes, CA key rotation, graceful shutdown |
