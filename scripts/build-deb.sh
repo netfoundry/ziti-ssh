@@ -102,7 +102,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
 User=ziti
 EnvironmentFile=/etc/ziti-ssh-ca/env
 ExecStart=/usr/local/bin/ziti-ssh-ca
@@ -203,7 +203,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
 # Runs as root: writes /etc/ssh/ during enrollment and proxies connections
 # to the local sshd. The identity file is stored in /etc/ziti-ssh-host/
 # (mode 0700) and is only readable by root.

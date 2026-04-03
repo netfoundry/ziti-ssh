@@ -2,6 +2,7 @@
 /ziti-ssh-ca
 /ziti-ssh-host
 /ziti-ssh
+/ziti-scp
 
 # Build output
 dist/
