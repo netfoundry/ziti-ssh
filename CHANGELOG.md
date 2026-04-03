@@ -6,6 +6,18 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+#### All four binaries — configurable Ziti network operation timeouts
+
+- `--ziti-timeout` / `ZITI_TIMEOUT` persistent flag added to all four binaries (`ziti-ssh`, `ziti-ssh-ca`, `ziti-ssh-host`, `ziti-scp`), following the existing `config.EnvOrFlag` pattern; accepts any `time.Duration` string (e.g. `30s`, `1m`); default `30s`; must be > 0
+- `config.RunWithTimeout` helper added to `config/config.go`: runs a `func() error` in a goroutine with a `time.After` timeout; returns a clear user-facing error on timeout (not a raw context deadline error)
+- `config.ZitiTimeoutErr` returns the standard timeout error message: `timed out after <duration> waiting for Ziti network during <op> — check that the controller is reachable and the identity is valid`
+- `zitiCtx.Authenticate()` wrapped with `config.RunWithTimeout` in all four binaries
+- `zitiCtx.Listen()` / `zitiCtx.ListenWithOptions()` wrapped with `config.RunWithTimeout` in `ziti-ssh-ca` and `ziti-ssh-host`
+- `zitiCtx.Dial()` / `zitiCtx.DialWithOptions()` replaced with `zitiCtx.DialContext()` / `zitiCtx.DialContextWithOptions()` (context-aware SDK variants) in `ziti-ssh` and `ziti-scp`; context is a `context.WithTimeout` derived from the configured duration; a clear timeout error is returned if the context deadline fires
+- `docs/configuration.md` updated with `--ziti-timeout` / `ZITI_TIMEOUT` in all four binary sections; new `ziti-scp` section added
+
+### Added
+
 #### `ziti-scp` — new binary: SCP-style file copy over the Ziti overlay
 - New binary at `cmd/ziti-scp/main.go` mirroring `scp(1)` behaviour over the Ziti overlay using the SFTP subsystem
 - Parses `[user@]host:path` remote specs and bare local paths from positional arguments; the last argument is always the destination (same convention as `scp` and `rsync`)

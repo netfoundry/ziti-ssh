@@ -39,15 +39,16 @@ var version = "dev"
 
 func main() {
 	var (
-		identityFlag  string
-		caKeyFlag     string
-		serviceFlag   string
-		principalFlag string
-		modeFlag      string
-		certTTLFlag   string
-		rateLimitFlag string
-		rateBurstFlag string
-		versionFlag   bool
+		identityFlag    string
+		caKeyFlag       string
+		serviceFlag     string
+		principalFlag   string
+		modeFlag        string
+		certTTLFlag     string
+		rateLimitFlag   string
+		rateBurstFlag   string
+		zitiTimeoutFlag string
+		versionFlag     bool
 	)
 
 	root := &cobra.Command{
@@ -69,6 +70,7 @@ func main() {
 			certTTLStr := config.EnvOrFlag(certTTLFlag, "ZITI_CERT_TTL", "8h")
 			rateLimitStr := config.EnvOrFlag(rateLimitFlag, "ZITI_RATE_LIMIT", "5")
 			rateBurstStr := config.EnvOrFlag(rateBurstFlag, "ZITI_RATE_BURST", "3")
+			zitiTimeoutStr := config.EnvOrFlag(zitiTimeoutFlag, "ZITI_TIMEOUT", "30s")
 
 			if identityFile == "" {
 				return fmt.Errorf("--identity (or ZITI_IDENTITY) is required")
@@ -88,6 +90,14 @@ func main() {
 				return fmt.Errorf("--cert-ttl (or ZITI_CERT_TTL) must be greater than zero, got %q", certTTLStr)
 			}
 
+			zitiTimeout, err := time.ParseDuration(zitiTimeoutStr)
+			if err != nil {
+				return fmt.Errorf("--ziti-timeout (or ZITI_TIMEOUT): invalid duration %q: %w", zitiTimeoutStr, err)
+			}
+			if zitiTimeout <= 0 {
+				return fmt.Errorf("--ziti-timeout (or ZITI_TIMEOUT) must be greater than zero, got %q", zitiTimeoutStr)
+			}
+
 			rateLimit, err := strconv.ParseFloat(rateLimitStr, 64)
 			if err != nil || rateLimit <= 0 {
 				return fmt.Errorf("--rate-limit (or ZITI_RATE_LIMIT): must be a positive number, got %q", rateLimitStr)
@@ -98,7 +108,7 @@ func main() {
 				return fmt.Errorf("--rate-burst (or ZITI_RATE_BURST): must be a positive integer, got %q", rateBurstStr)
 			}
 
-			return run(identityFile, caKeyFile, serviceName, principal, mode, certTTL, rateLimit, rateBurst)
+			return run(identityFile, caKeyFile, serviceName, principal, mode, certTTL, rateLimit, rateBurst, zitiTimeout)
 		},
 	}
 
@@ -110,6 +120,7 @@ func main() {
 	root.Flags().StringVar(&certTTLFlag, "cert-ttl", "", "Certificate validity duration (or set ZITI_CERT_TTL, default: 8h)")
 	root.Flags().StringVar(&rateLimitFlag, "rate-limit", "", "Max cert signing requests per minute per identity (or set ZITI_RATE_LIMIT, default: 5)")
 	root.Flags().StringVar(&rateBurstFlag, "rate-burst", "", "Burst allowance for per-identity rate limiter (or set ZITI_RATE_BURST, default: 3)")
+	root.PersistentFlags().StringVar(&zitiTimeoutFlag, "ziti-timeout", "", "Timeout for Ziti network operations (or set ZITI_TIMEOUT, default: 30s)")
 	root.PersistentFlags().BoolVarP(&versionFlag, "version", "V", false, "Print version and exit")
 
 	versionCmd := &cobra.Command{
@@ -133,7 +144,7 @@ const drainTimeout = 30 * time.Second
 // burst window.
 const idleLimiterTTL = 10 * time.Minute
 
-func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL time.Duration, ratePerMinute float64, rateBurst int) error {
+func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL time.Duration, ratePerMinute float64, rateBurst int, zitiTimeout time.Duration) error {
 	// Load CA key.
 	signer, caPub, err := ca.LoadKey(caKeyFile)
 	if err != nil {
@@ -151,14 +162,21 @@ func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL t
 	}
 	defer zitiCtx.Close()
 
-	if err := zitiCtx.Authenticate(); err != nil {
-		return fmt.Errorf("Ziti authenticate: %w", err)
+	if err := config.RunWithTimeout(zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
+		return err
 	}
 
 	// Bind the service.
-	listener, err := zitiCtx.Listen(serviceName)
-	if err != nil {
-		return fmt.Errorf("listen on Ziti service %q: %w", serviceName, err)
+	var listener zitiEdge.Listener
+	if err := config.RunWithTimeout(zitiTimeout, "listen", func() error {
+		var listenErr error
+		listener, listenErr = zitiCtx.Listen(serviceName)
+		if listenErr != nil {
+			return fmt.Errorf("listen on Ziti service %q: %w", serviceName, listenErr)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	slog.Info("listening", "service", serviceName)

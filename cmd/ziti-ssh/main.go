@@ -16,6 +16,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -183,6 +184,7 @@ type signParams struct {
 	caService    string
 	keyFile      string
 	oidc         oidcFlowParams
+	zitiTimeout  time.Duration
 	verbose      bool // when false, suppress "Certificate written" and showCertDetails
 }
 
@@ -216,13 +218,18 @@ func runSign(p signParams) error {
 		return err
 	}
 
-	if err := zitiCtx.Authenticate(); err != nil {
-		return fmt.Errorf("Ziti authenticate: %w", err)
+	if err := config.RunWithTimeout(p.zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
+		return err
 	}
 
 	slog.Debug("dialing CA service", "service", p.caService)
-	conn, err := zitiCtx.Dial(p.caService)
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), p.zitiTimeout)
+	defer dialCancel()
+	conn, err := zitiCtx.DialContext(dialCtx, p.caService)
 	if err != nil {
+		if dialCtx.Err() != nil {
+			return config.ZitiTimeoutErr("dial", p.zitiTimeout)
+		}
 		return fmt.Errorf("dial Ziti service %q: %w", p.caService, err)
 	}
 	defer conn.Close()
@@ -278,6 +285,7 @@ type connectParams struct {
 	service      string // explicit override (--service)
 	keyFile      string
 	oidc         oidcFlowParams
+	zitiTimeout  time.Duration
 	target       string // raw "[user@]target" argument
 	command      string // optional remote command; empty means interactive shell
 	verbose      bool
@@ -343,6 +351,7 @@ func runConnect(p connectParams) error {
 			caService:    p.caService,
 			keyFile:      privKeyPath,
 			oidc:         p.oidc,
+			zitiTimeout:  p.zitiTimeout,
 			verbose:      false,
 		}); err != nil {
 			return fmt.Errorf("auto-sign: %w", err)
@@ -379,8 +388,8 @@ func runConnect(p connectParams) error {
 		return err
 	}
 
-	if err := zitiCtx.Authenticate(); err != nil {
-		return fmt.Errorf("Ziti authenticate: %w", err)
+	if err := config.RunWithTimeout(p.zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
+		return err
 	}
 
 	// Resolve the Ziti service and optional terminator address.
@@ -401,6 +410,9 @@ func runConnect(p connectParams) error {
 		fmt.Fprintf(os.Stderr, "%-12s %s @ %s\n", "Connecting:", username, host)
 	}
 
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), p.zitiTimeout)
+	defer dialCancel()
+
 	var netConn net.Conn
 
 	if terminatorAddr != "" {
@@ -408,12 +420,15 @@ func runConnect(p connectParams) error {
 		dialOpts := &ziti.DialOptions{
 			Identity: terminatorAddr,
 		}
-		netConn, err = zitiCtx.DialWithOptions(dialService, dialOpts)
+		netConn, err = zitiCtx.DialContextWithOptions(dialCtx, dialService, dialOpts)
 	} else {
 		slog.Debug("dialing SSH service", "service", dialService)
-		netConn, err = zitiCtx.Dial(dialService)
+		netConn, err = zitiCtx.DialContext(dialCtx, dialService)
 	}
 	if err != nil {
+		if dialCtx.Err() != nil {
+			return config.ZitiTimeoutErr("dial", p.zitiTimeout)
+		}
 		return fmt.Errorf("dial Ziti service %q: %w", dialService, err)
 	}
 
@@ -489,15 +504,15 @@ func defaultEnrollOut(jwtPath string) string {
 // list subcommand logic
 // ---------------------------------------------------------------------------
 
-func runList(identityFile string) error {
+func runList(identityFile string, zitiTimeout time.Duration) error {
 	zitiCtx, err := ziti.NewContextFromFile(identityFile)
 	if err != nil {
 		return fmt.Errorf("init Ziti context from %q: %w", identityFile, err)
 	}
 	defer zitiCtx.Close()
 
-	if err := zitiCtx.Authenticate(); err != nil {
-		return fmt.Errorf("Ziti authenticate: %w", err)
+	if err := config.RunWithTimeout(zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
+		return err
 	}
 
 	services, err := zitiCtx.GetServices()
@@ -557,7 +572,7 @@ func mfaTotpListener(_ ziti.Context, _ *rest_model.AuthQueryDetail, response zit
 	}
 }
 
-func runMFAEnable(identityFile string, showQR bool) error {
+func runMFAEnable(identityFile string, showQR bool, zitiTimeout time.Duration) error {
 	zitiCtx, err := ziti.NewContextFromFile(identityFile)
 	if err != nil {
 		return fmt.Errorf("init Ziti context from %q: %w", identityFile, err)
@@ -567,8 +582,8 @@ func runMFAEnable(identityFile string, showQR bool) error {
 	// Register MFA listener before authenticating in case it fires during auth.
 	zitiCtx.Events().AddMfaTotpCodeListener(mfaTotpListener)
 
-	if err := zitiCtx.Authenticate(); err != nil {
-		return fmt.Errorf("Ziti authenticate: %w", err)
+	if err := config.RunWithTimeout(zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
+		return err
 	}
 
 	deet, err := zitiCtx.EnrollZitiMfa()
@@ -622,7 +637,7 @@ func runMFAEnable(identityFile string, showQR bool) error {
 	return nil
 }
 
-func runMFAVerify(identityFile string) error {
+func runMFAVerify(identityFile string, zitiTimeout time.Duration) error {
 	zitiCtx, err := ziti.NewContextFromFile(identityFile)
 	if err != nil {
 		return fmt.Errorf("init Ziti context from %q: %w", identityFile, err)
@@ -631,15 +646,15 @@ func runMFAVerify(identityFile string) error {
 
 	zitiCtx.Events().AddMfaTotpCodeListener(mfaTotpListener)
 
-	if err := zitiCtx.Authenticate(); err != nil {
-		return fmt.Errorf("Ziti authenticate: %w", err)
+	if err := config.RunWithTimeout(zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
+		return err
 	}
 
 	fmt.Println("MFA TOTP verification succeeded.")
 	return nil
 }
 
-func runMFARemove(identityFile string) error {
+func runMFARemove(identityFile string, zitiTimeout time.Duration) error {
 	zitiCtx, err := ziti.NewContextFromFile(identityFile)
 	if err != nil {
 		return fmt.Errorf("init Ziti context from %q: %w", identityFile, err)
@@ -664,8 +679,8 @@ func runMFARemove(identityFile string) error {
 		}()
 	})
 
-	if err := zitiCtx.Authenticate(); err != nil {
-		return fmt.Errorf("Ziti authenticate: %w", err)
+	if err := config.RunWithTimeout(zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
+		return err
 	}
 
 	return <-done
@@ -685,13 +700,15 @@ var connectCmd *cobra.Command
 func main() {
 	var (
 		// Persistent flags (available to every subcommand).
-		identityFlag string
-		configFlag   string
-		verbose      bool
-		versionFlag  bool
+		identityFlag    string
+		configFlag      string
+		zitiTimeoutFlag string
+		verbose         bool
+		versionFlag     bool
 
 		// Populated by PersistentPreRunE from the config file.
-		cfg *Config
+		cfg         *Config
+		zitiTimeout time.Duration
 	)
 
 	root := &cobra.Command{
@@ -740,6 +757,15 @@ Usage:
 			if err != nil {
 				return err
 			}
+
+			zitiTimeoutStr := config.EnvOrFlag(zitiTimeoutFlag, "ZITI_TIMEOUT", "30s")
+			zitiTimeout, err = time.ParseDuration(zitiTimeoutStr)
+			if err != nil {
+				return fmt.Errorf("--ziti-timeout (or ZITI_TIMEOUT): invalid duration %q: %w", zitiTimeoutStr, err)
+			}
+			if zitiTimeout <= 0 {
+				return fmt.Errorf("--ziti-timeout (or ZITI_TIMEOUT) must be greater than zero, got %q", zitiTimeoutStr)
+			}
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -753,6 +779,7 @@ Usage:
 
 	root.PersistentFlags().StringVar(&identityFlag, "identity", "", "Ziti identity file path (or ZITI_IDENTITY)")
 	root.PersistentFlags().StringVar(&configFlag, "config", "", "Config file path (default: ~/.config/ziti-ssh/config.yaml)")
+	root.PersistentFlags().StringVar(&zitiTimeoutFlag, "ziti-timeout", "", "Timeout for Ziti network operations (or ZITI_TIMEOUT, default: 30s)")
 	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose (Info-level) logging")
 	root.PersistentFlags().BoolVarP(&versionFlag, "version", "V", false, "Print version and exit")
 
@@ -824,9 +851,10 @@ Examples:
 					clientSecret: cfg.OIDC.ClientSecret,
 					callbackPort: oidcCallbackPort,
 				},
-				target:   args[0],
-				command:  remoteCommand,
-				verbose:  verbose,
+				zitiTimeout: zitiTimeout,
+				target:      args[0],
+				command:     remoteCommand,
+				verbose:     verbose,
 			})
 		},
 	}
@@ -878,7 +906,8 @@ Certificates expire after the TTL configured on the CA (default: 8 h). Run
 					clientSecret: cfg.OIDC.ClientSecret,
 					callbackPort: signCallbackPort,
 				},
-				verbose: true,
+				zitiTimeout: zitiTimeout,
+				verbose:     true,
 			})
 		},
 	}
@@ -924,7 +953,7 @@ Example:
 			if identityFile == "" {
 				return fmt.Errorf("--identity (or ZITI_IDENTITY) is required")
 			}
-			return runList(identityFile)
+			return runList(identityFile, zitiTimeout)
 		},
 	}
 	root.AddCommand(listCmd)
@@ -944,7 +973,7 @@ Example:
 			if identityFile == "" {
 				return fmt.Errorf("--identity (or ZITI_IDENTITY) is required")
 			}
-			return runMFAEnable(identityFile, mfaShowQR)
+			return runMFAEnable(identityFile, mfaShowQR, zitiTimeout)
 		},
 	}
 	mfaEnableCmd.Flags().BoolVarP(&mfaShowQR, "qr-code", "q", false, "Print the provisioning URL (paste into a TOTP app or QR-code generator)")
@@ -957,7 +986,7 @@ Example:
 			if identityFile == "" {
 				return fmt.Errorf("--identity (or ZITI_IDENTITY) is required")
 			}
-			return runMFAVerify(identityFile)
+			return runMFAVerify(identityFile, zitiTimeout)
 		},
 	}
 
@@ -969,7 +998,7 @@ Example:
 			if identityFile == "" {
 				return fmt.Errorf("--identity (or ZITI_IDENTITY) is required")
 			}
-			return runMFARemove(identityFile)
+			return runMFARemove(identityFile, zitiTimeout)
 		},
 	}
 

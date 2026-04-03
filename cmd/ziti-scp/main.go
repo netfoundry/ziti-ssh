@@ -23,6 +23,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -31,6 +32,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"time"
 
 	ziti "github.com/openziti/sdk-golang/ziti"
 	"github.com/openziti/sdk-golang/ziti/enroll"
@@ -186,6 +188,7 @@ type signParams struct {
 	caService    string
 	keyFile      string
 	oidcIssuer   string
+	zitiTimeout  time.Duration
 }
 
 func runSign(p signParams) error {
@@ -212,13 +215,18 @@ func runSign(p signParams) error {
 	}
 	defer zitiCtx.Close()
 
-	if err := zitiCtx.Authenticate(); err != nil {
-		return fmt.Errorf("Ziti authenticate: %w", err)
+	if err := config.RunWithTimeout(p.zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
+		return err
 	}
 
 	slog.Info("dialing CA service", "service", p.caService)
-	conn, err := zitiCtx.Dial(p.caService)
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), p.zitiTimeout)
+	defer dialCancel()
+	conn, err := zitiCtx.DialContext(dialCtx, p.caService)
 	if err != nil {
+		if dialCtx.Err() != nil {
+			return config.ZitiTimeoutErr("dial", p.zitiTimeout)
+		}
 		return fmt.Errorf("dial Ziti service %q: %w", p.caService, err)
 	}
 	defer conn.Close()
@@ -316,6 +324,7 @@ type scpParams struct {
 	recursive    bool
 	preserve     bool
 	quiet        bool
+	zitiTimeout  time.Duration
 	// srcs and dst are the raw argument strings as provided by the user.
 	srcs []string
 	dst  string
@@ -382,6 +391,7 @@ func runSCP(p scpParams) error {
 			identityFile: p.identityFile,
 			caService:    p.caService,
 			keyFile:      privKeyPath,
+			zitiTimeout:  p.zitiTimeout,
 		}); err != nil {
 			return fmt.Errorf("auto-sign: %w", err)
 		}
@@ -399,8 +409,8 @@ func runSCP(p scpParams) error {
 	}
 	defer zitiCtx.Close()
 
-	if err := zitiCtx.Authenticate(); err != nil {
-		return fmt.Errorf("Ziti authenticate: %w", err)
+	if err := config.RunWithTimeout(p.zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
+		return err
 	}
 
 	// Resolve the Ziti service and optional terminator address.
@@ -412,18 +422,24 @@ func runSCP(p scpParams) error {
 		terminatorAddr = ""
 	}
 
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), p.zitiTimeout)
+	defer dialCancel()
+
 	var netConn net.Conn
 	if terminatorAddr != "" {
 		slog.Info("dialing SSH service", "service", dialService, "terminator", terminatorAddr)
 		dialOpts := &ziti.DialOptions{
 			Identity: terminatorAddr,
 		}
-		netConn, err = zitiCtx.DialWithOptions(dialService, dialOpts)
+		netConn, err = zitiCtx.DialContextWithOptions(dialCtx, dialService, dialOpts)
 	} else {
 		slog.Info("dialing SSH service", "service", dialService)
-		netConn, err = zitiCtx.Dial(dialService)
+		netConn, err = zitiCtx.DialContext(dialCtx, dialService)
 	}
 	if err != nil {
+		if dialCtx.Err() != nil {
+			return config.ZitiTimeoutErr("dial", p.zitiTimeout)
+		}
 		return fmt.Errorf("dial Ziti service %q: %w", dialService, err)
 	}
 
@@ -460,11 +476,13 @@ var version = "dev"
 
 func main() {
 	var (
-		identityFlag string
-		configFlag   string
-		versionFlag  bool
+		identityFlag    string
+		configFlag      string
+		zitiTimeoutFlag string
+		versionFlag     bool
 
-		cfg *Config
+		cfg         *Config
+		zitiTimeout time.Duration
 	)
 
 	root := &cobra.Command{
@@ -515,7 +533,19 @@ of validity remain.`,
 			}
 			var err error
 			cfg, err = loadConfig(cfgPath)
-			return err
+			if err != nil {
+				return err
+			}
+
+			zitiTimeoutStr := config.EnvOrFlag(zitiTimeoutFlag, "ZITI_TIMEOUT", "30s")
+			zitiTimeout, err = time.ParseDuration(zitiTimeoutStr)
+			if err != nil {
+				return fmt.Errorf("--ziti-timeout (or ZITI_TIMEOUT): invalid duration %q: %w", zitiTimeoutStr, err)
+			}
+			if zitiTimeout <= 0 {
+				return fmt.Errorf("--ziti-timeout (or ZITI_TIMEOUT) must be greater than zero, got %q", zitiTimeoutStr)
+			}
+			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			identityFile := config.EnvOrFlag(identityFlag, "ZITI_IDENTITY", cfg.Identity)
@@ -542,6 +572,7 @@ of validity remain.`,
 				recursive:    recursiveFlag,
 				preserve:     preserveFlag,
 				quiet:        quietFlag,
+				zitiTimeout:  zitiTimeout,
 				srcs:         srcs,
 				dst:          dst,
 			})
@@ -550,6 +581,7 @@ of validity remain.`,
 
 	root.PersistentFlags().StringVar(&identityFlag, "identity", "", "Ziti identity file path (or ZITI_IDENTITY)")
 	root.PersistentFlags().StringVar(&configFlag, "config", "", "Config file path (default: ~/.config/ziti-ssh/config.yaml)")
+	root.PersistentFlags().StringVar(&zitiTimeoutFlag, "ziti-timeout", "", "Timeout for Ziti network operations (or ZITI_TIMEOUT, default: 30s)")
 	root.PersistentFlags().BoolVarP(&versionFlag, "version", "V", false, "Print version and exit")
 
 	root.Flags().StringVar(&caServiceFlag, "ca-service", "", "CA service name (or ZITI_CA_SERVICE, default: ssh-ca)")

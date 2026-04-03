@@ -51,10 +51,11 @@ var version = "dev"
 
 func main() {
 	var (
-		identityFlag   string
-		caServiceFlag  string
-		sshServiceFlag string
-		versionFlag    bool
+		identityFlag    string
+		caServiceFlag   string
+		sshServiceFlag  string
+		zitiTimeoutFlag string
+		versionFlag     bool
 	)
 
 	root := &cobra.Command{
@@ -72,6 +73,7 @@ func main() {
 	root.PersistentFlags().StringVar(&identityFlag, "identity", "", "Path to Ziti identity file (or ZITI_IDENTITY, default: "+defaultIdentityFile+")")
 	root.PersistentFlags().StringVar(&caServiceFlag, "ca-service", "", "Ziti service name for the SSH CA (or ZITI_CA_SERVICE, default: "+defaultCaService+")")
 	root.PersistentFlags().StringVar(&sshServiceFlag, "ssh-service", "", "Ziti service name for SSH (or ZITI_SSH_SERVICE, default: "+defaultSSHService+")")
+	root.PersistentFlags().StringVar(&zitiTimeoutFlag, "ziti-timeout", "", "Timeout for Ziti network operations (or ZITI_TIMEOUT, default: 30s)")
 	root.PersistentFlags().BoolVarP(&versionFlag, "version", "V", false, "Print version and exit")
 
 	// ------------------------------------------------------------------ enroll
@@ -100,7 +102,15 @@ func main() {
 			if mode != "shared" && mode != "per-identity" {
 				return fmt.Errorf("--mode must be \"shared\" or \"per-identity\", got %q", mode)
 			}
-			return runProxy(identityFile, sshService, mode)
+			zitiTimeoutStr := config.EnvOrFlag(zitiTimeoutFlag, "ZITI_TIMEOUT", "30s")
+			zitiTimeout, err := time.ParseDuration(zitiTimeoutStr)
+			if err != nil {
+				return fmt.Errorf("--ziti-timeout (or ZITI_TIMEOUT): invalid duration %q: %w", zitiTimeoutStr, err)
+			}
+			if zitiTimeout <= 0 {
+				return fmt.Errorf("--ziti-timeout (or ZITI_TIMEOUT) must be greater than zero, got %q", zitiTimeoutStr)
+			}
+			return runProxy(identityFile, sshService, mode, zitiTimeout)
 		},
 	}
 	runCmd.Flags().StringVar(&modeFlag, "mode", "", "Principal mode: \"shared\" (default) or \"per-identity\" (or set ZITI_SSH_MODE)")
@@ -300,23 +310,30 @@ func parseAllCerts(data []byte) ([]*x509.Certificate, error) {
 // In "per-identity" mode a UserManager is created, orphan cleanup is run at
 // startup, and ProxyHooks are wired to create/delete Linux users as sessions
 // open and close.
-func runProxy(identityFile, sshService, mode string) error {
+func runProxy(identityFile, sshService, mode string, zitiTimeout time.Duration) error {
 	zitiCtx, err := ziti.NewContextFromFile(identityFile)
 	if err != nil {
 		return fmt.Errorf("init Ziti context from %q: %w", identityFile, err)
 	}
 	defer zitiCtx.Close()
 
-	if err := zitiCtx.Authenticate(); err != nil {
-		return fmt.Errorf("Ziti authenticate: %w", err)
+	if err := config.RunWithTimeout(zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
+		return err
 	}
 
 	listenOpts := &ziti.ListenOptions{
 		BindUsingEdgeIdentity: true,
 	}
-	listener, err := zitiCtx.ListenWithOptions(sshService, listenOpts)
-	if err != nil {
-		return fmt.Errorf("listen on Ziti service %q: %w", sshService, err)
+	var listener zitiEdge.Listener
+	if err := config.RunWithTimeout(zitiTimeout, "listen", func() error {
+		var listenErr error
+		listener, listenErr = zitiCtx.ListenWithOptions(sshService, listenOpts)
+		if listenErr != nil {
+			return fmt.Errorf("listen on Ziti service %q: %w", sshService, listenErr)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	defer listener.Close()
 
