@@ -48,12 +48,14 @@ The attribute model defines which identities can reach which services. Three att
 | `#ssh-clients` | User identities (dial `ssh-ca` to get certs, dial `ssh` to reach hosts) |
 | `#ssh-hosts` | Host identities (each runs `ziti-ssh-host`, binds the `ssh` service) |
 
-Two services carry all traffic:
+Two service roles carry all traffic:
 
 | Service | Purpose |
 |---|---|
 | `ssh-ca` | Certificate signing — clients send a public key, receive a signed cert |
-| `ssh` | SSH host proxy — clients reach hosts via addressable terminators |
+| `ssh` (or multiple) | SSH host proxy — clients reach hosts via addressable terminators |
+
+In simple deployments a single `ssh` service is sufficient. Fleets using per-identity permissions typically use multiple SSH services (e.g., `ssh-ops`, `ssh-db`) to separate access tiers. The service boundary is also the permission scope boundary — each service carries its own `ziti-ssh-host.v1` config defining what each identity may do on hosts bound to that service. A single `ziti-ssh-host run` process can bind to multiple services simultaneously.
 
 ---
 
@@ -339,7 +341,8 @@ Open `/etc/ziti-ssh-host/env` and uncomment the variables that apply to your dep
 ZITI_IDENTITY=/etc/ziti-ssh-host/identity.json
 ZITI_SSH_SERVICE=ssh
 ZITI_SSH_MODE=shared
-# ZITI_SUDOERS_RULE=ALL=(ALL) NOPASSWD:ALL   # per-identity mode only; leave unset for no sudo
+# ZITI_SSH_GROUPS=adm,systemd-journal   # per-identity mode only; global fallback groups
+# ZITI_SUDOERS_RULE=ALL=(ALL) NOPASSWD:ALL   # per-identity mode only; global fallback sudoers
 # ZITI_USER_CLEANUP=true                      # per-identity mode only; set to false to keep accounts
 ```
 
@@ -387,6 +390,52 @@ WantedBy=multi-user.target
 ```
 
 </details>
+
+---
+
+## Configuring per-identity permissions (`ziti-ssh-host.v1`)
+
+The `ziti-ssh-host.v1` Ziti config type lets you attach per-identity Linux permissions (groups and sudoers rules) to an SSH service. `ziti-ssh-host run` fetches this config automatically — no extra flags are required on the host. This feature is only used in `per-identity` mode.
+
+For background on permission resolution and deployment patterns, see [Per-identity permissions](operations.md#per-identity-permissions-ziti-ssh-hostv1-config) in the operations guide.
+
+### 1. Register the config type (one-time per network)
+
+Register the `ziti-ssh-host.v1` config type in the Ziti controller. This step is performed once per Ziti network, not once per host.
+
+```sh
+ziti edge create config-type ziti-ssh-host.v1 \
+  --schema '{"type":"object","properties":{"permissions":{"type":"object","additionalProperties":{"type":"object","properties":{"groups":{"type":"array","items":{"type":"string"}},"sudoers_rule":{"type":"string"}}}}}}'
+```
+
+### 2. Create a config for a service
+
+Create a config object of type `ziti-ssh-host.v1` and attach it to the target SSH service. Identity names in the config are the Ziti identity names exactly as they appear in the controller (case-sensitive).
+
+```sh
+# Create the config
+ziti edge create config ssh-prod-permissions ziti-ssh-host.v1 \
+  '{"permissions":{"alice@corp.com":{"groups":["developers"]},"ops-automation":{"sudoers_rule":"ALL=(ALL) NOPASSWD: ALL"}}}'
+
+# Attach it to the service
+ziti edge update service ssh-prod \
+  --configs ssh-prod-permissions
+```
+
+### 3. Verify the hosting identity can receive the config
+
+The `ziti-ssh-host` identity must have access to the `ziti-ssh-host.v1` config type via a config policy. In most Ziti deployments the default policy is permissive enough. Check if config policies are restricted in your network and grant access if needed.
+
+### 4. Update a config
+
+Edit the config object in the controller to add, change, or remove identity entries. Changes propagate to all running `ziti-ssh-host` instances bound to that service within seconds — no restart required.
+
+```sh
+ziti edge update config ssh-prod-permissions \
+  '{"permissions":{"alice@corp.com":{"groups":["sudo","developers"]},"ops-automation":{"sudoers_rule":"ALL=(ALL) NOPASSWD: ALL"}}}'
+```
+
+Run `ziti-ssh-host inspect --service ssh-prod` on the host to confirm what the running daemon sees after the update. See [Inspecting per-identity permissions](operations.md#inspecting-per-identity-permissions) in the operations guide for details.
 
 ---
 

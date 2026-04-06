@@ -72,7 +72,7 @@ These flags are persistent (accepted by both `enroll` and `run`):
 |---|---|---|---|
 | `--identity` | `ZITI_IDENTITY` | `/etc/ziti-ssh-host/identity.json` | Path to Ziti identity JSON file |
 | `--ca-service` | `ZITI_CA_SERVICE` | `ssh-ca` | Ziti service name for the CA (used during `enroll`) |
-| `--ssh-service` | `ZITI_SSH_SERVICE` | `ssh` | Ziti service name to proxy (used during `run`) |
+| `--ssh-service` | `ZITI_SSH_SERVICE` | `ssh` | Ziti service name(s) to proxy (used during `run`). The flag may be repeated for multiple services; the env var accepts a comma-separated list. |
 | `--ziti-timeout` | `ZITI_TIMEOUT` | `30s` | Timeout for blocking Ziti network operations (authenticate, listen). Accepts any `time.Duration` string, e.g. `30s`, `1m`. |
 
 The `run` subcommand also accepts:
@@ -80,10 +80,19 @@ The `run` subcommand also accepts:
 | Flag | Environment variable | Default | Description |
 |---|---|---|---|
 | `--mode` | `ZITI_SSH_MODE` | `shared` | Principal mode: `shared` or `per-identity` |
-| — | `ZITI_SUDOERS_RULE` | — | If set, a sudoers rule `<username> <value>` is written to `/etc/sudoers.d/<username>` on first connect (per-identity mode only) |
+| — | `ZITI_SSH_GROUPS` | — | Comma-separated Linux groups applied (via `usermod -aG`) to users not matched by a `ziti-ssh-host.v1` config entry. Global fallback; per-identity mode only. Groups must already exist on the host. |
+| — | `ZITI_SUDOERS_RULE` | — | If set, a sudoers rule `<username> <value>` is written to `/etc/sudoers.d/<username>` on first connect. Global fallback applied to users not matched by a `ziti-ssh-host.v1` config entry; per-identity mode only. |
 | — | `ZITI_USER_CLEANUP` | `true` | Set to `false` to keep the Linux account after the last session closes rather than running `userdel -r` (per-identity mode only) |
 
 `enroll` also requires `--jwt <path>` (no environment variable equivalent).
+
+### `ziti-ssh-host inspect`
+
+| Flag | Environment variable | Default | Description |
+|---|---|---|---|
+| `--service` | — | — | Ziti service name to inspect. Required; may be repeated to inspect multiple services. |
+
+Uses the same `--identity` flag (and `ZITI_IDENTITY` env var) as the other subcommands. See [Inspecting per-identity permissions](operations.md#inspecting-per-identity-permissions) in the operations guide for details and example output.
 
 ---
 
@@ -114,6 +123,66 @@ The `run` subcommand also accepts:
 |---|---|---|---|
 | `--jwt` | — | — | Enrollment JWT file path (required) |
 | `--out` | — | `~/.config/ziti-ssh/<name>.json` | Output path for identity JSON |
+
+---
+
+## `ziti-ssh-host.v1` config type
+
+The `ziti-ssh-host.v1` Ziti service config type attaches per-identity Linux permissions to an SSH service. `ziti-ssh-host run` fetches it automatically via the Ziti SDK at startup — no extra flags are required. The config is declared as a requested config type when the Ziti context authenticates.
+
+This config is only consulted in `per-identity` mode. It has no effect in `shared` mode.
+
+### Schema
+
+```json
+{
+  "permissions": {
+    "<ziti-identity-name>": {
+      "groups":       ["<linux-group>", ...],
+      "sudoers_rule": "<sudoers rule fragment>"
+    }
+  }
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `permissions` | object | yes | Map of Ziti identity name → permission entry. Keys are exact Ziti identity names (case-sensitive). |
+| `permissions.<name>.groups` | array of strings | no | Linux groups to add the ephemeral user to via `usermod -aG` after account creation. Groups must already exist on the host. |
+| `permissions.<name>.sudoers_rule` | string | no | The rule fragment placed after the username in `/etc/sudoers.d/<username>`. Validated with `visudo -c` before installation. Omit to grant no sudo access. |
+
+### Example
+
+```json
+{
+  "permissions": {
+    "alice@corp.com": {
+      "groups":       ["docker", "adm"],
+      "sudoers_rule": "ALL=(ALL) NOPASSWD: /bin/systemctl status *"
+    },
+    "bob@corp.com": {
+      "groups":       ["developers"]
+    },
+    "ops-automation": {
+      "sudoers_rule": "ALL=(ALL) NOPASSWD: ALL"
+    }
+  }
+}
+```
+
+Identity keys are the **Ziti identity names** as they appear in the controller — not the derived Linux usernames. `ziti-ssh-host` applies `DeriveUsername` internally to obtain the Linux username for `useradd`, `usermod`, and the sudoers filename.
+
+### Interaction with global fallbacks
+
+The resolution order for each connecting identity is:
+
+1. Config attached and identity has an entry → apply that entry's `groups` and `sudoers_rule`. `ZITI_SSH_GROUPS` and `ZITI_SUDOERS_RULE` are ignored for this identity.
+2. Config attached but identity not in it → apply global fallbacks (`ZITI_SSH_GROUPS`, `ZITI_SUDOERS_RULE`).
+3. No config attached → apply global fallbacks to all users.
+
+A config entry that omits a field means that field gets nothing — globals are not merged in for matched identities.
+
+See [Per-identity permissions](operations.md#per-identity-permissions-ziti-ssh-hostv1-config) in the operations guide for the full lifecycle description, multi-service binding, and deployment patterns.
 
 ---
 

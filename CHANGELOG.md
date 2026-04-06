@@ -2,6 +2,54 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased] - 2026-04-06
+
+### Added
+
+#### `ziti-ssh-ca` — `config` subcommand for managing the `ziti-ssh-host.v1` Ziti config type
+
+New file `cmd/ziti-ssh-ca/config.go` (package `main`). Adds a `config` cobra parent command registered with the root, containing three subcommands:
+
+- **`config print`** — no flags, no controller connection. Prints the human-readable field table and the indented JSON schema to stdout.
+- **`config apply`** — idempotent create-or-update. Authenticates to the controller, calls `ListConfigTypes` with a `name="ziti-ssh-host.v1"` filter, then either `CreateConfigType` (not found) or `UpdateConfigType` (found). Prints `created ...` or `updated ... (id: <id>)`.
+- **`config remove`** — locates the type by name and calls `DeleteConfigType`. Exits 0 with a human-readable message if the type is not found.
+
+Flags (`--controller`, `--username`, `--password`, `--insecure`, `--controller-ca`) are defined as PersistentFlags on the `config` parent so both `apply` and `remove` inherit them. All flags have corresponding env var overrides (`ZITI_CTRL_ADDRESS`, `ZITI_CTRL_USERNAME`, `ZITI_CTRL_PASSWORD`, `ZITI_CTRL_INSECURE`, `ZITI_CTRL_CA`). `--insecure` and `--controller-ca` are validated as mutually exclusive before any API call. Default controller port is 443 when no port is present in `--controller`. Uses `github.com/openziti/edge-api/rest_management_api_client` (promoted from indirect to direct dependency).
+
+#### `ziti-ssh-host` — per-identity Linux permissions via `ziti-ssh-host.v1` Ziti service config
+
+**New types in `host/host.go`:**
+- `IdentityPermissions` struct: `Groups []string` + `SudoersRule string`; holds the resolved Linux permissions for one connecting identity
+- `PermissionsConfig` struct: `Permissions map[string]IdentityPermissions`; parsed from a `ziti-ssh-host.v1` Ziti service config attached to a bound service
+- `(*PermissionsConfig).Resolve(zitiIdentity string, globalGroups []string, globalSudoersRule string) IdentityPermissions`: returns the config entry for the identity if present (globals ignored), otherwise returns globals; handles nil receiver
+
+**`UserManager` changes:**
+- `NewUserManager` signature changed: `sudoersRule string` parameter removed; permissions are now passed per-call
+- `EnsureUser(username string, perms IdentityPermissions) error`: accepts resolved permissions for this connection; on first session calls `usermod -aG <groups> <username>` when `perms.Groups` is non-empty (non-fatal logged error if a group does not exist), and writes `/etc/sudoers.d/<username>` when `perms.SudoersRule` is non-empty; subsequent sessions for the same username skip account setup (ref-count only)
+- `ReleaseUser` now always attempts `removeSudoers` (was conditioned on `m.sudoersRule != ""`; idempotent with missing file)
+
+**`run` subcommand changes:**
+- `--ssh-service` flag changed from `StringVar` to `StringArrayVar`; may be specified multiple times; `ZITI_SSH_SERVICE` env var still supported as a comma-separated list; fallback to `"ssh"`
+- `runProxy` now accepts `sshServices []string` and opens one `zitiEdge.Listener` per service; all listeners share one `UserManager` and one connection-level `sync.WaitGroup`
+- Ziti context initialised via `ziti.NewConfigFromFile` + `ziti.NewContext` (rather than `ziti.NewContextFromFile`) so that `cfg.ConfigTypes` can include `"ziti-ssh-host.v1"` before `Authenticate`
+- For each service, `loadPermissionsConfig` fetches and parses the `ziti-ssh-host.v1` config using `zitiEdge.ParseServiceConfig`; stores it in a `serviceState` with an `RWMutex` for safe concurrent reads and hot-reload writes
+- `zitiCtx.Events().AddServiceChangedListener` subscribed after listeners open; on a changed event for a bound service, re-fetches and atomically swaps the in-memory `*PermissionsConfig`; logged at info level; existing sessions unaffected
+- `ZITI_SSH_GROUPS` env var read at startup; parsed as comma-separated group names (whitespace-trimmed, empty strings skipped); passed as `globalGroups` to each service's `ProxyHooks`
+- Signal handler closes all listeners on `SIGTERM`/`SIGINT`; per-connection `sync.WaitGroup` (`connWg`) passed to each `host.Proxy` call for graceful drain
+
+**New `inspect` subcommand:**
+- `ziti-ssh-host inspect --service <name> [--service <name> ...]`
+- Authenticates with the same identity (same `--identity`/`ZITI_IDENTITY`) and `"ziti-ssh-host.v1"` in `ConfigTypes`
+- For each named service: checks visibility (bind policy), parses `ziti-ssh-host.v1` config, prints a formatted table of Ziti identity → derived Linux username → groups → sudoers rule
+- Prints global fallback values (`ZITI_SSH_GROUPS`, `ZITI_SUDOERS_RULE`) alongside each service block
+- Exits without opening any listeners; safe to run while `run` is active on the same identity
+
+**Tests added (`host/host_test.go`):**
+- `TestResolve_*`: six table-driven cases covering nil config, empty config, matched identity, unmatched identity, case-sensitive matching, globals-not-merged-for-matched-entry, no-globals case
+- `TestEnsureUser_AcceptsIdentityPermissions`: integration test (skipped without root) verifying new `IdentityPermissions` parameter
+- `TestEnsureUser_RefCounting`: integration test (skipped without root) verifying session ref-count and deletion on last release
+- `TestNewUserManager_Signature`: compile-time signature check embedded as runtime test
+
 ## [Unreleased] - 2026-04-03
 
 ### Added

@@ -131,6 +131,7 @@ func main() {
 		},
 	}
 	root.AddCommand(versionCmd)
+	root.AddCommand(configCmd)
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)

@@ -17,6 +17,45 @@ import (
 	"time"
 )
 
+// IdentityPermissions holds the resolved Linux permissions for a single
+// connecting Ziti identity on a specific service.
+type IdentityPermissions struct {
+	// Groups is a list of existing Linux groups to add the ephemeral user to
+	// via "usermod -aG" after account creation. Groups must already exist on
+	// the host; a missing group causes a non-fatal logged error.
+	Groups []string
+
+	// SudoersRule is the rule fragment written after the username in
+	// /etc/sudoers.d/<username>. An empty string means no sudoers file is
+	// created for this user.
+	SudoersRule string
+}
+
+// PermissionsConfig holds the parsed ziti-ssh-host.v1 service config. It maps
+// exact Ziti identity names (case-sensitive) to their per-service permissions.
+type PermissionsConfig struct {
+	// Permissions maps Ziti identity name → IdentityPermissions.
+	Permissions map[string]IdentityPermissions
+}
+
+// Resolve returns the effective IdentityPermissions for zitiIdentity.
+//
+// Resolution order:
+//  1. If pc is non-nil and zitiIdentity has an entry → return that entry
+//     as-is. Global fallbacks are not merged in.
+//  2. Otherwise → return global fallbacks (globalGroups, globalSudoersRule).
+func (pc *PermissionsConfig) Resolve(zitiIdentity string, globalGroups []string, globalSudoersRule string) IdentityPermissions {
+	if pc != nil {
+		if entry, ok := pc.Permissions[zitiIdentity]; ok {
+			return entry
+		}
+	}
+	return IdentityPermissions{
+		Groups:      globalGroups,
+		SudoersRule: globalSudoersRule,
+	}
+}
+
 // ProxyHooks carries optional callbacks for per-connection user lifecycle
 // management. Both fields may be nil — pass a nil *ProxyHooks (or a
 // ProxyHooks with nil fields) for shared mode where no user management is
@@ -170,24 +209,19 @@ type UserManager struct {
 	mu                  sync.Mutex
 	sessions            map[string]int // username → active session count
 	stateFile           string
-	sudoersRule         string // rule written to /etc/sudoers.d/<username>; empty = no sudoers file
-	cleanupOnDisconnect bool   // if false, skip deleteUser on ReleaseUser
+	cleanupOnDisconnect bool // if false, skip deleteUser on ReleaseUser
 }
 
 // NewUserManager returns a UserManager that persists state to stateFile.
 // The state file and its parent directories are created on first write.
 //
-// sudoersRule is the rule written after the username in /etc/sudoers.d/<username>.
-// An empty string disables sudoers file creation.
-//
 // cleanupOnDisconnect controls whether the Linux user is deleted when the last
 // session closes. When false, the account persists across disconnects; the
 // sudoers file is still removed if one was written.
-func NewUserManager(stateFile, sudoersRule string, cleanupOnDisconnect bool) *UserManager {
+func NewUserManager(stateFile string, cleanupOnDisconnect bool) *UserManager {
 	return &UserManager{
 		sessions:            make(map[string]int),
 		stateFile:           stateFile,
-		sudoersRule:         sudoersRule,
 		cleanupOnDisconnect: cleanupOnDisconnect,
 	}
 }
@@ -198,9 +232,14 @@ func NewUserManager(stateFile, sudoersRule string, cleanupOnDisconnect bool) *Us
 // that concurrent connections that race to create the same user are handled
 // gracefully.
 //
+// perms carries the resolved per-identity permissions for this connection.
+// Groups and sudoers are only applied on the first session for a username
+// (when the account is actually created). Subsequent sessions for the same
+// username log a message and return immediately.
+//
 // The username is recorded in the state file so that CleanupOrphans can
 // remove it after a crash.
-func (m *UserManager) EnsureUser(username string) error {
+func (m *UserManager) EnsureUser(username string, perms IdentityPermissions) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -229,9 +268,21 @@ func (m *UserManager) EnsureUser(username string) error {
 		}
 	}
 
+	// Add the user to supplementary groups if any are specified.
+	if len(perms.Groups) > 0 {
+		groupList := strings.Join(perms.Groups, ",")
+		slog.Info("adding user to groups", "username", username, "groups", groupList)
+		if out, err := exec.Command("usermod", "-aG", groupList, username).CombinedOutput(); err != nil {
+			// Non-fatal: the user was created successfully; group membership
+			// failure (e.g. group does not exist) is logged but does not abort
+			// the session.
+			slog.Error("usermod -aG failed", "username", username, "groups", groupList, "err", err, "output", strings.TrimSpace(string(out)))
+		}
+	}
+
 	// Write sudoers file if a rule is configured.
-	if m.sudoersRule != "" {
-		if err := createSudoers(username, m.sudoersRule); err != nil {
+	if perms.SudoersRule != "" {
+		if err := createSudoers(username, perms.SudoersRule); err != nil {
 			// Non-fatal: the user was created successfully; sudoers failure
 			// should not block the session, but it must be visible in logs.
 			slog.Error("failed to create sudoers file", "username", username, "err", err)
@@ -270,11 +321,10 @@ func (m *UserManager) ReleaseUser(username string) error {
 
 	if !m.cleanupOnDisconnect {
 		slog.Info("last session closed, cleanup disabled — keeping Linux user", "username", username)
-		// Remove the sudoers file if one was written, but keep the account.
-		if m.sudoersRule != "" {
-			if err := removeSudoers(username); err != nil {
-				slog.Error("failed to remove sudoers file", "username", username, "err", err)
-			}
+		// Always attempt to remove the sudoers file (it may or may not exist).
+		// removeSudoers is a no-op if the file is absent.
+		if err := removeSudoers(username); err != nil {
+			slog.Error("failed to remove sudoers file", "username", username, "err", err)
 		}
 		if err := m.removeFromStateFile(username); err != nil {
 			slog.Error("failed to update state file", "username", username, "err", err)
