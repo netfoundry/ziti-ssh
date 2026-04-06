@@ -401,12 +401,22 @@ For background on permission resolution and deployment patterns, see [Per-identi
 
 ### 1. Register the config type (one-time per network)
 
-Register the `ziti-ssh-host.v1` config type in the Ziti controller. This step is performed once per Ziti network, not once per host.
+Register the `ziti-ssh-host.v1` config type in the Ziti controller. This step is performed once per Ziti network, not once per host. Run it on the controller host where `ziti-ssh-ca` is installed:
 
 ```sh
-ziti edge create config-type ziti-ssh-host.v1 \
-  --schema '{"type":"object","properties":{"permissions":{"type":"object","additionalProperties":{"type":"object","properties":{"groups":{"type":"array","items":{"type":"string"}},"sudoers_rule":{"type":"string"}}}}}}'
+ziti-ssh-ca config apply \
+  --controller ctrl.example.com \
+  --username admin \
+  --password <password>
 ```
+
+This creates the config type if it does not exist, or updates it to the current schema if it does. To preview the schema that will be registered without connecting to the controller:
+
+```sh
+ziti-ssh-ca config print
+```
+
+> **TLS note:** If your controller uses a self-signed certificate, add `--insecure` to skip verification, or `--controller-ca /path/to/ca.pem` to trust a specific CA. All flags can also be set via environment variables (`ZITI_CTRL_ADDRESS`, `ZITI_CTRL_USERNAME`, `ZITI_CTRL_PASSWORD`, `ZITI_CTRL_INSECURE`, `ZITI_CTRL_CA`) — useful for scripted provisioning.
 
 ### 2. Create a config for a service
 
