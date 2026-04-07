@@ -6,9 +6,7 @@ For a full flag and config reference see [configuration.md](configuration.md).
 
 ---
 
-## Getting a certificate (`ziti-ssh sign`)
-
-Use `ziti-ssh sign` to obtain a signed SSH certificate from the CA. It handles key discovery, CA communication, certificate writing, and immediate verification in a single command.
+## Connecting to a host (`ziti-ssh connect`)
 
 ### Install
 
@@ -42,54 +40,7 @@ You can specify an explicit output path with `--out`:
 ziti-ssh enroll --jwt alice.jwt --out ~/.config/ziti-ssh/alice.json
 ```
 
-### Obtaining a certificate
-
-```sh
-ziti-ssh sign --identity ~/.config/ziti-ssh/alice.json
-```
-
-With explicit options:
-
-```sh
-ziti-ssh sign \
-  --identity ~/.config/ziti-ssh/alice.json \
-  --ca-service ssh-ca \
-  --key ~/.ssh/id_ed25519
-```
-
-The `--identity` flag (or `ZITI_IDENTITY` environment variable) is required. All other flags have defaults.
-
-### What to expect
-
-1. `ziti-ssh sign` auto-detects your SSH key in `~/.ssh/` (tries `id_ed25519`, `id_ecdsa`, `id_rsa` in that order). If no key exists it offers to run `ssh-keygen -t ed25519` for you.
-2. It connects to the `ssh-ca` Ziti service using your identity, sends your public key, and receives a signed certificate.
-3. The certificate is written to `~/.ssh/<key>-cert.pub` (e.g. `~/.ssh/id_ed25519-cert.pub`).
-4. `ssh-keygen -L` is run automatically so you can verify the certificate immediately:
-
-```
-/home/alice/.ssh/id_ed25519-cert.pub:
-        Type: ssh-ed25519-cert-v01@openssh.com user certificate
-        Public key: ED25519-CERT SHA256:...
-        Signing CA: ED25519 SHA256:... (using ssh-ed25519)
-        Key ID: "ziti:alice"
-        Serial: 0
-        Valid: from 2026-03-30T09:00:00 to 2026-03-30T17:00:00
-        Principals:
-                ziggy
-        Critical Options: (none)
-        Extensions:
-                permit-agent-forwarding
-                permit-port-forwarding
-                permit-pty
-```
-
-The certificate expires after the TTL configured on the CA (default: 8 hours). Run `ziti-ssh sign` again to renew manually (or connect — `ziti-ssh connect` auto-renews when fewer than 30 minutes of validity remain).
-
----
-
-## Connecting to a host (`ziti-ssh connect`)
-
-Once a certificate is present in `~/.ssh/id_ed25519-cert.pub`, open an SSH session with:
+### Connecting
 
 ```sh
 ziti-ssh ziggy@web-server-prod
@@ -103,7 +54,7 @@ ziti-ssh connect ziggy@web-server-prod
 
 `web-server-prod` is the Ziti identity name of the target host. `ziti-ssh` resolves this as a Ziti service terminator address on the `ssh` service — no DNS, no IP address required.
 
-If the certificate is missing or will expire within 30 minutes, `ziti-ssh connect` automatically runs the sign flow before opening the session.
+If a certificate is missing or will expire within 30 minutes, `ziti-ssh connect` automatically obtains a fresh one from the CA before opening the session. On first use it auto-detects your SSH key in `~/.ssh/` (tries `id_ed25519`, `id_ecdsa`, `id_rsa` in that order). If no key exists it offers to run `ssh-keygen -t ed25519` for you.
 
 If the SSH private key is passphrase-protected, `ziti-ssh connect` falls back to the SSH agent (`SSH_AUTH_SOCK`). It locates the matching key in the agent and, if a certificate is present on disk, wraps it as an `ssh.CertSigner` so the certificate is offered during authentication. The passphrase is never exposed to this process. If the key is passphrase-protected and `SSH_AUTH_SOCK` is not set (or the key has not been added with `ssh-add`), `ziti-ssh connect` exits with an actionable error.
 
@@ -129,6 +80,37 @@ ziti-ssh ziggy@web-server-prod -- cat /etc/os-release | grep VERSION
 ```
 
 The remote process exit code is propagated: if the remote command exits non-zero, `ziti-ssh` exits with that same code. This makes it suitable for use in scripts.
+
+---
+
+## Managing certificates manually (`ziti-ssh sign`)
+
+`ziti-ssh connect` handles certificate renewal automatically. Use `ziti-ssh sign` directly if you want to obtain or inspect a certificate without connecting — for example to verify CA details or pre-warm a certificate before a session.
+
+```sh
+ziti-ssh sign --identity ~/.config/ziti-ssh/alice.json
+```
+
+The certificate is written to `~/.ssh/<key>-cert.pub` and its details are printed immediately:
+
+```
+/home/alice/.ssh/id_ed25519-cert.pub:
+        Type: ssh-ed25519-cert-v01@openssh.com user certificate
+        Public key: ED25519-CERT SHA256:...
+        Signing CA: ED25519 SHA256:... (using ssh-ed25519)
+        Key ID: "ziti:alice"
+        Serial: 0
+        Valid: from 2026-03-30T09:00:00 to 2026-03-30T17:00:00
+        Principals:
+                ziggy
+        Critical Options: (none)
+        Extensions:
+                permit-agent-forwarding
+                permit-port-forwarding
+                permit-pty
+```
+
+The certificate expires after the TTL configured on the CA (default: 8 hours). `ziti-ssh connect` auto-renews when fewer than 30 minutes of validity remain.
 
 ---
 

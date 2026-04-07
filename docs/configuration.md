@@ -21,9 +21,8 @@ All binaries resolve each setting in the same order: CLI flag > environment vari
 |---|---|---|---|
 | `--ca-service` | `ZITI_CA_SERVICE` | `ssh-ca` | CA service name |
 | `--ssh-service` | `ZITI_SSH_SERVICE` | `ssh` | SSH service name |
-| `--service` | — | — | Explicit Ziti service to dial (overrides `--ssh-service`) |
+| `--service` | — | — | SSH service name to dial (alias for `--ssh-service`) |
 | `--key` | — | auto-detect | SSH private key path |
-| `--mode` | `ZITI_SSH_MODE` | `shared` | Mode hint (informational for client) |
 | `--oidc-issuer` | — | — | OIDC issuer URL; triggers browser-based OIDC auth (overrides `oidc.issuer` in config) |
 
 ### `ziti-ssh sign`
@@ -195,7 +194,6 @@ identity: ~/.config/ziti-ssh/alice.json
 ca_service: ssh-ca
 ssh_service: ssh
 ssh_key_path: ~/.ssh/id_ed25519
-mode: shared
 ```
 
 | Field | Flag equivalent | Description |
@@ -204,7 +202,6 @@ mode: shared
 | `ca_service` | `--ca-service` | CA service name |
 | `ssh_service` | `--ssh-service` | SSH service name |
 | `ssh_key_path` | `--key` | SSH private key path |
-| `mode` | `--mode` | Mode hint (`shared` or `per-identity`) |
 | `oidc.*` | `--oidc-issuer` | OIDC configuration block (see below) |
 
 ---
