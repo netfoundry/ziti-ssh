@@ -275,7 +275,15 @@ func RunSession(conn net.Conn, user, host string, signer ssh.Signer) error {
 		return fmt.Errorf("start remote shell: %w", err)
 	}
 
-	return session.Wait()
+	if err := session.Wait(); err != nil {
+		var exitErr *ssh.ExitError
+		if errors.As(err, &exitErr) {
+			_ = term.Restore(stdinFd, oldState)
+			os.Exit(exitErr.ExitStatus())
+		}
+		return err
+	}
+	return nil
 }
 
 // RunCommand runs a single non-interactive remote command over conn.
