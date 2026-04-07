@@ -79,9 +79,9 @@ type ProxyHooks struct {
 //
 // hooks is optional. When non-nil and its fields are non-nil, OnConnect is
 // called before proxying and OnDisconnect is called after. The username
-// passed to the hooks is extracted from the connection via the dialerNamer
-// interface (edge.Conn.GetDialerIdentityName); if the connection does not
-// implement that interface the hooks are skipped.
+// passed to the hooks is extracted from the connection via SourceIdentifier()
+// (preferred) or GetDialerIdentityName() (fallback); if neither is available
+// the hooks are skipped.
 //
 // wg is optional. When non-nil, each accepted connection increments wg before
 // starting and decrements it when the connection closes. Pass a WaitGroup to
@@ -107,11 +107,31 @@ func Proxy(listener net.Listener, target string, hooks *ProxyHooks, wg *sync.Wai
 	}
 }
 
-// dialerNamer is the narrow interface implemented by edge.Conn that exposes
-// the caller's Ziti identity name. Defined locally so host has no import
-// dependency on the Ziti SDK.
-type dialerNamer interface {
-	GetDialerIdentityName() string
+// callerName returns the Ziti identity name for the connection.
+//
+// The SDK sets CallerIdHeader to the dialer's identity name on every dial and
+// exposes it via SourceIdentifier(). GetDialerIdentityName() reads a separate
+// header injected by the fabric layer that may not be present. We prefer
+// SourceIdentifier() and fall back to GetDialerIdentityName().
+//
+// Defined via structural interfaces so host has no import dependency on the
+// Ziti SDK.
+func callerName(conn net.Conn) string {
+	type sourceIdentifier interface {
+		SourceIdentifier() string
+	}
+	if si, ok := conn.(sourceIdentifier); ok {
+		if name := si.SourceIdentifier(); name != "" {
+			return name
+		}
+	}
+	type dialerNamer interface {
+		GetDialerIdentityName() string
+	}
+	if dn, ok := conn.(dialerNamer); ok {
+		return dn.GetDialerIdentityName()
+	}
+	return ""
 }
 
 func proxyConn(src net.Conn, target string, hooks *ProxyHooks) {
@@ -120,9 +140,7 @@ func proxyConn(src net.Conn, target string, hooks *ProxyHooks) {
 	// Resolve username for hooks, if any hook is registered.
 	var username string
 	if hooks != nil && (hooks.OnConnect != nil || hooks.OnDisconnect != nil) {
-		if dn, ok := src.(dialerNamer); ok {
-			username = dn.GetDialerIdentityName()
-		}
+		username = callerName(src)
 	}
 
 	// OnConnect lifecycle — must succeed before we proxy anything.

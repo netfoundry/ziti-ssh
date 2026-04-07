@@ -334,20 +334,29 @@ func handleConn(conn net.Conn, signer ssh.Signer, caPubBytes []byte, principal, 
 	log.Info("issued SSH certificate", "principal", effectivePrincipal, "ttl", certTTL)
 }
 
-// callerIdentity extracts the Ziti identity name from a net.Conn. The Ziti
-// SDK's edge.Listener.Accept() returns connections that implement edge.Conn,
-// which exposes GetDialerIdentityName(). If the type assertion fails (e.g.
-// in tests with plain net.Conn), an empty string is returned.
+// callerIdentity extracts the Ziti identity name from a net.Conn.
+//
+// The SDK sets CallerIdHeader to the dialer's identity name on every dial
+// (ziti.go: edgeDialOptions.CallerId = GetCurrentApiSession().GetIdentityName()).
+// This is exposed via SourceIdentifier() on edge.Conn.
+//
+// GetDialerIdentityName() reads a separate header injected by the fabric layer
+// that is not always present — SourceIdentifier() is the reliable source.
+//
+// Returns "" only for plain net.Conn values (e.g. in unit tests).
 func callerIdentity(conn net.Conn) string {
 	if ec, ok := conn.(zitiEdge.Conn); ok {
+		if name := ec.SourceIdentifier(); name != "" {
+			return name
+		}
 		return ec.GetDialerIdentityName()
 	}
-	// Fallback: try ServiceConn (the narrower interface).
-	type dialerNamer interface {
-		GetDialerIdentityName() string
+	// Fallback: structural interface for tests/mocks that don't import edge.
+	type sourceIdentifier interface {
+		SourceIdentifier() string
 	}
-	if dn, ok := conn.(dialerNamer); ok {
-		return dn.GetDialerIdentityName()
+	if si, ok := conn.(sourceIdentifier); ok {
+		return si.SourceIdentifier()
 	}
 	return ""
 }

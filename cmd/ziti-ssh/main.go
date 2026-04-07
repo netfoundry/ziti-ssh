@@ -397,9 +397,9 @@ func runConnect(p connectParams) error {
 	terminatorAddr := host
 
 	if p.service != "" {
-		// Explicit --service override: dial it without a terminator.
+		// Explicit --service flag overrides the default service name.
+		// The host from [user@]target is still used as the terminator address.
 		dialService = p.service
-		terminatorAddr = ""
 	} else if _, ok := zitiCtx.GetService(host); ok {
 		// Target matches a known service name: dial it directly.
 		dialService = host
@@ -860,7 +860,7 @@ Examples:
 	}
 	connectCmd.Flags().StringVar(&caServiceFlag, "ca-service", "", "CA service name (or ZITI_CA_SERVICE, default: ssh-ca)")
 	connectCmd.Flags().StringVar(&sshServiceFlag, "ssh-service", "", "SSH service name (or ZITI_SSH_SERVICE, default: ssh)")
-	connectCmd.Flags().StringVar(&serviceFlag, "service", "", "Explicit Ziti service to dial (overrides --ssh-service + target lookup)")
+	connectCmd.Flags().StringVar(&serviceFlag, "service", "", "SSH service name to dial (alias for --ssh-service)")
 	connectCmd.Flags().StringVar(&keyFlag, "key", "", "SSH private key path (default: auto-detect from ~/.ssh/)")
 	connectCmd.Flags().StringVar(&modeFlag, "mode", "", "Mode: shared or per-identity (or ZITI_SSH_MODE, informational only for client)")
 	connectCmd.Flags().StringVar(&oidcIssuerFlag, "oidc-issuer", "", "OIDC issuer URL; triggers browser-based OIDC auth before connecting (or set oidc.issuer in config)")
