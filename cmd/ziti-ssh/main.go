@@ -51,7 +51,6 @@ type Config struct {
 	CAService  string     `yaml:"ca_service"`
 	SSHService string     `yaml:"ssh_service"`
 	SSHKeyPath string     `yaml:"ssh_key_path"`
-	Mode       string     `yaml:"mode"`
 	OIDC       OIDCConfig `yaml:"oidc"`
 }
 
@@ -789,7 +788,6 @@ Usage:
 		sshServiceFlag string
 		serviceFlag    string
 		keyFlag        string
-		modeFlag       string
 		oidcIssuerFlag string
 	)
 	connectCmd = &cobra.Command{
@@ -826,9 +824,7 @@ Examples:
 			if resolvedKey == "" {
 				resolvedKey = cfg.SSHKeyPath
 			}
-			_ = config.EnvOrFlag(modeFlag, "ZITI_SSH_MODE", orDefault(cfg.Mode, "shared")) // resolved for future use
-
-			oidcCallbackPort := cfg.OIDC.CallbackPort
+oidcCallbackPort := cfg.OIDC.CallbackPort
 			if oidcCallbackPort == "" {
 				oidcCallbackPort = defaultCallbackPort
 			}
@@ -862,7 +858,6 @@ Examples:
 	connectCmd.Flags().StringVar(&sshServiceFlag, "ssh-service", "", "SSH service name (or ZITI_SSH_SERVICE, default: ssh)")
 	connectCmd.Flags().StringVar(&serviceFlag, "service", "", "SSH service name to dial (alias for --ssh-service)")
 	connectCmd.Flags().StringVar(&keyFlag, "key", "", "SSH private key path (default: auto-detect from ~/.ssh/)")
-	connectCmd.Flags().StringVar(&modeFlag, "mode", "", "Mode: shared or per-identity (or ZITI_SSH_MODE, informational only for client)")
 	connectCmd.Flags().StringVar(&oidcIssuerFlag, "oidc-issuer", "", "OIDC issuer URL; triggers browser-based OIDC auth before connecting (or set oidc.issuer in config)")
 	root.AddCommand(connectCmd)
 
