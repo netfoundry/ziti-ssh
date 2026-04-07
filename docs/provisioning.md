@@ -413,14 +413,16 @@ ziti-ssh-ca config print
 
 Create a config object of type `ziti-ssh-host.v1` and attach it to the target SSH service. Identity names in the config are the Ziti identity names exactly as they appear in the controller (case-sensitive).
 
+Replace `ssh` below with the actual service name you created in the [Provisioning the Ziti network](#provisioning-the-ziti-network) step — `ssh` if you followed the guide as written, or a custom name like `ssh-ops` if you created multiple services.
+
 ```sh
 # Create the config
-ziti edge create config ssh-prod-permissions ziti-ssh-host.v1 \
+ziti edge create config ssh-permissions ziti-ssh-host.v1 \
   '{"permissions":{"alice@corp.com":{"groups":["developers"]},"ops-automation":{"sudoers_rule":"ALL=(ALL) NOPASSWD: ALL"}}}'
 
 # Attach it to the service
-ziti edge update service ssh-prod \
-  --configs ssh-prod-permissions
+ziti edge update service ssh \
+  --configs ssh-permissions
 ```
 
 ### 3. Verify the hosting identity can receive the config
@@ -432,11 +434,11 @@ The `ziti-ssh-host` identity must have access to the `ziti-ssh-host.v1` config t
 Edit the config object in the controller to add, change, or remove identity entries. Changes propagate to all running `ziti-ssh-host` instances bound to that service within seconds — no restart required.
 
 ```sh
-ziti edge update config ssh-prod-permissions \
+ziti edge update config ssh-permissions \
   '{"permissions":{"alice@corp.com":{"groups":["sudo","developers"]},"ops-automation":{"sudoers_rule":"ALL=(ALL) NOPASSWD: ALL"}}}'
 ```
 
-Run `ziti-ssh-host inspect --service ssh-prod` on the host to confirm what the running daemon sees after the update. See [Inspecting per-identity permissions](operations.md#inspecting-per-identity-permissions) in the operations guide for details.
+Run `ziti-ssh-host inspect --service ssh` on the host to confirm what the running daemon sees after the update. See [Inspecting per-identity permissions](operations.md#inspecting-per-identity-permissions) in the operations guide for details.
 
 ---
 
