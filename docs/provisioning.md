@@ -34,7 +34,14 @@ dist/ziti-ssh_<version>_amd64.deb
 dist/ziti-scp_<version>_amd64.deb
 ```
 
-Copy the relevant packages to their target machines before proceeding with the sections below.
+Each component has its own installation section below. Copy the packages to their target machines as directed:
+
+| Package | Destination |
+|---|---|
+| `ziti-ssh-ca_<version>_amd64.deb` | Ziti controller host |
+| `ziti-ssh-host_<version>_amd64.deb` | Each target SSH host |
+| `ziti-ssh_<version>_amd64.deb` | Each user's machine |
+| `ziti-scp_<version>_amd64.deb` | Each user's machine (optional) |
 
 ---
 
@@ -125,13 +132,7 @@ ziti edge create identity ssh-ca-server \
   --jwt-output-file /tmp/ssh-ca-server.jwt
 ```
 
-Copy the JWT to the CA host, then enroll it:
-
-```sh
-ziti edge enroll --jwt /tmp/ssh-ca-server.jwt --out /etc/ziti-ssh-ca/identity.json
-```
-
-See [Setting up `ziti-ssh-ca`](#setting-up-ziti-ssh-ca) for the full CA setup procedure.
+Copy the JWT to the controller host. Enrollment is covered in [Setting up `ziti-ssh-ca`](#setting-up-ziti-ssh-ca).
 
 **Host identity** (repeat for each SSH target host, using the host's desired reachability name):
 
@@ -141,11 +142,7 @@ ziti edge create identity web-server-prod \
   --jwt-output-file /tmp/web-server-prod.jwt
 ```
 
-Copy the JWT to the target host. Enrollment for host identities is performed by `ziti-ssh-host enroll`, which wraps `ziti edge enroll` and also configures `sshd` automatically — see [Setting up `ziti-ssh-host`](#setting-up-ziti-ssh-host-on-a-target-machine) for the full procedure. If you need to enroll the identity file separately without configuring `sshd`:
-
-```sh
-ziti edge enroll --jwt /tmp/web-server-prod.jwt --out /etc/ziti-ssh-host/identity.json
-```
+Copy the JWT to the target host. Enrollment is covered in [Setting up `ziti-ssh-host`](#setting-up-ziti-ssh-host-on-a-target-machine).
 
 **Client identity** (repeat for each user):
 
@@ -155,13 +152,7 @@ ziti edge create identity alice \
   --jwt-output-file /tmp/alice.jwt
 ```
 
-Copy the JWT to the user's machine, then enroll it:
-
-```sh
-ziti edge enroll --jwt /tmp/alice.jwt --out ~/.config/ziti/alice.json
-```
-
-See [Setting up a client identity](#setting-up-a-client-identity) for the full client setup procedure.
+Copy the JWT to the user's machine. Enrollment is covered in [Setting up a client identity](#setting-up-a-client-identity).
 
 The identity name chosen for each host (`web-server-prod` above) is the address users pass to `ziti-ssh` — choose it carefully, as it is also the terminator address on the `ssh` service.
 
