@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 
 	httptransport "github.com/go-openapi/runtime/client"
@@ -17,6 +18,7 @@ import (
 	"github.com/openziti/edge-api/rest_management_api_client/authentication"
 	config_client "github.com/openziti/edge-api/rest_management_api_client/config"
 	"github.com/openziti/edge-api/rest_model"
+	"github.com/openziti/edge-api/rest_util"
 
 	"github.com/edwardm/ziti-ssh/config"
 )
@@ -183,8 +185,12 @@ func validateControllerFlags(ctrl, user, pass string, insecure bool, caPath stri
 	return nil
 }
 
-// resolveControllerHost appends the default port 443 when no port is present in raw.
+// resolveControllerHost strips any scheme prefix and appends the default port 443
+// when no port is present. Accepts both "ctrl.example.com" and "https://ctrl.example.com".
 func resolveControllerHost(raw string) string {
+	if u, err := url.Parse(raw); err == nil && u.Host != "" {
+		raw = u.Host // strips scheme, path, etc.
+	}
 	if _, _, err := net.SplitHostPort(raw); err == nil {
 		return raw
 	}
@@ -221,7 +227,7 @@ func buildMgmtClient(ctrl, user, pass string, insecure bool, caPath string) (*ma
 		Username: rest_model.Username(user),
 		Password: rest_model.Password(pass),
 	}
-	authOK, err := mgmtClient.Authentication.Authenticate(authParams, nil)
+	authOK, err := mgmtClient.Authentication.Authenticate(authParams)
 	if err != nil {
 		return nil, fmt.Errorf("authenticate to controller: %w", err)
 	}
@@ -229,7 +235,7 @@ func buildMgmtClient(ctrl, user, pass string, insecure bool, caPath string) (*ma
 		return nil, fmt.Errorf("authenticate: response missing session token")
 	}
 
-	transport.DefaultAuthentication = httptransport.BearerToken(*authOK.Payload.Data.Token)
+	transport.DefaultAuthentication = &rest_util.ZitiTokenAuth{Token: *authOK.Payload.Data.Token}
 	return mgmtClient, nil
 }
 
