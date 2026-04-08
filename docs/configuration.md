@@ -70,7 +70,6 @@ These flags are persistent (accepted by both `enroll` and `run`):
 | Flag | Environment variable | Default | Description |
 |---|---|---|---|
 | `--identity` | `ZITI_IDENTITY` | `/etc/ziti-ssh-host/identity.json` | Path to Ziti identity JSON file |
-| `--ca-service` | `ZITI_CA_SERVICE` | `ssh-ca` | Ziti service name for the CA (used during `enroll`) |
 | `--ssh-service` | `ZITI_SSH_SERVICE` | `ssh` | Ziti service name(s) to proxy (used during `run`). The flag may be repeated for multiple services; the env var accepts a comma-separated list. |
 | `--ziti-timeout` | `ZITI_TIMEOUT` | `30s` | Timeout for blocking Ziti network operations (authenticate, listen). Accepts any `time.Duration` string, e.g. `30s`, `1m`. |
 

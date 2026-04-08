@@ -259,7 +259,6 @@ Persistent flags (accepted by all subcommands):
 | Flag | Env var | Default | Description |
 |---|---|---|---|
 | `--identity` | `ZITI_IDENTITY` | `/etc/ziti-ssh-host/identity.json` | Path to Ziti identity file |
-| `--ca-service` | `ZITI_CA_SERVICE` | `ssh-ca` | Ziti service name for the CA |
 | `--ziti-timeout` | `ZITI_TIMEOUT` | `30s` | Timeout for blocking Ziti network operations |
 
 `run` subcommand flags and env vars:

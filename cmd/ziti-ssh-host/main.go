@@ -42,7 +42,6 @@ import (
 
 const (
 	defaultIdentityFile  = "/etc/ziti-ssh-host/identity.json"
-	defaultCaService     = "ssh-ca"
 	defaultSSHService    = "ssh"
 	defaultSSHTarget     = "127.0.0.1:22"
 	sshdConfFile         = "/etc/ssh/sshd_config.d/ziti-ssh.conf"
@@ -60,7 +59,6 @@ var version = "dev"
 func main() {
 	var (
 		identityFlag    string
-		caServiceFlag   string
 		sshServicesFlag []string
 		zitiTimeoutFlag string
 		versionFlag     bool
@@ -79,7 +77,6 @@ func main() {
 	}
 
 	root.PersistentFlags().StringVar(&identityFlag, "identity", "", "Path to Ziti identity file (or ZITI_IDENTITY, default: "+defaultIdentityFile+")")
-	root.PersistentFlags().StringVar(&caServiceFlag, "ca-service", "", "Ziti service name for the SSH CA (or ZITI_CA_SERVICE, default: "+defaultCaService+")")
 	// --ssh-service now accepts multiple values; a single value still works.
 	root.PersistentFlags().StringArrayVar(&sshServicesFlag, "ssh-service", nil, "Ziti service name for SSH (repeatable; or ZITI_SSH_SERVICE comma-separated, default: "+defaultSSHService+")")
 	root.PersistentFlags().StringVar(&zitiTimeoutFlag, "ziti-timeout", "", "Timeout for Ziti network operations (or ZITI_TIMEOUT, default: 30s)")
@@ -92,8 +89,7 @@ func main() {
 		Short: "Enroll this host, configure sshd, and reload sshd",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			identityFile := config.EnvOrFlag(identityFlag, "ZITI_IDENTITY", defaultIdentityFile)
-			caService := config.EnvOrFlag(caServiceFlag, "ZITI_CA_SERVICE", defaultCaService)
-			return runEnroll(jwtPath, identityFile, caService)
+			return runEnroll(jwtPath, identityFile)
 		},
 	}
 	enrollCmd.Flags().StringVar(&jwtPath, "jwt", "", "Path to enrollment JWT file (required)")
@@ -214,13 +210,10 @@ func newZitiContextWithConfigTypes(identityFile string, configTypes ...string) (
 }
 
 // runEnroll enrolls this host with the Ziti network (using jwtPath), extracts
-// the intermediate CA public key from the enrollment response, writes the sshd
-// configuration, and reloads sshd.
-//
-// The caService parameter is retained in the function signature for API
-// compatibility but is no longer used; the CA public key is derived directly
-// from the enrolled certificate chain rather than fetched over the network.
-func runEnroll(jwtPath, identityFile, _ string) error {
+// the intermediate CA public key from the enrollment response certificate chain,
+// writes the sshd configuration, and reloads sshd. No network call to the CA
+// service is needed — the CA public key is derived directly from the chain.
+func runEnroll(jwtPath, identityFile string) error {
 	// 1. Read and parse the JWT.
 	jwtBytes, err := os.ReadFile(jwtPath)
 	if err != nil {

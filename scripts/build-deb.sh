@@ -142,7 +142,6 @@ if [ ! -f /etc/ziti-ssh-ca/env ]; then
 # Uncomment and set these variables before starting the service.
 #ZITI_IDENTITY=/etc/ziti-ssh-ca/identity.json
 #ZITI_CA_KEY=/var/lib/ziti-controller/pki/intermediate-ca/keys/intermediate-ca.key
-#ZITI_CA_SERVICE=ssh-ca
 
 # MODE controls how SSH certificates are issued:
 #
@@ -248,9 +247,6 @@ if [ ! -f /etc/ziti-ssh-host/env ]; then
 
 # Ziti service name to bind as SSH host (must match the service created on the controller)
 #ZITI_SSH_SERVICE=ssh
-
-# Ziti service name for the CA (used during enroll to fetch the CA public key)
-#ZITI_CA_SERVICE=ssh-ca
 
 # MODE controls how SSH connections are handled:
 #
