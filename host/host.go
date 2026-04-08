@@ -211,11 +211,26 @@ func WriteSSHConfig(caPubKey []byte, confFile, keyFile string) error {
 // "systemctl reload ssh". Returns an error if the command exits non-zero.
 func ReloadSSHD() error {
 	cmd := exec.Command("systemctl", "reload", "ssh")
+	cmd.Env = childEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("systemctl reload ssh: %w (output: %s)", err, out)
 	}
 	slog.Info("sshd reloaded")
 	return nil
+}
+
+// childEnv returns the current process environment with NOTIFY_SOCKET removed.
+// Child processes must not inherit this variable — systemd rejects sd_notify
+// messages from any PID other than the registered main PID of the service.
+func childEnv() []string {
+	env := os.Environ()
+	filtered := env[:0:len(env)]
+	for _, e := range env {
+		if !strings.HasPrefix(e, "NOTIFY_SOCKET=") {
+			filtered = append(filtered, e)
+		}
+	}
+	return filtered
 }
 
 // UserManager tracks reference counts for per-identity Linux users and
@@ -271,6 +286,7 @@ func (m *UserManager) EnsureUser(username string, perms IdentityPermissions) err
 
 	slog.Info("creating Linux user", "username", username)
 	cmd := exec.Command("useradd", "-m", "-s", "/bin/bash", username)
+	cmd.Env = childEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		// useradd exits with code 9 when the user already exists.
@@ -290,7 +306,9 @@ func (m *UserManager) EnsureUser(username string, perms IdentityPermissions) err
 	if len(perms.Groups) > 0 {
 		groupList := strings.Join(perms.Groups, ",")
 		slog.Info("adding user to groups", "username", username, "groups", groupList)
-		if out, err := exec.Command("usermod", "-aG", groupList, username).CombinedOutput(); err != nil {
+		usermod := exec.Command("usermod", "-aG", groupList, username)
+		usermod.Env = childEnv()
+		if out, err := usermod.CombinedOutput(); err != nil {
 			// Non-fatal: the user was created successfully; group membership
 			// failure (e.g. group does not exist) is logged but does not abort
 			// the session.
@@ -430,7 +448,9 @@ func createSudoers(username, rule string) error {
 	tmp.Close()
 
 	// visudo -c -f validates the file syntax without installing it.
-	if out, err := exec.Command("visudo", "-c", "-f", tmpPath).CombinedOutput(); err != nil {
+	visudo := exec.Command("visudo", "-c", "-f", tmpPath)
+	visudo.Env = childEnv()
+	if out, err := visudo.CombinedOutput(); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("visudo validation failed for %q: %w (output: %s)", username, err, out)
 	}
@@ -473,7 +493,9 @@ func deleteUser(username string) error {
 
 	// Step 1: ask loginctl to terminate the user session (systemd --user,
 	// sd-pam, etc.).  Ignore errors — the session may already be gone.
-	if out, err := exec.Command("loginctl", "terminate-user", username).CombinedOutput(); err != nil {
+	loginctl := exec.Command("loginctl", "terminate-user", username)
+	loginctl.Env = childEnv()
+	if out, err := loginctl.CombinedOutput(); err != nil {
 		slog.Info("loginctl terminate-user returned non-zero (ignored)",
 			"username", username, "err", err, "output", strings.TrimSpace(string(out)))
 	}
@@ -485,7 +507,9 @@ func deleteUser(username string) error {
 	)
 	deadline := time.Now().Add(pollTimeout)
 	for time.Now().Before(deadline) {
-		err := exec.Command("pgrep", "-u", username).Run()
+		pgrep := exec.Command("pgrep", "-u", username)
+		pgrep.Env = childEnv()
+		err := pgrep.Run()
 		if err != nil {
 			// pgrep exits 1 when no processes match — user is clear.
 			if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
@@ -507,6 +531,7 @@ func deleteUser(username string) error {
 
 	// Step 3: remove the user and their home directory.
 	cmd := exec.Command("userdel", "-r", username)
+	cmd.Env = childEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("userdel -r %q: %w (output: %s)", username, err, out)
 	}
