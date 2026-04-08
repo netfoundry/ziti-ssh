@@ -317,11 +317,15 @@ ziti-ssh-host enroll --jwt /tmp/web-server-prod.jwt
 
 This command:
 - Enrolls the identity and writes `/etc/ziti-ssh-host/identity.json` (mode 0600).
-- Extracts the intermediate CA public key from the enrollment response certificate chain (no network call to the CA service required).
-- Writes `/etc/ssh/ziti_ca.pub` and `/etc/ssh/sshd_config.d/ziti-ssh.conf`.
+- Reads the controller list from the enrollment JWT (`ctrls` claim) and fetches the intermediate CA public key from each controller in the cluster via `GET /edge/client/v1/.well-known/est/cacerts`.
+- Writes all intermediate CA public keys to `/etc/ssh/ziti_ca.pub` (one per line) and writes `/etc/ssh/sshd_config.d/ziti-ssh.conf`.
 - Runs `systemctl reload ssh`.
 
-After enrollment, `sshd` trusts certificates signed by your CA. No other changes to the SSH host are required.
+In an HA cluster each controller node has its own intermediate CA. Enrollment automatically discovers and trusts all of them, so SSH certificates issued by any node are accepted.
+
+After enrollment, `sshd` trusts certificates signed by any controller CA in your cluster. No other changes to the SSH host are required.
+
+> **HA note:** When a controller is added to or removed from the cluster, the `ziti-ssh-host run` daemon detects the change via a `EventControllerUrlsUpdated` event and automatically updates `TrustedUserCAKeys` and reloads sshd — no host re-enrollment or daemon restart is needed.
 
 ### 4. Edit the env file
 

@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"net/url"
 	"sync"
 	"syscall"
 	"time"
@@ -162,6 +163,23 @@ func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL t
 		return fmt.Errorf("init Ziti context from %q: %w", identityFile, err)
 	}
 	defer zitiCtx.Close()
+
+	zitiCtx.Events().On(ziti.EventControllerUrlsUpdated, func(args ...interface{}) {
+		if len(args) == 0 {
+			return
+		}
+		urls, ok := args[0].([]*url.URL)
+		if !ok {
+			return
+		}
+		strs := make([]string, len(urls))
+		for i, u := range urls {
+			strs[i] = u.String()
+		}
+		if err := config.PersistZtAPIs(identityFile, strs); err != nil {
+			slog.Warn("failed to persist controller URLs to identity file", "err", err)
+		}
+	})
 
 	if err := config.RunWithTimeout(zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
 		return err

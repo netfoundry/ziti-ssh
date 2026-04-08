@@ -187,6 +187,29 @@ type signParams struct {
 	verbose      bool // when false, suppress "Certificate written" and showCertDetails
 }
 
+// registerZtAPIsPersist subscribes to EventControllerUrlsUpdated on zitiCtx
+// and writes the discovered controller URL list back to identityFile on each
+// update. Call before Authenticate so that the initial discovery during
+// authentication is captured.
+func registerZtAPIsPersist(zitiCtx ziti.Context, identityFile string) {
+	zitiCtx.Events().On(ziti.EventControllerUrlsUpdated, func(args ...interface{}) {
+		if len(args) == 0 {
+			return
+		}
+		urls, ok := args[0].([]*url.URL)
+		if !ok {
+			return
+		}
+		strs := make([]string, len(urls))
+		for i, u := range urls {
+			strs[i] = u.String()
+		}
+		if err := config.PersistZtAPIs(identityFile, strs); err != nil {
+			slog.Warn("failed to persist controller URLs to identity file", "err", err)
+		}
+	})
+}
+
 // runSign obtains a signed SSH certificate from the CA and writes it to disk.
 // It is used both by the `sign` subcommand and by runConnect for auto-sign.
 func runSign(p signParams) error {
@@ -216,6 +239,8 @@ func runSign(p signParams) error {
 	if err := addOIDCCredentials(zitiCtx, p.oidc); err != nil {
 		return err
 	}
+
+	registerZtAPIsPersist(zitiCtx, p.identityFile)
 
 	if err := config.RunWithTimeout(p.zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
 		return err
@@ -386,6 +411,8 @@ func runConnect(p connectParams) error {
 	if err := addOIDCCredentials(zitiCtx, p.oidc); err != nil {
 		return err
 	}
+
+	registerZtAPIsPersist(zitiCtx, p.identityFile)
 
 	if err := config.RunWithTimeout(p.zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
 		return err

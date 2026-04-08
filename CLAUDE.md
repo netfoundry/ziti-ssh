@@ -150,17 +150,19 @@ Three subcommands:
 
 **`enroll --jwt <path>`:**
 1. Enrolls the host Ziti identity from a JWT token
-2. Extracts the intermediate CA public key from the enrollment response certificate chain (no network call to `ssh-ca` needed)
-3. Writes sshd configuration (`TrustedUserCAKeys`) to `/etc/ssh/sshd_config.d/ziti-ssh.conf`
-4. Reloads sshd
+2. Reads the `ctrls` claim from the JWT to discover all controllers in the cluster; falls back to the issuer URL for older controllers that omit the claim
+3. Fetches the intermediate CA public key from each controller via `GET /edge/client/v1/.well-known/est/cacerts`, using the Root CA from the enrollment response as the TLS trust anchor
+4. Writes all intermediate CA public keys (one per line) to `TrustedUserCAKeys` in `/etc/ssh/sshd_config.d/ziti-ssh.conf` — in an HA cluster each controller node has its own intermediate CA, and all must be trusted
+5. Reloads sshd
 
 **`run`:**
 1. Initializes Ziti context from the identity file; declares `ziti-ssh-host.v1` as a requested config type so the controller delivers it with the service detail
-2. Accepts one or more `--ssh-service` values (flag may be repeated; `ZITI_SSH_SERVICE` accepts comma-separated list; defaults to `ssh`)
-3. For each service: opens a separate Ziti listener, loads and parses the `ziti-ssh-host.v1` config, builds independent `ProxyHooks` carrying that service's permission map
-4. Proxies incoming connections to `127.0.0.1:22`
-5. In `per-identity` mode: on connect, creates an ephemeral Linux user and applies the resolved permissions (groups via `usermod -aG`, sudoers rule via `/etc/sudoers.d/<username>`); on disconnect, decrements the session ref-count and deletes the user when the last session closes
-6. Subscribes to service-changed events and reloads each service's `ziti-ssh-host.v1` config atomically when it changes — no restart needed
+2. Subscribes to `EventControllerUrlsUpdated` before authenticating; when the controller cluster membership changes, fetches CA public keys from the new set of controllers and rewrites `TrustedUserCAKeys` + reloads sshd if the set changed
+3. Accepts one or more `--ssh-service` values (flag may be repeated; `ZITI_SSH_SERVICE` accepts comma-separated list; defaults to `ssh`)
+4. For each service: opens a separate Ziti listener, loads and parses the `ziti-ssh-host.v1` config, builds independent `ProxyHooks` carrying that service's permission map
+5. Proxies incoming connections to `127.0.0.1:22`
+6. In `per-identity` mode: on connect, creates an ephemeral Linux user and applies the resolved permissions (groups via `usermod -aG`, sudoers rule via `/etc/sudoers.d/<username>`); on disconnect, decrements the session ref-count and deletes the user when the last session closes
+7. Subscribes to service-changed events and reloads each service's `ziti-ssh-host.v1` config atomically when it changes — no restart needed
 
 **`inspect [--service <name>]...`:**
 - Authenticates with the host identity; no listeners opened

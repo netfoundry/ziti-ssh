@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -183,6 +184,29 @@ func deriveCertPath(privKeyPath string) string {
 // Sign helpers (mirrors runSign in cmd/ziti-ssh)
 // ---------------------------------------------------------------------------
 
+// registerZtAPIsPersist subscribes to EventControllerUrlsUpdated on zitiCtx
+// and writes the discovered controller URL list back to identityFile on each
+// update. Call before Authenticate so that the initial discovery during
+// authentication is captured.
+func registerZtAPIsPersist(zitiCtx ziti.Context, identityFile string) {
+	zitiCtx.Events().On(ziti.EventControllerUrlsUpdated, func(args ...interface{}) {
+		if len(args) == 0 {
+			return
+		}
+		urls, ok := args[0].([]*url.URL)
+		if !ok {
+			return
+		}
+		strs := make([]string, len(urls))
+		for i, u := range urls {
+			strs[i] = u.String()
+		}
+		if err := config.PersistZtAPIs(identityFile, strs); err != nil {
+			slog.Warn("failed to persist controller URLs to identity file", "err", err)
+		}
+	})
+}
+
 type signParams struct {
 	identityFile string
 	caService    string
@@ -214,6 +238,8 @@ func runSign(p signParams) error {
 		return fmt.Errorf("init Ziti context from %q: %w", p.identityFile, err)
 	}
 	defer zitiCtx.Close()
+
+	registerZtAPIsPersist(zitiCtx, p.identityFile)
 
 	if err := config.RunWithTimeout(p.zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
 		return err
@@ -408,6 +434,8 @@ func runSCP(p scpParams) error {
 		return fmt.Errorf("init Ziti context from %q: %w", p.identityFile, err)
 	}
 	defer zitiCtx.Close()
+
+	registerZtAPIsPersist(zitiCtx, p.identityFile)
 
 	if err := config.RunWithTimeout(p.zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
 		return err
