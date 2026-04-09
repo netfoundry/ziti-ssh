@@ -42,6 +42,7 @@ import (
 
 	"github.com/edwardm/ziti-ssh/client"
 	"github.com/edwardm/ziti-ssh/config"
+	zitioidc "github.com/edwardm/ziti-ssh/internal/oidc"
 )
 
 // ---------------------------------------------------------------------------
@@ -211,7 +212,7 @@ type signParams struct {
 	identityFile string
 	caService    string
 	keyFile      string
-	oidcIssuer   string
+	oidc         zitioidc.FlowParams
 	zitiTimeout  time.Duration
 }
 
@@ -240,6 +241,10 @@ func runSign(p signParams) error {
 	defer zitiCtx.Close()
 
 	registerZtAPIsPersist(zitiCtx, p.identityFile)
+
+	if err := zitioidc.AddCredentials(zitiCtx, p.oidc); err != nil {
+		return err
+	}
 
 	if err := config.RunWithTimeout(p.zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
 		return err
@@ -347,6 +352,7 @@ type scpParams struct {
 	caService    string
 	sshService   string
 	keyFile      string
+	oidc         zitioidc.FlowParams
 	recursive    bool
 	preserve     bool
 	quiet        bool
@@ -417,6 +423,7 @@ func runSCP(p scpParams) error {
 			identityFile: p.identityFile,
 			caService:    p.caService,
 			keyFile:      privKeyPath,
+			oidc:         p.oidc,
 			zitiTimeout:  p.zitiTimeout,
 		}); err != nil {
 			return fmt.Errorf("auto-sign: %w", err)
@@ -436,6 +443,10 @@ func runSCP(p scpParams) error {
 	defer zitiCtx.Close()
 
 	registerZtAPIsPersist(zitiCtx, p.identityFile)
+
+	if err := zitioidc.AddCredentials(zitiCtx, p.oidc); err != nil {
+		return err
+	}
 
 	if err := config.RunWithTimeout(p.zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
 		return err
@@ -592,11 +603,23 @@ of validity remain.`,
 			srcs := args[:len(args)-1]
 			dst := args[len(args)-1]
 
+			callbackPort := cfg.OIDC.CallbackPort
+			if callbackPort == "" {
+				callbackPort = zitioidc.DefaultCallbackPort
+			}
+			oidcParams := zitioidc.FlowParams{
+				Issuer:       orDefault(oidcIssuerFlag, cfg.OIDC.Issuer),
+				ClientID:     cfg.OIDC.ClientID,
+				ClientSecret: cfg.OIDC.ClientSecret,
+				CallbackPort: callbackPort,
+			}
+
 			return runSCP(scpParams{
 				identityFile: identityFile,
 				caService:    caService,
 				sshService:   sshService,
 				keyFile:      resolvedKey,
+				oidc:         oidcParams,
 				recursive:    recursiveFlag,
 				preserve:     preserveFlag,
 				quiet:        quietFlag,
@@ -615,6 +638,7 @@ of validity remain.`,
 	root.Flags().StringVar(&caServiceFlag, "ca-service", "", "CA service name (or ZITI_CA_SERVICE, default: ssh-ca)")
 	root.Flags().StringVar(&sshServiceFlag, "ssh-service", "", "SSH service name (or ZITI_SSH_SERVICE, default: ssh)")
 	root.Flags().StringVar(&keyFlag, "key", "", "SSH private key path (default: auto-detect from ~/.ssh/)")
+	root.Flags().StringVar(&oidcIssuerFlag, "oidc-issuer", "", "OIDC issuer URL; triggers browser-based OIDC auth before connecting (or set oidc.issuer in config)")
 	root.Flags().BoolVarP(&recursiveFlag, "recursive", "r", false, "Recursively copy entire directories")
 	root.Flags().BoolVarP(&preserveFlag, "preserve", "p", false, "Preserve file timestamps and permissions")
 	root.Flags().BoolVarP(&quietFlag, "quiet", "q", false, "Suppress progress output")
@@ -668,6 +692,7 @@ var (
 	caServiceFlag  string
 	sshServiceFlag string
 	keyFlag        string
+	oidcIssuerFlag string
 	recursiveFlag  bool
 	preserveFlag   bool
 	quietFlag      bool
