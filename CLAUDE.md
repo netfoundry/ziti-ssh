@@ -92,16 +92,19 @@ Five subcommands:
 - Auto-refreshes the SSH cert if missing or expiring within 5 min.
 - Resolves whether the target is a direct Ziti service name or a terminator address on `--ssh-service`.
 - Uses `ziti.DialOptions{Identity: terminatorAddr}` when dialling via a terminator.
-- Wraps the private key and cert into an `ssh.CertSigner` via `client.NewCertSigner`.
+- Wraps the private key and cert into an `ssh.CertSigner` via `client.NewCertSigner`. Falls back to `SSH_AUTH_SOCK` if the private key is passphrase-protected.
 - Runs a full interactive PTY session via `client.RunSession`.
+- Accepts a trailing command (after `--`) for non-interactive execution via `client.RunCommand`; the remote exit code is propagated.
 
 **`sign`**: Dials `ssh-ca`, sends the SSH public key, writes the signed cert to `<key>-cert.pub`, prints cert details via `ssh-keygen -L`.
 
-**`enroll --jwt <path>`**: Calls `enroll.Enroll` with `KeyAlg = "EC"`. Writes the identity JSON to `~/.config/ziti-ssh/<name>.json` by default.
+**`enroll --jwt <path>`**: Calls `enroll.Enroll` with `KeyAlg = "EC"`. Writes the identity JSON to `~/.config/ziti-ssh/<name>.json` by default (`--out` overrides).
 
 **`list`**: Calls `ctx.GetServices()` and prints each service name and permissions.
 
 **`mfa enable/verify/remove`**: Uses `zitiCtx.EnrollZitiMfa`, `VerifyZitiMfa`, `RemoveZitiMfa` with `AddMfaTotpCodeListener` / `AddAuthenticationStateFullListener` event hooks.
+
+**OIDC authentication**: When `--oidc-issuer` is set (or `oidc.issuer` in the config file), `connect` and `sign` perform a browser-based OIDC authorization code flow (PKCE when no client secret) before authenticating with Ziti. The resulting JWT is added to the Ziti context via `AddJWT()`, satisfying ext-jwt-signer policies on the controller. Flow times out after 2 minutes. Implemented in `cmd/ziti-ssh/oidc.go` and `internal/oidc/oidc.go`.
 
 Config file at `~/.config/ziti-ssh/config.yaml` (XDG_CONFIG_HOME respected). Fields: `identity`, `ca_service`, `ssh_service`, `ssh_key_path`, `mode`, `oidc.*`. Three-tier precedence: CLI flag > config file > default.
 
@@ -110,12 +113,13 @@ Config file at `~/.config/ziti-ssh/config.yaml` (XDG_CONFIG_HOME respected). Fie
 - `NewCertSigner(keyPath string) (ssh.Signer, error)` — loads key and cert; returns `ssh.CertSigner` if cert present.
 - `CertNeedsRefresh(certPath string) bool` — true if cert absent or expires within 5 min.
 - `RunSession(conn net.Conn, user, host string, signer ssh.Signer) error` — PTY SSH session over an existing `net.Conn`.
+- `RunCommand(conn net.Conn, user, host, cmd string, signer ssh.Signer) (int, error)` — non-interactive command execution; returns remote exit code.
 - `RunSFTP(conn, user, host, signer, isUpload, localPaths, remotePath, recursive, preserve, quiet) error` — SFTP file copy over an existing `net.Conn`; uses `github.com/pkg/sftp`.
 
 ### File Copy Tool (`ziti-scp`)
 
 - Parses `[user@]host:path` remote specs and bare local paths from positional arguments (last arg is destination).
-- Same cert auto-refresh (30-minute threshold) and Ziti dial logic as `ziti-ssh`.
+- Same cert auto-refresh (5-minute threshold) and Ziti dial logic as `ziti-ssh`.
 - Flags: `-r` (recursive), `-p` (preserve timestamps/permissions), `-q` (quiet).
 - `enroll` subcommand for identity enrollment (mirrors `ziti-ssh enroll`).
 - Shared config file: `~/.config/ziti-ssh/config.yaml`.
@@ -157,7 +161,7 @@ Three subcommands:
 
 **`run`:**
 1. Initializes Ziti context from the identity file; declares `ziti-ssh-host.v1` as a requested config type so the controller delivers it with the service detail
-2. Subscribes to `EventControllerUrlsUpdated` before authenticating; when the controller cluster membership changes, fetches CA public keys from the new set of controllers and rewrites `TrustedUserCAKeys` + reloads sshd if the set changed
+2. Subscribes to `EventControllerUrlsUpdated` before authenticating; when the controller cluster membership changes: (a) persists the updated controller URL list to the identity JSON via `config.PersistZtAPIs`, and (b) fetches CA public keys from the new set of controllers and rewrites `TrustedUserCAKeys` + reloads sshd if the set changed. All four binaries call `PersistZtAPIs` on this event so the identity file always reflects the live cluster membership.
 3. Accepts one or more `--ssh-service` values (flag may be repeated; `ZITI_SSH_SERVICE` accepts comma-separated list; defaults to `ssh`)
 4. For each service: opens a separate Ziti listener, loads and parses the `ziti-ssh-host.v1` config, builds independent `ProxyHooks` carrying that service's permission map
 5. Proxies incoming connections to `127.0.0.1:22`
@@ -357,16 +361,17 @@ ziti-ssh/
 ├── cmd/
 │   ├── ziti-ssh/
 │   │   ├── main.go         # Full SSH client (connect, sign, enroll, list, mfa)
-│   │   └── oidc.go         # Browser-based OIDC auth flow
+│   │   └── oidc.go         # Browser-based OIDC auth flow (browser launch, callback server)
 │   ├── ziti-scp/
-│   │   └── main.go         # SCP-style file copy tool (upload, download, recursive)
+│   │   └── main.go         # SCP-style file copy tool (upload, download, recursive, enroll)
 │   ├── ziti-ssh-ca/
 │   │   ├── main.go         # CA service entry point and run loop
 │   │   └── config.go       # config subcommand (print, apply, remove)
 │   └── ziti-ssh-host/
 │       └── main.go         # enroll, run (multi-service), inspect subcommands
 ├── ca/
-│   └── ca.go               # CA key loading, cert signing, DeriveUsername
+│   ├── ca.go               # CA key loading, cert signing, DeriveUsername
+│   └── ca_test.go          # Unit tests for DeriveUsername
 ├── client/
 │   ├── ssh.go              # NewCertSigner, CertNeedsRefresh, RunSession, RunCommand
 │   └── sftp.go             # RunSFTP — SFTP file copy over net.Conn
@@ -374,11 +379,20 @@ ziti-ssh/
 │   ├── host.go             # ProxyHooks, Proxy, UserManager, PermissionsConfig, sshd config
 │   └── host_test.go        # Unit tests for PermissionsConfig.Resolve and UserManager
 ├── config/
-│   └── config.go           # Shared configuration (flags + env vars)
+│   ├── config.go           # Shared configuration (flags + env vars)
+│   └── ztapis.go           # Controller URL persistence (PersistZtAPIs, EventControllerUrlsUpdated)
 ├── internal/
-│   └── ratelimit/          # Per-identity token-bucket rate limiter
+│   ├── oidc/
+│   │   └── oidc.go         # OIDC authorization code flow (PKCE, token exchange)
+│   └── ratelimit/
+│       ├── ratelimit.go    # Per-identity token-bucket rate limiter
+│       └── ratelimit_test.go
+├── scripts/
+│   └── build-deb.sh        # Builds all four .deb packages into dist/
 ├── go.mod
 ├── go.sum
+├── ARCHITECTURE.md         # High-level architecture narrative
+├── CHANGELOG.md            # Feature changelog by release
 └── CLAUDE.md
 ```
 
@@ -387,6 +401,8 @@ ziti-ssh/
 | File | Purpose |
 |---|---|
 | `README.md` | Project overview, prerequisites, building |
+| `ARCHITECTURE.md` | High-level architecture narrative and design rationale |
+| `CHANGELOG.md` | Feature changelog by release |
 | `docs/provisioning.md` | Ziti network setup, per-component installation, `ziti-ssh-host.v1` config type admin setup |
 | `docs/usage.md` | End-user guide: certs, connecting, file copy, MFA |
 | `docs/configuration.md` | Full flag/env/config reference for all binaries, `ziti-ssh-host.v1` schema |

@@ -61,6 +61,28 @@ All binaries resolve each setting in the same order: CLI flag > environment vari
 | `--rate-burst` | `ZITI_RATE_BURST` | `3` | No | Burst allowance for the per-identity token-bucket rate limiter |
 | `--ziti-timeout` | `ZITI_TIMEOUT` | `30s` | No | Timeout for blocking Ziti network operations (authenticate, listen). Accepts any `time.Duration` string, e.g. `30s`, `1m`. |
 
+### `ziti-ssh-ca config` subcommands
+
+The `config` subcommand manages the `ziti-ssh-host.v1` config type on the Ziti controller via the management API (HTTPS, username/password). It does not use the Ziti identity file.
+
+| Subcommand | Description |
+|---|---|
+| `config print` | Print the `ziti-ssh-host.v1` field table and JSON schema to stdout. No controller connection required. |
+| `config apply` | Idempotently create or update the `ziti-ssh-host.v1` config type on the controller. Safe to re-run. |
+| `config remove` | Remove the `ziti-ssh-host.v1` config type from the controller if it exists. |
+
+`config apply` and `config remove` require the following flags (or their environment variable equivalents):
+
+| Flag | Environment variable | Default | Description |
+|---|---|---|---|
+| `--controller` | `ZITI_CTRL_ADDRESS` | — | Controller hostname, optionally with port (default port: 443). Do not include `https://`. |
+| `--username` | `ZITI_CTRL_USERNAME` | — | Controller admin username |
+| `--password` | `ZITI_CTRL_PASSWORD` | — | Controller admin password |
+| `--insecure` | `ZITI_CTRL_INSECURE` | false | Skip TLS certificate verification. Mutually exclusive with `--controller-ca`. |
+| `--controller-ca` | `ZITI_CTRL_CA` | — | Path to PEM CA certificate to trust for the controller TLS connection. Mutually exclusive with `--insecure`. |
+
+See [Configuring per-identity permissions](provisioning.md#configuring-per-identity-permissions-ziti-ssh-hostv1) in the provisioning guide for usage examples.
+
 ---
 
 ## `ziti-ssh-host`
