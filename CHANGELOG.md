@@ -6,6 +6,28 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+#### `ziti-ssh connect` — SSH agent forwarding (`-A` / `--forward-agent`)
+
+New `-A` / `--forward-agent` flag on `ziti-ssh connect`. When set, the local SSH agent (identified by `SSH_AUTH_SOCK`) is forwarded to the remote session so that processes on the remote host can use keys held by the local agent — for example, to make onward SSH hops without copying private keys to the remote.
+
+**Behaviour:**
+- On the fast path (no `-L`/`-R`/`-D` forwards), `forwardAgent` is passed directly to `client.RunSession`, which calls `client.ForwardAgent` before `session.Shell()`.
+- On the forwarding path (has `-L`/`-R`/`-D` forwards, uses `NewSSHClient`), `runSSHClientSession` calls `client.ForwardAgent(sshClient, session)` before `session.Shell()`.
+- If `SSH_AUTH_SOCK` is not set or the agent cannot be reached, a `WARN`-level log message is emitted and the session opens normally — agent forwarding failure is non-fatal.
+- The SSH certificates issued by `ziti-ssh-ca` already include the `permit-agent-forwarding` extension, so no CA or sshd configuration changes are needed.
+
+**New exported function in `client/ssh.go`:**
+- `ForwardAgent(sshClient *ssh.Client, session *ssh.Session) error` — connects to the local SSH agent via `SSH_AUTH_SOCK`, calls `agent.ForwardToAgent(sshClient, agentClient)` to register the agent-channel handler, spawns a goroutine to close the agent connection when the SSH client closes, and calls `agent.RequestAgentForwarding(session)` to send the `auth-agent-req@openssh.com` channel request. Returns an error on any failure; the caller treats this as a warning.
+
+**`RunSession` signature change:**
+- `RunSession(conn, user, host, signer, forwardAgent bool)` — `forwardAgent bool` parameter added as the fifth argument. All call sites updated.
+
+#### Documentation
+
+- `docs/usage.md`: new "SSH agent forwarding (`-A`)" section with usage examples, agent setup instructions, and a note about combining with port forwarding.
+- `docs/configuration.md`: `-A` / `--forward-agent` row added to the `ziti-ssh connect` flag table.
+- `CLAUDE.md`: `connect` bullet updated to describe `-A` behaviour; `client/ssh.go` API section updated with `ForwardAgent` and updated `RunSession` signature.
+
 #### `ziti-ssh connect` — port forwarding (`-L`, `-R`, `-D`, `-N`)
 
 Port forwarding flags added to `ziti-ssh connect`, mirroring `ssh(1)` syntax. All flags may be repeated to open multiple forwards simultaneously.

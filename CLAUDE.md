@@ -94,6 +94,7 @@ Seven subcommands:
 - Uses `ziti.DialOptions{Identity: terminatorAddr}` when dialling via a terminator.
 - Wraps the private key and cert into an `ssh.CertSigner` via `client.NewCertSigner`. Falls back to `SSH_AUTH_SOCK` if the private key is passphrase-protected.
 - Runs a full interactive PTY session via `client.RunSession` (no forwards) or via `client.NewSSHClient` + `runSSHClientSession` when `-L`/`-R`/`-D` forwards are active.
+- `-A` / `--forward-agent` — forward the local SSH agent to the remote session; calls `client.ForwardAgent(sshClient, session)` before `session.Shell()`; non-fatal if `SSH_AUTH_SOCK` is unset or agent unreachable.
 - Accepts a trailing command (after `--`) for non-interactive execution via `client.RunCommand`; the remote exit code is propagated.
 - `-L [bind:]localport:remotehost:remoteport` — local port forward; may be repeated; calls `client.RunLocalForward` in a goroutine.
 - `-R [bind:]remoteport:localhost:localport` — remote port forward; calls `client.RunRemoteForward` in a goroutine.
@@ -125,7 +126,8 @@ Config file at `~/.config/ziti-ssh/config.yaml` (XDG_CONFIG_HOME respected). Fie
 - `NewCertSigner(keyPath string) (ssh.Signer, error)` — loads key and cert; returns `ssh.CertSigner` if cert present.
 - `CertNeedsRefresh(certPath string) bool` — true if cert absent or expires within 5 min.
 - `NewSSHClient(conn net.Conn, user, host string, signer ssh.Signer) (*ssh.Client, error)` — performs the SSH handshake and returns a raw `*ssh.Client` for forwarding use cases.
-- `RunSession(conn net.Conn, user, host string, signer ssh.Signer) error` — PTY SSH session over an existing `net.Conn`.
+- `RunSession(conn net.Conn, user, host string, signer ssh.Signer, forwardAgent bool) error` — PTY SSH session over an existing `net.Conn`; when `forwardAgent` is true, calls `ForwardAgent` before `session.Shell()`.
+- `ForwardAgent(sshClient *ssh.Client, session *ssh.Session) error` — connects to `SSH_AUTH_SOCK`, calls `agent.ForwardToAgent` on the client and `agent.RequestAgentForwarding` on the session; returns an error (non-fatal by convention) if `SSH_AUTH_SOCK` is unset or agent is unreachable.
 - `RunCommand(conn net.Conn, user, host, cmd string, signer ssh.Signer) error` — non-interactive command execution; propagates remote exit code via `os.Exit`.
 - `RunLocalForward(ctx, sshClient, LocalForwardSpec) error` — local port forward (-L); listens locally, tunnels via `direct-tcpip`; runs until ctx cancelled.
 - `RunRemoteForward(ctx, sshClient, RemoteForwardSpec) error` — remote port forward (-R); uses `sshClient.Listen`; runs until ctx cancelled.

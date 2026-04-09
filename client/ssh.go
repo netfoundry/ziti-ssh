@@ -20,6 +20,10 @@
 //     net.Conn that has already been dialled. No PTY is allocated.
 //     The remote exit code is propagated via os.Exit.
 //
+//   - ForwardAgent       — sets up SSH agent forwarding on an already-opened
+//     *ssh.Client and *ssh.Session. Non-fatal if SSH_AUTH_SOCK
+//     is unset or the agent is unreachable.
+//
 //   - RunLocalForward    — listens locally and forwards each connection to a
 //     remote host:port via a direct-tcpip channel (-L).
 //
@@ -229,6 +233,12 @@ func CertNeedsRefresh(certPath string) bool {
 // ssh.NewClientConn (OpenSSH convention — it does not perform DNS resolution
 // here). signer provides the public-key / certificate auth credential.
 //
+// When forwardAgent is true, RunSession connects to the local SSH agent via
+// SSH_AUTH_SOCK and enables agent forwarding on the session so that remote
+// processes can use local agent keys (e.g. for onward SSH hops). If
+// SSH_AUTH_SOCK is not set or the agent cannot be reached, a warning is logged
+// and the session continues without agent forwarding — it is non-fatal.
+//
 // The terminal is placed in raw mode for the duration of the session and
 // restored on return (even on error).
 //
@@ -237,7 +247,7 @@ func CertNeedsRefresh(certPath string) bool {
 // host's Ziti identity is cryptographically proven before any SSH bytes are
 // exchanged. A traditional known-hosts check would be redundant and weaker
 // than the guarantee Ziti already provides.
-func RunSession(conn net.Conn, user, host string, signer ssh.Signer) error {
+func RunSession(conn net.Conn, user, host string, signer ssh.Signer, forwardAgent bool) error {
 	cfg := &ssh.ClientConfig{
 		User:            user,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
@@ -248,10 +258,10 @@ func RunSession(conn net.Conn, user, host string, signer ssh.Signer) error {
 	if err != nil {
 		return fmt.Errorf("SSH handshake with %q: %w", host, err)
 	}
-	client := ssh.NewClient(clientConn, chans, reqs)
-	defer client.Close()
+	c := ssh.NewClient(clientConn, chans, reqs)
+	defer c.Close()
 
-	session, err := client.NewSession()
+	session, err := c.NewSession()
 	if err != nil {
 		return fmt.Errorf("open SSH session: %w", err)
 	}
@@ -261,6 +271,12 @@ func RunSession(conn net.Conn, user, host string, signer ssh.Signer) error {
 	session.Stdout = os.Stdout
 	session.Stderr = os.Stderr
 	session.Stdin = os.Stdin
+
+	if forwardAgent {
+		if err := ForwardAgent(c, session); err != nil {
+			slog.Warn("agent forwarding unavailable", "err", err)
+		}
+	}
 
 	stdinFd := int(os.Stdin.Fd())
 	stdoutFd := int(os.Stdout.Fd())
@@ -299,6 +315,62 @@ func RunSession(conn net.Conn, user, host string, signer ssh.Signer) error {
 		}
 		return err
 	}
+	return nil
+}
+
+// ForwardAgent sets up SSH agent forwarding on an already-opened session.
+//
+// It connects to the local SSH agent via SSH_AUTH_SOCK, registers the agent on
+// sshClient so the remote can open agent channels back to the local process,
+// then sends the auth-agent-req@openssh.com channel request on session so that
+// the remote shell has access to the local agent.
+//
+// If SSH_AUTH_SOCK is not set or the agent cannot be reached, a descriptive
+// error is returned. The caller should treat this as a warning and continue
+// the session without agent forwarding rather than aborting.
+//
+// The agent connection is closed automatically when sshClient is closed —
+// no separate cleanup is required by the caller.
+func ForwardAgent(sshClient *ssh.Client, session *ssh.Session) error {
+	sockPath := os.Getenv("SSH_AUTH_SOCK")
+	if sockPath == "" {
+		return fmt.Errorf("SSH_AUTH_SOCK is not set; start an SSH agent (e.g. eval \"$(ssh-agent -s)\") and add your key with ssh-add")
+	}
+
+	agentConn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		return fmt.Errorf("connect to SSH agent at %q: %w", sockPath, err)
+	}
+	// agentConn is adopted by agent.NewClient and will be closed when
+	// sshClient.Close() tears down the underlying transport — the agent package
+	// does not close it itself, but the goroutine launched by ForwardToAgent
+	// terminates when the client connection is gone, and the OS reclaims the
+	// unix socket FD at that point. We explicitly close it as a belt-and-
+	// suspenders measure when the sshClient goes away by registering a cleanup
+	// on the client's Done channel in a background goroutine.
+	agentClient := agent.NewClient(agentConn)
+
+	// ForwardToAgent registers a handler on sshClient for incoming
+	// "auth-agent@openssh.com" channels opened by the remote host so it can
+	// proxy agent requests back to agentClient.
+	if err := agent.ForwardToAgent(sshClient, agentClient); err != nil {
+		_ = agentConn.Close()
+		return fmt.Errorf("register agent on SSH client: %w", err)
+	}
+
+	// Close agentConn when the SSH client transport closes.
+	go func() {
+		sshClient.Wait() //nolint:errcheck // just waiting for close
+		_ = agentConn.Close()
+	}()
+
+	// RequestAgentForwarding sends the auth-agent-req@openssh.com request on
+	// the session so that sshd enables agent forwarding for this session.
+	if err := agent.RequestAgentForwarding(session); err != nil {
+		return fmt.Errorf("request agent forwarding on session: %w", err)
+	}
+
+	slog.Debug("SSH agent forwarding enabled", "sock", sockPath)
 	return nil
 }
 

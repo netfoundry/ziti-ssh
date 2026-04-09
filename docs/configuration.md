@@ -25,6 +25,7 @@ All binaries resolve each setting in the same order: CLI flag > environment vari
 | `--key` | — | auto-detect | SSH private key path |
 | `--oidc-issuer` | — | — | OIDC issuer URL; triggers browser-based OIDC auth (overrides `oidc.issuer` in config) |
 | `-N` / `--no-shell` | — | false | Do not open a shell; only run port forwards. Requires at least one `-L`, `-R`, or `-D`. |
+| `-A` / `--forward-agent` | — | false | Forward the local SSH agent to the remote session. Requires `SSH_AUTH_SOCK`. Non-fatal if the agent is unreachable — session continues without forwarding. |
 | `-L` / `--local-forward` | — | — | Local port forward: `[bind:]localport:remotehost:remoteport`. May be repeated. |
 | `-R` / `--remote-forward` | — | — | Remote port forward: `[bind:]remoteport:localhost:localport`. May be repeated. |
 | `-D` / `--dynamic` | — | — | Dynamic SOCKS5 proxy: `[bind:]port`. May be repeated. |

@@ -397,9 +397,10 @@ type connectParams struct {
 	target         string // raw "[user@]target" argument
 	command        string // optional remote command; empty means interactive shell
 	verbose        bool
-	noShell        bool                       // -N: do not open a shell, only run forwards
-	localForwards  []client.LocalForwardSpec  // -L specs
-	remoteForwards []client.RemoteForwardSpec // -R specs
+	noShell        bool                        // -N: do not open a shell, only run forwards
+	forwardAgent   bool                        // -A: forward local SSH agent to remote session
+	localForwards  []client.LocalForwardSpec   // -L specs
+	remoteForwards []client.RemoteForwardSpec  // -R specs
 	dynamicProxies []client.DynamicForwardSpec // -D specs
 }
 
@@ -556,7 +557,7 @@ func runConnect(p connectParams) error {
 			return client.RunCommand(netConn, username, host, p.command, signer)
 		}
 		slog.Debug("SSH session starting", "user", username, "host", host)
-		return client.RunSession(netConn, username, host, signer)
+		return client.RunSession(netConn, username, host, signer, p.forwardAgent)
 	}
 
 	// Build an *ssh.Client for forwarding (and optionally a shell session).
@@ -633,7 +634,7 @@ func runConnect(p connectParams) error {
 		if p.command != "" {
 			sessErr = runSSHClientCommand(sshClient, p.command)
 		} else {
-			sessErr = runSSHClientSession(sshClient)
+			sessErr = runSSHClientSession(sshClient, p.forwardAgent)
 		}
 		sessionErrCh <- sessErr
 	}()
@@ -650,7 +651,10 @@ func runConnect(p connectParams) error {
 
 // runSSHClientSession opens an interactive PTY shell on an existing *ssh.Client.
 // This mirrors RunSession but accepts an already-constructed client.
-func runSSHClientSession(sshClient *ssh.Client) error {
+// When forwardAgent is true, the local SSH agent is forwarded to the remote
+// session via client.ForwardAgent. A failure to establish agent forwarding is
+// logged as a warning and does not abort the session.
+func runSSHClientSession(sshClient *ssh.Client, forwardAgent bool) error {
 	session, err := sshClient.NewSession()
 	if err != nil {
 		return fmt.Errorf("open SSH session: %w", err)
@@ -660,6 +664,12 @@ func runSSHClientSession(sshClient *ssh.Client) error {
 	session.Stdout = os.Stdout
 	session.Stderr = os.Stderr
 	session.Stdin = os.Stdin
+
+	if forwardAgent {
+		if err := client.ForwardAgent(sshClient, session); err != nil {
+			slog.Warn("agent forwarding unavailable", "err", err)
+		}
+	}
 
 	stdinFd := int(os.Stdin.Fd())
 	stdoutFd := int(os.Stdout.Fd())
@@ -1185,6 +1195,7 @@ Usage:
 		keyFlag          string
 		oidcIssuerFlag   string
 		noShellFlag      bool
+		forwardAgentFlag bool
 		localFwdFlags    []string
 		remoteFwdFlags   []string
 		dynamicFwdFlags  []string
@@ -1283,6 +1294,7 @@ Examples:
 				command:        remoteCommand,
 				verbose:        verbose,
 				noShell:        noShellFlag,
+				forwardAgent:   forwardAgentFlag,
 				localForwards:  localFwds,
 				remoteForwards: remoteFwds,
 				dynamicProxies: dynFwds,
@@ -1295,6 +1307,7 @@ Examples:
 	connectCmd.Flags().StringVar(&keyFlag, "key", "", "SSH private key path (default: auto-detect from ~/.ssh/)")
 	connectCmd.Flags().StringVar(&oidcIssuerFlag, "oidc-issuer", "", "OIDC issuer URL; triggers browser-based OIDC auth before connecting (or set oidc.issuer in config)")
 	connectCmd.Flags().BoolVarP(&noShellFlag, "no-shell", "N", false, "Do not open a shell; only forward ports (requires at least one -L, -R, or -D)")
+	connectCmd.Flags().BoolVarP(&forwardAgentFlag, "forward-agent", "A", false, "Forward local SSH agent to the remote session (requires SSH_AUTH_SOCK)")
 	connectCmd.Flags().StringArrayVarP(&localFwdFlags, "local-forward", "L", nil, "Local port forward: [bind:]localport:remotehost:remoteport (may be repeated)")
 	connectCmd.Flags().StringArrayVarP(&remoteFwdFlags, "remote-forward", "R", nil, "Remote port forward: [bind:]remoteport:localhost:localport (may be repeated)")
 	connectCmd.Flags().StringArrayVarP(&dynamicFwdFlags, "dynamic", "D", nil, "Dynamic SOCKS5 proxy: [bind:]port (may be repeated)")

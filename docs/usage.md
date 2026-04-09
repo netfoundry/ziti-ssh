@@ -153,6 +153,38 @@ ziti-ssh connect ziggy@web-server-prod -L 8080:db.internal:5432
 
 ---
 
+## SSH agent forwarding (`-A`)
+
+The `-A` / `--forward-agent` flag forwards your local SSH agent to the remote session. This lets processes running on the remote host use keys held by your local agent — for example, to make onward SSH hops to other machines without copying private keys to the remote host.
+
+```sh
+ziti-ssh connect -A ziggy@web-server-prod
+```
+
+Agent forwarding requires `SSH_AUTH_SOCK` to be set in your environment (i.e. a running SSH agent). If it is not set, or the agent cannot be reached, `ziti-ssh` logs a warning and opens the session normally without forwarding — the connection is not aborted.
+
+```sh
+# Start an agent and add your key if not already running
+eval "$(ssh-agent -s)"
+ssh-add ~/.ssh/id_ed25519
+
+# Now connect with agent forwarding
+ziti-ssh connect -A ziggy@web-server-prod
+
+# On the remote host you can SSH onward using your local agent keys:
+# ssh another-internal-host
+```
+
+Agent forwarding can be combined with port forwarding flags:
+
+```sh
+ziti-ssh connect -A -L 5432:db.internal:5432 ziggy@web-server-prod
+```
+
+The SSH certificates issued by `ziti-ssh-ca` already include the `permit-agent-forwarding` extension, so no CA or sshd configuration changes are needed.
+
+---
+
 ## Using `ziti-ssh` as a ProxyCommand
 
 The `proxy` subcommand dials the Ziti service and bridges `stdin`/`stdout` to the raw TCP connection. The caller's own `ssh` process handles authentication, which means any tool that speaks SSH over stdio can use Ziti transparently.
