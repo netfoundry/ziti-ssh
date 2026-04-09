@@ -83,6 +83,147 @@ The remote process exit code is propagated: if the remote command exits non-zero
 
 ---
 
+## Port forwarding
+
+`ziti-ssh connect` supports the same `-L`, `-R`, and `-D` forwarding flags as `ssh(1)`. All forwards run over the Ziti overlay — no port 22 exposure required.
+
+### Local port forward (`-L`)
+
+Listens on a local port and forwards each connection to a remote host:port through the SSH tunnel.
+
+```sh
+# Forward localhost:8080 → db.internal:5432 on the remote network
+ziti-ssh connect ziggy@web-server-prod -L 8080:db.internal:5432
+
+# Bind on all interfaces (e.g. for container-to-host forwarding)
+ziti-ssh connect ziggy@web-server-prod -L 0.0.0.0:8080:db.internal:5432
+```
+
+Syntax: `-L [bind:]localport:remotehost:remoteport`
+
+The remote hostname is resolved by sshd on the target host, so it can be a name on the remote's internal network (not reachable from your machine).
+
+### Remote port forward (`-R`)
+
+Asks sshd on the remote host to listen on a port and forward each incoming connection back to a local host:port on your machine.
+
+```sh
+# Remote host:9000 → localhost:3000 on your machine
+ziti-ssh connect ziggy@web-server-prod -R 9000:localhost:3000
+```
+
+Syntax: `-R [bind:]remoteport:localhost:localport`
+
+### Dynamic SOCKS5 proxy (`-D`)
+
+Listens locally as a SOCKS5 proxy. Each connection's destination is determined by the SOCKS5 client — useful for routing browser traffic or tools through the remote network.
+
+```sh
+# SOCKS5 proxy on localhost:1080
+ziti-ssh connect ziggy@web-server-prod -D 1080
+
+# Configure your browser to use SOCKS5 proxy at localhost:1080
+```
+
+Syntax: `-D [bind:]port`
+
+### Forwarding without a shell (`-N`)
+
+Use `-N` to forward ports without opening an interactive shell. The process blocks until you press Ctrl-C.
+
+```sh
+# Only forward, no shell
+ziti-ssh connect -N ziggy@web-server-prod -L 8080:db.internal:5432 -D 1080
+
+# Multiple forwards
+ziti-ssh connect -N ziggy@web-server-prod \
+    -L 5432:db.internal:5432 \
+    -L 6379:redis.internal:6379 \
+    -D 1080
+```
+
+### Combining forwards with a shell session
+
+All forwarding flags can be used alongside an interactive session. The forwards run in the background; closing the shell also terminates them.
+
+```sh
+ziti-ssh connect ziggy@web-server-prod -L 8080:db.internal:5432
+# Opens a shell AND forwards port 8080 simultaneously
+```
+
+---
+
+## Using `ziti-ssh` as a ProxyCommand
+
+The `proxy` subcommand dials the Ziti service and bridges `stdin`/`stdout` to the raw TCP connection. The caller's own `ssh` process handles authentication, which means any tool that speaks SSH over stdio can use Ziti transparently.
+
+```sh
+ziti-ssh proxy [user@]<target>
+```
+
+### `~/.ssh/config` integration
+
+Add a `ProxyCommand` entry to `~/.ssh/config`:
+
+```
+Host web-server-prod
+    ProxyCommand ziti-ssh proxy %h
+    User ziggy
+```
+
+Now all standard SSH tooling connects through the Ziti overlay automatically:
+
+```sh
+# Standard ssh
+ssh web-server-prod
+
+# VS Code Remote SSH — works via the config entry above
+# (select "Remote-SSH: Connect to Host..." and pick web-server-prod)
+
+# rsync
+rsync -avz /local/dir/ web-server-prod:/remote/dir/
+
+# git over SSH
+git clone web-server-prod:/repos/myrepo.git
+
+# ansible
+ansible web-server-prod -m ping
+```
+
+### Wildcard host patterns
+
+You can use a wildcard pattern to route a group of hosts through Ziti:
+
+```
+Host *.ziti
+    ProxyCommand ziti-ssh proxy %h
+    User ziggy
+
+Host prod-*.internal
+    ProxyCommand ziti-ssh proxy %h
+    User ops
+```
+
+### Identity and certificate
+
+`ziti-ssh proxy` uses the same `--identity` flag, `ZITI_IDENTITY` environment variable, and `~/.config/ziti-ssh/config.yaml` as the `connect` subcommand. It auto-refreshes the SSH certificate if it is missing or will expire within 5 minutes — so the `ssh` process that reads `ProxyCommand` output will find a valid cert in `~/.ssh/<key>-cert.pub`.
+
+The user@ part in `ProxyCommand ziti-ssh proxy %h` is accepted for syntax compatibility but is not used by `ziti-ssh proxy` — the connection happens at the TCP level below SSH authentication.
+
+### Using with specific identity or service
+
+```sh
+# Explicit identity and service
+ziti-ssh proxy --identity ~/.config/ziti-ssh/alice.json --ssh-service ssh web-server-prod
+
+# From ~/.ssh/config with flags
+Host web-server-prod
+    ProxyCommand ziti-ssh proxy --identity /etc/ziti-ssh/alice.json %h
+    User ziggy
+```
+
+---
+
 ## Managing certificates manually (`ziti-ssh sign`)
 
 `ziti-ssh connect` handles certificate renewal automatically. Use `ziti-ssh sign` directly if you want to obtain or inspect a certificate without connecting — for example to verify CA details or pre-warm a certificate before a session.

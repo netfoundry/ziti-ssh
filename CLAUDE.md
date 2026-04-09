@@ -86,15 +86,27 @@ Each `ziti-ssh-host` instance listens on a Ziti service with its identity name a
 
 ### SSH Client (`ziti-ssh`)
 
-Five subcommands:
+Seven subcommands:
 
 **`connect [user@]<target>`** (also the default when a bare argument is given):
 - Auto-refreshes the SSH cert if missing or expiring within 5 min.
 - Resolves whether the target is a direct Ziti service name or a terminator address on `--ssh-service`.
 - Uses `ziti.DialOptions{Identity: terminatorAddr}` when dialling via a terminator.
 - Wraps the private key and cert into an `ssh.CertSigner` via `client.NewCertSigner`. Falls back to `SSH_AUTH_SOCK` if the private key is passphrase-protected.
-- Runs a full interactive PTY session via `client.RunSession`.
+- Runs a full interactive PTY session via `client.RunSession` (no forwards) or via `client.NewSSHClient` + `runSSHClientSession` when `-L`/`-R`/`-D` forwards are active.
 - Accepts a trailing command (after `--`) for non-interactive execution via `client.RunCommand`; the remote exit code is propagated.
+- `-L [bind:]localport:remotehost:remoteport` — local port forward; may be repeated; calls `client.RunLocalForward` in a goroutine.
+- `-R [bind:]remoteport:localhost:localport` — remote port forward; calls `client.RunRemoteForward` in a goroutine.
+- `-D [bind:]port` — dynamic SOCKS5 proxy; calls `client.RunDynamicProxy` in a goroutine.
+- `-N` / `--no-shell` — block without opening a shell; only runs the requested forwards until SIGINT/SIGTERM.
+- When any forward is present: all forwards + (optionally) the shell session run concurrently under a shared `context.Context`; SIGINT/SIGTERM cancels the context and tears everything down.
+
+**`proxy [user@]<target>`**:
+- Auto-refreshes the SSH cert (same 5-minute threshold as `connect`).
+- Dials the Ziti service raw — no SSH handshake performed by `ziti-ssh`.
+- Bridges `os.Stdin` ↔ conn and conn → `os.Stdout` via `io.Copy` in two goroutines; returns when either direction closes.
+- Intended as a `ProxyCommand` in `~/.ssh/config` so that standard tools (`ssh`, `git`, `rsync`, VS Code Remote) work through the Ziti overlay without modification.
+- The user@ portion of the argument is accepted for syntax compatibility but is not used.
 
 **`sign`**: Dials `ssh-ca`, sends the SSH public key, writes the signed cert to `<key>-cert.pub`, prints cert details via `ssh-keygen -L`.
 
@@ -104,7 +116,7 @@ Five subcommands:
 
 **`mfa enable/verify/remove`**: Uses `zitiCtx.EnrollZitiMfa`, `VerifyZitiMfa`, `RemoveZitiMfa` with `AddMfaTotpCodeListener` / `AddAuthenticationStateFullListener` event hooks.
 
-**OIDC authentication**: When `--oidc-issuer` is set (or `oidc.issuer` in the config file), `connect` and `sign` perform a browser-based OIDC authorization code flow (PKCE when no client secret) before authenticating with Ziti. The resulting JWT is added to the Ziti context via `AddJWT()`, satisfying ext-jwt-signer policies on the controller. Flow times out after 2 minutes. Implemented in `cmd/ziti-ssh/oidc.go` and `internal/oidc/oidc.go`.
+**OIDC authentication**: When `--oidc-issuer` is set (or `oidc.issuer` in the config file), `connect`, `sign`, and `proxy` perform a browser-based OIDC authorization code flow (PKCE when no client secret) before authenticating with Ziti. The resulting JWT is added to the Ziti context via `AddJWT()`, satisfying ext-jwt-signer policies on the controller. Flow times out after 2 minutes. Implemented in `cmd/ziti-ssh/oidc.go` and `internal/oidc/oidc.go`.
 
 Config file at `~/.config/ziti-ssh/config.yaml` (XDG_CONFIG_HOME respected). Fields: `identity`, `ca_service`, `ssh_service`, `ssh_key_path`, `mode`, `oidc.*`. Three-tier precedence: CLI flag > config file > default.
 
@@ -112,8 +124,12 @@ Config file at `~/.config/ziti-ssh/config.yaml` (XDG_CONFIG_HOME respected). Fie
 
 - `NewCertSigner(keyPath string) (ssh.Signer, error)` — loads key and cert; returns `ssh.CertSigner` if cert present.
 - `CertNeedsRefresh(certPath string) bool` — true if cert absent or expires within 5 min.
+- `NewSSHClient(conn net.Conn, user, host string, signer ssh.Signer) (*ssh.Client, error)` — performs the SSH handshake and returns a raw `*ssh.Client` for forwarding use cases.
 - `RunSession(conn net.Conn, user, host string, signer ssh.Signer) error` — PTY SSH session over an existing `net.Conn`.
-- `RunCommand(conn net.Conn, user, host, cmd string, signer ssh.Signer) (int, error)` — non-interactive command execution; returns remote exit code.
+- `RunCommand(conn net.Conn, user, host, cmd string, signer ssh.Signer) error` — non-interactive command execution; propagates remote exit code via `os.Exit`.
+- `RunLocalForward(ctx, sshClient, LocalForwardSpec) error` — local port forward (-L); listens locally, tunnels via `direct-tcpip`; runs until ctx cancelled.
+- `RunRemoteForward(ctx, sshClient, RemoteForwardSpec) error` — remote port forward (-R); uses `sshClient.Listen`; runs until ctx cancelled.
+- `RunDynamicProxy(ctx, sshClient, DynamicForwardSpec) error` — SOCKS5 proxy (-D); implements RFC 1928 CONNECT with no-auth; runs until ctx cancelled.
 - `RunSFTP(conn, user, host, signer, isUpload, localPaths, remotePath, recursive, preserve, quiet) error` — SFTP file copy over an existing `net.Conn`; uses `github.com/pkg/sftp`.
 
 ### File Copy Tool (`ziti-scp`)

@@ -1,27 +1,43 @@
 // Package client provides SSH session helpers for the ziti-ssh CLI.
 //
-// Four exported functions cover the lifecycle of a certificate-backed SSH
-// session over a pre-dialed net.Conn:
+// Exported functions cover the lifecycle of a certificate-backed SSH session
+// over a pre-dialed net.Conn:
 //
-//   - NewCertSigner   — loads a private key and, if a matching -cert.pub file
+//   - NewCertSigner      — loads a private key and, if a matching -cert.pub file
 //     exists, wraps it in an ssh.CertSigner so the certificate
 //     is presented during authentication.
 //
-//   - CertNeedsRefresh — returns true when the cert file is missing or will
+//   - CertNeedsRefresh   — returns true when the cert file is missing or will
 //     expire within 5 minutes.
 //
-//   - RunSession       — runs a full interactive SSH session with PTY over a
+//   - NewSSHClient       — performs the SSH handshake over a pre-dialed net.Conn
+//     and returns an *ssh.Client ready for sessions or forwards.
+//
+//   - RunSession         — runs a full interactive SSH session with PTY over a
 //     net.Conn that has already been dialled (e.g. via ziti.Dial).
 //
-//   - RunCommand       — runs a single non-interactive remote command over a
+//   - RunCommand         — runs a single non-interactive remote command over a
 //     net.Conn that has already been dialled. No PTY is allocated.
 //     The remote exit code is propagated via os.Exit.
+//
+//   - RunLocalForward    — listens locally and forwards each connection to a
+//     remote host:port via a direct-tcpip channel (-L).
+//
+//   - RunRemoteForward   — asks sshd to listen remotely and forwards each
+//     incoming connection to a local host:port (-R).
+//
+//   - RunDynamicProxy    — listens locally as a SOCKS5 proxy and tunnels each
+//     connection through a direct-tcpip channel (-D).
 package client
 
 import (
 	"bytes"
+	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net"
 	"os"
 	"time"
@@ -338,4 +354,341 @@ func RunCommand(conn net.Conn, user, host, command string, signer ssh.Signer) er
 		return fmt.Errorf("run remote command: %w", err)
 	}
 	return nil
+}
+
+// NewSSHClient performs the SSH handshake over conn and returns an *ssh.Client.
+//
+// Unlike RunSession and RunCommand, this function does not open a session —
+// it returns the raw *ssh.Client so the caller can open sessions or set up
+// port forwards independently. The caller is responsible for calling
+// client.Close() when done.
+//
+// Host key verification is intentionally skipped (see RunSession for rationale).
+func NewSSHClient(conn net.Conn, user, host string, signer ssh.Signer) (*ssh.Client, error) {
+	cfg := &ssh.ClientConfig{
+		User:            user,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec
+	}
+	clientConn, chans, reqs, err := ssh.NewClientConn(conn, host, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("SSH handshake with %q: %w", host, err)
+	}
+	return ssh.NewClient(clientConn, chans, reqs), nil
+}
+
+// ---------------------------------------------------------------------------
+// Port forwarding — local (-L), remote (-R), dynamic SOCKS5 (-D)
+// ---------------------------------------------------------------------------
+
+// LocalForwardSpec describes a single -L forward:
+//
+//	[bind:]localport:remotehost:remoteport
+//
+// If Bind is empty, the listener is bound to 127.0.0.1.
+type LocalForwardSpec struct {
+	Bind       string // local bind address (default: 127.0.0.1)
+	LocalPort  string // local port to listen on
+	RemoteHost string // remote host sshd forwards to
+	RemotePort string // remote port sshd forwards to
+}
+
+// RemoteForwardSpec describes a single -R forward:
+//
+//	[bind:]remoteport:localhost:localport
+//
+// If Bind is empty, sshd binds to all interfaces (RFC 4254 §7.1).
+type RemoteForwardSpec struct {
+	Bind       string // remote bind address (empty = sshd default)
+	RemotePort string // port sshd listens on
+	LocalHost  string // local host to forward to
+	LocalPort  string // local port to forward to
+}
+
+// DynamicForwardSpec describes a single -D SOCKS5 proxy listener:
+//
+//	[bind:]port
+//
+// If Bind is empty, the listener is bound to 127.0.0.1.
+type DynamicForwardSpec struct {
+	Bind      string // local bind address (default: 127.0.0.1)
+	LocalPort string // local port to listen on
+}
+
+// RunLocalForward binds a local TCP listener and forwards each accepted
+// connection to remoteHost:remotePort through the SSH client using a
+// direct-tcpip channel. It runs until ctx is cancelled.
+//
+// This implements the -L flag behaviour of ssh(1).
+func RunLocalForward(ctx context.Context, sshClient *ssh.Client, spec LocalForwardSpec) error {
+	bind := spec.Bind
+	if bind == "" {
+		bind = "127.0.0.1"
+	}
+	listenAddr := net.JoinHostPort(bind, spec.LocalPort)
+	ln, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		return fmt.Errorf("local forward: listen on %s: %w", listenAddr, err)
+	}
+
+	slog.Info("local forward active", "listen", listenAddr,
+		"remote", net.JoinHostPort(spec.RemoteHost, spec.RemotePort))
+
+	// Close the listener when the context is cancelled so Accept unblocks.
+	go func() {
+		<-ctx.Done()
+		_ = ln.Close()
+	}()
+
+	for {
+		local, err := ln.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil // context cancelled — clean exit
+			}
+			return fmt.Errorf("local forward: accept: %w", err)
+		}
+		go handleLocalForwardConn(ctx, sshClient, local, spec.RemoteHost, spec.RemotePort)
+	}
+}
+
+func handleLocalForwardConn(ctx context.Context, sshClient *ssh.Client, local net.Conn, remoteHost, remotePort string) {
+	defer local.Close()
+
+	remote, err := sshClient.DialContext(ctx, "tcp", net.JoinHostPort(remoteHost, remotePort))
+	if err != nil {
+		slog.Warn("local forward: dial remote failed",
+			"remote", net.JoinHostPort(remoteHost, remotePort), "err", err)
+		return
+	}
+	defer remote.Close()
+
+	slog.Debug("local forward: connection established",
+		"local", local.RemoteAddr(), "remote", net.JoinHostPort(remoteHost, remotePort))
+
+	biCopy(ctx, local, remote)
+}
+
+// RunRemoteForward asks the SSH server to listen on a remote port and
+// forwards each incoming connection to localHost:localPort on the client.
+// It runs until ctx is cancelled.
+//
+// This implements the -R flag behaviour of ssh(1).
+func RunRemoteForward(ctx context.Context, sshClient *ssh.Client, spec RemoteForwardSpec) error {
+	remoteAddr := net.JoinHostPort(spec.Bind, spec.RemotePort)
+	ln, err := sshClient.Listen("tcp", remoteAddr)
+	if err != nil {
+		return fmt.Errorf("remote forward: request remote listen on %s: %w", remoteAddr, err)
+	}
+
+	slog.Info("remote forward active", "remote_listen", remoteAddr,
+		"local", net.JoinHostPort(spec.LocalHost, spec.LocalPort))
+
+	go func() {
+		<-ctx.Done()
+		_ = ln.Close()
+	}()
+
+	for {
+		remote, err := ln.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("remote forward: accept: %w", err)
+		}
+		go handleRemoteForwardConn(ctx, remote, spec.LocalHost, spec.LocalPort)
+	}
+}
+
+func handleRemoteForwardConn(ctx context.Context, remote net.Conn, localHost, localPort string) {
+	defer remote.Close()
+
+	local, err := (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(localHost, localPort))
+	if err != nil {
+		slog.Warn("remote forward: dial local failed",
+			"local", net.JoinHostPort(localHost, localPort), "err", err)
+		return
+	}
+	defer local.Close()
+
+	slog.Debug("remote forward: connection established",
+		"remote", remote.RemoteAddr(), "local", net.JoinHostPort(localHost, localPort))
+
+	biCopy(ctx, remote, local)
+}
+
+// RunDynamicProxy listens locally as a minimal SOCKS5 proxy (RFC 1928).
+// For each CONNECT request it opens a direct-tcpip channel through the SSH
+// client to the destination the SOCKS5 client requested. Only the CONNECT
+// command with no-authentication is supported — sufficient for most use cases.
+// It runs until ctx is cancelled.
+//
+// This implements the -D flag behaviour of ssh(1).
+func RunDynamicProxy(ctx context.Context, sshClient *ssh.Client, spec DynamicForwardSpec) error {
+	bind := spec.Bind
+	if bind == "" {
+		bind = "127.0.0.1"
+	}
+	listenAddr := net.JoinHostPort(bind, spec.LocalPort)
+	ln, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		return fmt.Errorf("dynamic proxy: listen on %s: %w", listenAddr, err)
+	}
+
+	slog.Info("dynamic SOCKS5 proxy active", "listen", listenAddr)
+
+	go func() {
+		<-ctx.Done()
+		_ = ln.Close()
+	}()
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("dynamic proxy: accept: %w", err)
+		}
+		go handleSocks5Conn(ctx, sshClient, conn)
+	}
+}
+
+// handleSocks5Conn performs the SOCKS5 handshake (RFC 1928) and then proxies
+// the connection through sshClient. Only CONNECT (0x01) with ATYP IPv4 (0x01),
+// domain name (0x03), and IPv6 (0x04) are supported.
+func handleSocks5Conn(ctx context.Context, sshClient *ssh.Client, conn net.Conn) {
+	defer conn.Close()
+
+	// --- Greeting ---
+	// Read VER + NMETHODS + METHODS.
+	header := make([]byte, 2)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		slog.Debug("socks5: read greeting failed", "err", err)
+		return
+	}
+	if header[0] != 0x05 {
+		slog.Debug("socks5: unsupported version", "ver", header[0])
+		return
+	}
+	nMethods := int(header[1])
+	methods := make([]byte, nMethods)
+	if _, err := io.ReadFull(conn, methods); err != nil {
+		slog.Debug("socks5: read methods failed", "err", err)
+		return
+	}
+	// Respond: VER=5, METHOD=0 (no auth).
+	if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
+		slog.Debug("socks5: write auth response failed", "err", err)
+		return
+	}
+
+	// --- Request ---
+	// VER CMD RSV ATYP
+	reqHeader := make([]byte, 4)
+	if _, err := io.ReadFull(conn, reqHeader); err != nil {
+		slog.Debug("socks5: read request header failed", "err", err)
+		return
+	}
+	if reqHeader[0] != 0x05 {
+		slog.Debug("socks5: bad request version", "ver", reqHeader[0])
+		return
+	}
+	if reqHeader[1] != 0x01 {
+		// Only CONNECT supported.
+		slog.Debug("socks5: unsupported command", "cmd", reqHeader[1])
+		writeSocks5Reply(conn, 0x07, nil) // command not supported
+		return
+	}
+
+	var destHost string
+	switch reqHeader[3] {
+	case 0x01: // IPv4
+		addr := make([]byte, 4)
+		if _, err := io.ReadFull(conn, addr); err != nil {
+			slog.Debug("socks5: read IPv4 addr failed", "err", err)
+			return
+		}
+		destHost = net.IP(addr).String()
+
+	case 0x03: // domain name
+		lenBuf := make([]byte, 1)
+		if _, err := io.ReadFull(conn, lenBuf); err != nil {
+			slog.Debug("socks5: read domain len failed", "err", err)
+			return
+		}
+		domain := make([]byte, int(lenBuf[0]))
+		if _, err := io.ReadFull(conn, domain); err != nil {
+			slog.Debug("socks5: read domain failed", "err", err)
+			return
+		}
+		destHost = string(domain)
+
+	case 0x04: // IPv6
+		addr := make([]byte, 16)
+		if _, err := io.ReadFull(conn, addr); err != nil {
+			slog.Debug("socks5: read IPv6 addr failed", "err", err)
+			return
+		}
+		destHost = "[" + net.IP(addr).String() + "]"
+
+	default:
+		slog.Debug("socks5: unsupported address type", "atyp", reqHeader[3])
+		writeSocks5Reply(conn, 0x08, nil) // address type not supported
+		return
+	}
+
+	portBuf := make([]byte, 2)
+	if _, err := io.ReadFull(conn, portBuf); err != nil {
+		slog.Debug("socks5: read port failed", "err", err)
+		return
+	}
+	destPort := int(binary.BigEndian.Uint16(portBuf))
+	destAddr := fmt.Sprintf("%s:%d", destHost, destPort)
+
+	// Dial through the SSH tunnel.
+	remote, err := sshClient.DialContext(ctx, "tcp", destAddr)
+	if err != nil {
+		slog.Warn("socks5: dial remote failed", "dest", destAddr, "err", err)
+		writeSocks5Reply(conn, 0x05, nil) // connection refused
+		return
+	}
+	defer remote.Close()
+
+	// Success reply — BND.ADDR and BND.PORT are zeros (not meaningful here).
+	writeSocks5Reply(conn, 0x00, nil)
+
+	slog.Debug("socks5: connection established", "dest", destAddr)
+	biCopy(ctx, conn, remote)
+}
+
+// writeSocks5Reply writes a SOCKS5 reply with the given status byte.
+// bndAddr may be nil; in that case zeros are written for BND.ADDR/BND.PORT.
+func writeSocks5Reply(conn net.Conn, status byte, _ net.Addr) {
+	// VER REP RSV ATYP BND.ADDR(4) BND.PORT(2)
+	reply := []byte{0x05, status, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	_, _ = conn.Write(reply)
+}
+
+// biCopy copies data bidirectionally between a and b until either side closes
+// or ctx is cancelled. It is used for all forwarding paths.
+func biCopy(ctx context.Context, a, b net.Conn) {
+	done := make(chan struct{}, 2)
+	cp := func(dst, src net.Conn) {
+		defer func() { done <- struct{}{} }()
+		if _, err := io.Copy(dst, src); err != nil && ctx.Err() == nil {
+			slog.Debug("forward: copy error", "err", err)
+		}
+		// Half-close to unblock the other direction.
+		if tc, ok := dst.(interface{ CloseWrite() error }); ok {
+			_ = tc.CloseWrite()
+		}
+	}
+	go cp(a, b)
+	go cp(b, a)
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }

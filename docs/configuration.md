@@ -24,6 +24,22 @@ All binaries resolve each setting in the same order: CLI flag > environment vari
 | `--service` | — | — | SSH service name to dial (alias for `--ssh-service`) |
 | `--key` | — | auto-detect | SSH private key path |
 | `--oidc-issuer` | — | — | OIDC issuer URL; triggers browser-based OIDC auth (overrides `oidc.issuer` in config) |
+| `-N` / `--no-shell` | — | false | Do not open a shell; only run port forwards. Requires at least one `-L`, `-R`, or `-D`. |
+| `-L` / `--local-forward` | — | — | Local port forward: `[bind:]localport:remotehost:remoteport`. May be repeated. |
+| `-R` / `--remote-forward` | — | — | Remote port forward: `[bind:]remoteport:localhost:localport`. May be repeated. |
+| `-D` / `--dynamic` | — | — | Dynamic SOCKS5 proxy: `[bind:]port`. May be repeated. |
+
+### `ziti-ssh proxy`
+
+| Flag | Env | Default | Description |
+|---|---|---|---|
+| `--ca-service` | `ZITI_CA_SERVICE` | `ssh-ca` | CA service name (for cert auto-refresh) |
+| `--ssh-service` | `ZITI_SSH_SERVICE` | `ssh` | SSH service name |
+| `--service` | — | — | SSH service name to dial (alias for `--ssh-service`) |
+| `--key` | — | auto-detect | SSH private key path (used for cert refresh check) |
+| `--oidc-issuer` | — | — | OIDC issuer URL; triggers browser-based OIDC auth before dialling |
+
+`proxy` dials the Ziti service and bridges `stdin`/`stdout` to the raw connection. Intended for use as a `ProxyCommand` in `~/.ssh/config`. See [Using ziti-ssh as a ProxyCommand](usage.md#using-ziti-ssh-as-a-proxycommand) in the usage guide.
 
 ### `ziti-ssh sign`
 

@@ -18,15 +18,20 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"os/user"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/openziti/edge-api/rest_model"
@@ -36,6 +41,7 @@ import (
 	"github.com/spf13/cobra"
 	"go.yaml.in/yaml/v3"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/term"
 
 	"github.com/edwardm/ziti-ssh/client"
 	"github.com/edwardm/ziti-ssh/config"
@@ -96,6 +102,84 @@ func orDefault(val, fallback string) string {
 		return val
 	}
 	return fallback
+}
+
+// ---------------------------------------------------------------------------
+// Port-forward spec parsing
+// ---------------------------------------------------------------------------
+
+// parseLocalForward parses a -L spec of the form:
+//
+//	[bind:]localport:remotehost:remoteport
+//
+// A bare 3-part form (localport:remotehost:remoteport) binds to 127.0.0.1.
+func parseLocalForward(s string) (client.LocalForwardSpec, error) {
+	parts := strings.Split(s, ":")
+	switch len(parts) {
+	case 3:
+		// localport:remotehost:remoteport
+		return client.LocalForwardSpec{
+			Bind:       "127.0.0.1",
+			LocalPort:  parts[0],
+			RemoteHost: parts[1],
+			RemotePort: parts[2],
+		}, nil
+	case 4:
+		// bind:localport:remotehost:remoteport
+		return client.LocalForwardSpec{
+			Bind:       parts[0],
+			LocalPort:  parts[1],
+			RemoteHost: parts[2],
+			RemotePort: parts[3],
+		}, nil
+	default:
+		return client.LocalForwardSpec{}, fmt.Errorf(
+			"invalid -L spec %q: expected [bind:]localport:remotehost:remoteport", s)
+	}
+}
+
+// parseRemoteForward parses a -R spec of the form:
+//
+//	[bind:]remoteport:localhost:localport
+func parseRemoteForward(s string) (client.RemoteForwardSpec, error) {
+	parts := strings.Split(s, ":")
+	switch len(parts) {
+	case 3:
+		// remoteport:localhost:localport
+		return client.RemoteForwardSpec{
+			Bind:       "",
+			RemotePort: parts[0],
+			LocalHost:  parts[1],
+			LocalPort:  parts[2],
+		}, nil
+	case 4:
+		// bind:remoteport:localhost:localport
+		return client.RemoteForwardSpec{
+			Bind:       parts[0],
+			RemotePort: parts[1],
+			LocalHost:  parts[2],
+			LocalPort:  parts[3],
+		}, nil
+	default:
+		return client.RemoteForwardSpec{}, fmt.Errorf(
+			"invalid -R spec %q: expected [bind:]remoteport:localhost:localport", s)
+	}
+}
+
+// parseDynamicForward parses a -D spec of the form:
+//
+//	[bind:]port
+func parseDynamicForward(s string) (client.DynamicForwardSpec, error) {
+	parts := strings.Split(s, ":")
+	switch len(parts) {
+	case 1:
+		return client.DynamicForwardSpec{Bind: "127.0.0.1", LocalPort: parts[0]}, nil
+	case 2:
+		return client.DynamicForwardSpec{Bind: parts[0], LocalPort: parts[1]}, nil
+	default:
+		return client.DynamicForwardSpec{}, fmt.Errorf(
+			"invalid -D spec %q: expected [bind:]port", s)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -303,16 +387,20 @@ func parseTarget(arg string) (username, target string, err error) {
 
 // connectParams holds all resolved settings for the connect command.
 type connectParams struct {
-	identityFile string
-	caService    string
-	sshService   string
-	service      string // explicit override (--service)
-	keyFile      string
-	oidc         oidcFlowParams
-	zitiTimeout  time.Duration
-	target       string // raw "[user@]target" argument
-	command      string // optional remote command; empty means interactive shell
-	verbose      bool
+	identityFile   string
+	caService      string
+	sshService     string
+	service        string // explicit override (--service)
+	keyFile        string
+	oidc           oidcFlowParams
+	zitiTimeout    time.Duration
+	target         string // raw "[user@]target" argument
+	command        string // optional remote command; empty means interactive shell
+	verbose        bool
+	noShell        bool                       // -N: do not open a shell, only run forwards
+	localForwards  []client.LocalForwardSpec  // -L specs
+	remoteForwards []client.RemoteForwardSpec // -R specs
+	dynamicProxies []client.DynamicForwardSpec // -D specs
 }
 
 // certTimeRemaining parses the certificate at certPath and returns the time
@@ -458,13 +546,293 @@ func runConnect(p connectParams) error {
 		return fmt.Errorf("dial Ziti service %q: %w", dialService, err)
 	}
 
-	if p.command != "" {
-		slog.Debug("running remote command", "user", username, "host", host, "command", p.command)
-		return client.RunCommand(netConn, username, host, p.command, signer)
+	hasForwards := len(p.localForwards) > 0 || len(p.remoteForwards) > 0 || len(p.dynamicProxies) > 0
+
+	// When no forwarding is requested, use the fast path that avoids building
+	// a full *ssh.Client object (same behaviour as before this feature).
+	if !hasForwards {
+		if p.command != "" {
+			slog.Debug("running remote command", "user", username, "host", host, "command", p.command)
+			return client.RunCommand(netConn, username, host, p.command, signer)
+		}
+		slog.Debug("SSH session starting", "user", username, "host", host)
+		return client.RunSession(netConn, username, host, signer)
 	}
 
-	slog.Debug("SSH session starting", "user", username, "host", host)
-	return client.RunSession(netConn, username, host, signer)
+	// Build an *ssh.Client for forwarding (and optionally a shell session).
+	sshClient, err := client.NewSSHClient(netConn, username, host, signer)
+	if err != nil {
+		return err
+	}
+	defer sshClient.Close()
+
+	// Context cancelled on SIGINT/SIGTERM so all goroutines shut down cleanly.
+	fwdCtx, fwdCancel := context.WithCancel(context.Background())
+	defer fwdCancel()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		select {
+		case <-sigCh:
+			fwdCancel()
+		case <-fwdCtx.Done():
+		}
+	}()
+
+	var wg sync.WaitGroup
+
+	for _, spec := range p.localForwards {
+		spec := spec // capture
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := client.RunLocalForward(fwdCtx, sshClient, spec); err != nil {
+				slog.Warn("local forward error", "spec", fmt.Sprintf("%+v", spec), "err", err)
+			}
+		}()
+	}
+
+	for _, spec := range p.remoteForwards {
+		spec := spec
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := client.RunRemoteForward(fwdCtx, sshClient, spec); err != nil {
+				slog.Warn("remote forward error", "spec", fmt.Sprintf("%+v", spec), "err", err)
+			}
+		}()
+	}
+
+	for _, spec := range p.dynamicProxies {
+		spec := spec
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := client.RunDynamicProxy(fwdCtx, sshClient, spec); err != nil {
+				slog.Warn("dynamic proxy error", "spec", fmt.Sprintf("%+v", spec), "err", err)
+			}
+		}()
+	}
+
+	if p.noShell {
+		// -N: block until signal; no shell opened.
+		slog.Debug("port forwards active, waiting for signal (-N)")
+		wg.Wait()
+		return nil
+	}
+
+	// Open a shell session concurrently with the forwards.
+	// When the shell exits (or the user disconnects), cancel the forwards.
+	sessionErrCh := make(chan error, 1)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer fwdCancel() // cancel forwards when the shell exits
+		var sessErr error
+		if p.command != "" {
+			sessErr = runSSHClientCommand(sshClient, p.command)
+		} else {
+			sessErr = runSSHClientSession(sshClient)
+		}
+		sessionErrCh <- sessErr
+	}()
+
+	wg.Wait()
+
+	select {
+	case err := <-sessionErrCh:
+		return err
+	default:
+		return nil
+	}
+}
+
+// runSSHClientSession opens an interactive PTY shell on an existing *ssh.Client.
+// This mirrors RunSession but accepts an already-constructed client.
+func runSSHClientSession(sshClient *ssh.Client) error {
+	session, err := sshClient.NewSession()
+	if err != nil {
+		return fmt.Errorf("open SSH session: %w", err)
+	}
+	defer session.Close()
+
+	session.Stdout = os.Stdout
+	session.Stderr = os.Stderr
+	session.Stdin = os.Stdin
+
+	stdinFd := int(os.Stdin.Fd())
+	stdoutFd := int(os.Stdout.Fd())
+
+	width, height, err := term.GetSize(stdoutFd)
+	if err != nil {
+		width, height = 80, 24
+	}
+
+	oldState, err := term.MakeRaw(stdinFd)
+	if err != nil {
+		return fmt.Errorf("set terminal raw mode: %w", err)
+	}
+	defer func() { _ = term.Restore(stdinFd, oldState) }()
+
+	if err := session.RequestPty("xterm-256color", height, width, ssh.TerminalModes{
+		ssh.ECHO:          1,
+		ssh.TTY_OP_ISPEED: 14400,
+		ssh.TTY_OP_OSPEED: 14400,
+	}); err != nil {
+		return fmt.Errorf("request PTY: %w", err)
+	}
+
+	if err := session.Shell(); err != nil {
+		return fmt.Errorf("start remote shell: %w", err)
+	}
+
+	if err := session.Wait(); err != nil {
+		var exitErr *ssh.ExitError
+		if errors.As(err, &exitErr) {
+			_ = term.Restore(stdinFd, oldState)
+			os.Exit(exitErr.ExitStatus())
+		}
+		return err
+	}
+	return nil
+}
+
+// runSSHClientCommand runs a non-interactive command on an existing *ssh.Client.
+func runSSHClientCommand(sshClient *ssh.Client, command string) error {
+	session, err := sshClient.NewSession()
+	if err != nil {
+		return fmt.Errorf("open SSH session: %w", err)
+	}
+	defer session.Close()
+
+	session.Stdout = os.Stdout
+	session.Stderr = os.Stderr
+	session.Stdin = os.Stdin
+
+	if err := session.Run(command); err != nil {
+		var exitErr *ssh.ExitError
+		if errors.As(err, &exitErr) {
+			os.Exit(exitErr.ExitStatus())
+		}
+		return fmt.Errorf("run remote command: %w", err)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// proxy subcommand logic
+// ---------------------------------------------------------------------------
+
+// proxyParams holds all resolved settings for the proxy subcommand.
+type proxyParams struct {
+	identityFile string
+	caService    string
+	sshService   string
+	service      string
+	keyFile      string
+	oidc         oidcFlowParams
+	zitiTimeout  time.Duration
+	target       string // raw "[user@]target" argument; user@ portion is ignored
+	verbose      bool
+}
+
+// runProxy dials the Ziti service for target and copies os.Stdin ↔ conn until
+// either side closes. It does NOT establish an SSH session — the raw TCP stream
+// is handed to the ssh process that invoked this ProxyCommand.
+func runProxy(p proxyParams) error {
+	// The user@ portion is irrelevant for proxy mode but we parse it anyway
+	// for syntax compatibility (ssh passes "%r@%h" or "%h" from ProxyCommand).
+	_, host, err := parseTarget(p.target)
+	if err != nil {
+		return err
+	}
+
+	// Resolve SSH key for cert refresh — same logic as connect.
+	privKeyPath, err := resolveKey(p.keyFile)
+	if err != nil {
+		return err
+	}
+	certPath := deriveCertPath(privKeyPath)
+
+	// Auto-refresh cert so the outer ssh process finds a valid one.
+	if client.CertNeedsRefresh(certPath) {
+		if p.verbose {
+			fmt.Fprintf(os.Stderr, "%-12s missing or expiring — refreshing from %s\n", "Certificate:", p.caService)
+		}
+		if err := runSign(signParams{
+			identityFile: p.identityFile,
+			caService:    p.caService,
+			keyFile:      privKeyPath,
+			oidc:         p.oidc,
+			zitiTimeout:  p.zitiTimeout,
+			verbose:      false,
+		}); err != nil {
+			return fmt.Errorf("proxy: auto-sign: %w", err)
+		}
+	}
+
+	// Authenticate to Ziti.
+	zitiCtx, err := ziti.NewContextFromFile(p.identityFile)
+	if err != nil {
+		return fmt.Errorf("init Ziti context from %q: %w", p.identityFile, err)
+	}
+	defer zitiCtx.Close()
+
+	if err := addOIDCCredentials(zitiCtx, p.oidc); err != nil {
+		return err
+	}
+
+	registerZtAPIsPersist(zitiCtx, p.identityFile)
+
+	if err := config.RunWithTimeout(p.zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
+		return err
+	}
+
+	// Resolve service and terminator the same way connect does.
+	dialService := p.sshService
+	terminatorAddr := host
+
+	if p.service != "" {
+		dialService = p.service
+	} else if _, ok := zitiCtx.GetService(host); ok {
+		dialService = host
+		terminatorAddr = ""
+	}
+
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), p.zitiTimeout)
+	defer dialCancel()
+
+	var netConn net.Conn
+	if terminatorAddr != "" {
+		slog.Debug("proxy: dialing SSH service", "service", dialService, "terminator", terminatorAddr)
+		dialOpts := &ziti.DialOptions{Identity: terminatorAddr}
+		netConn, err = zitiCtx.DialContextWithOptions(dialCtx, dialService, dialOpts)
+	} else {
+		slog.Debug("proxy: dialing SSH service", "service", dialService)
+		netConn, err = zitiCtx.DialContext(dialCtx, dialService)
+	}
+	if err != nil {
+		if dialCtx.Err() != nil {
+			return config.ZitiTimeoutErr("dial", p.zitiTimeout)
+		}
+		return fmt.Errorf("proxy: dial Ziti service %q: %w", dialService, err)
+	}
+	defer netConn.Close()
+
+	slog.Debug("proxy: connection established", "host", host)
+
+	// Bridge stdin/stdout ↔ netConn. Two goroutines; we return when either
+	// direction closes (whichever happens first, e.g. remote EOF or local EOF).
+	done := make(chan struct{}, 2)
+	cp := func(dst io.Writer, src io.Reader) {
+		defer func() { done <- struct{}{} }()
+		_, _ = io.Copy(dst, src)
+	}
+	go cp(netConn, os.Stdin)
+	go cp(os.Stdout, netConn)
+	<-done
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -811,11 +1179,15 @@ Usage:
 
 	// ---------------------------------------------------------------- connect
 	var (
-		caServiceFlag  string
-		sshServiceFlag string
-		serviceFlag    string
-		keyFlag        string
-		oidcIssuerFlag string
+		caServiceFlag    string
+		sshServiceFlag   string
+		serviceFlag      string
+		keyFlag          string
+		oidcIssuerFlag   string
+		noShellFlag      bool
+		localFwdFlags    []string
+		remoteFwdFlags   []string
+		dynamicFwdFlags  []string
 	)
 	connectCmd = &cobra.Command{
 		Use:   "connect [user@]<target> [-- <command> [args...]]",
@@ -835,10 +1207,16 @@ The target may be given as:
 If the target exactly matches a Ziti service name it is dialled directly. Otherwise
 it is used as a terminator address on the --ssh-service.
 
+Port forwarding flags (-L, -R, -D) may be specified multiple times. Use -N to
+forward only without opening a shell.
+
 Examples:
   ziti-ssh connect alice@web-server-prod
   ziti-ssh connect alice@web-server-prod -- ls -la /tmp
-  ziti-ssh connect alice@web-server-prod -- systemctl status nginx`,
+  ziti-ssh connect alice@web-server-prod -- systemctl status nginx
+  ziti-ssh connect alice@web-server-prod -L 8080:db.internal:5432
+  ziti-ssh connect alice@web-server-prod -D 1080
+  ziti-ssh connect -N alice@web-server-prod -L 8080:db.internal:5432`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			identityFile := config.EnvOrFlag(identityFlag, "ZITI_IDENTITY", cfg.Identity)
@@ -851,7 +1229,7 @@ Examples:
 			if resolvedKey == "" {
 				resolvedKey = cfg.SSHKeyPath
 			}
-oidcCallbackPort := cfg.OIDC.CallbackPort
+			oidcCallbackPort := cfg.OIDC.CallbackPort
 			if oidcCallbackPort == "" {
 				oidcCallbackPort = defaultCallbackPort
 			}
@@ -860,6 +1238,32 @@ oidcCallbackPort := cfg.OIDC.CallbackPort
 			var remoteCommand string
 			if len(args) > 1 {
 				remoteCommand = strings.Join(args[1:], " ")
+			}
+
+			// Parse forwarding specs.
+			var localFwds []client.LocalForwardSpec
+			for _, s := range localFwdFlags {
+				spec, err := parseLocalForward(s)
+				if err != nil {
+					return err
+				}
+				localFwds = append(localFwds, spec)
+			}
+			var remoteFwds []client.RemoteForwardSpec
+			for _, s := range remoteFwdFlags {
+				spec, err := parseRemoteForward(s)
+				if err != nil {
+					return err
+				}
+				remoteFwds = append(remoteFwds, spec)
+			}
+			var dynFwds []client.DynamicForwardSpec
+			for _, s := range dynamicFwdFlags {
+				spec, err := parseDynamicForward(s)
+				if err != nil {
+					return err
+				}
+				dynFwds = append(dynFwds, spec)
 			}
 
 			return runConnect(connectParams{
@@ -874,10 +1278,14 @@ oidcCallbackPort := cfg.OIDC.CallbackPort
 					ClientSecret: cfg.OIDC.ClientSecret,
 					CallbackPort: oidcCallbackPort,
 				},
-				zitiTimeout: zitiTimeout,
-				target:      args[0],
-				command:     remoteCommand,
-				verbose:     verbose,
+				zitiTimeout:    zitiTimeout,
+				target:         args[0],
+				command:        remoteCommand,
+				verbose:        verbose,
+				noShell:        noShellFlag,
+				localForwards:  localFwds,
+				remoteForwards: remoteFwds,
+				dynamicProxies: dynFwds,
 			})
 		},
 	}
@@ -886,7 +1294,82 @@ oidcCallbackPort := cfg.OIDC.CallbackPort
 	connectCmd.Flags().StringVar(&serviceFlag, "service", "", "SSH service name to dial (alias for --ssh-service)")
 	connectCmd.Flags().StringVar(&keyFlag, "key", "", "SSH private key path (default: auto-detect from ~/.ssh/)")
 	connectCmd.Flags().StringVar(&oidcIssuerFlag, "oidc-issuer", "", "OIDC issuer URL; triggers browser-based OIDC auth before connecting (or set oidc.issuer in config)")
+	connectCmd.Flags().BoolVarP(&noShellFlag, "no-shell", "N", false, "Do not open a shell; only forward ports (requires at least one -L, -R, or -D)")
+	connectCmd.Flags().StringArrayVarP(&localFwdFlags, "local-forward", "L", nil, "Local port forward: [bind:]localport:remotehost:remoteport (may be repeated)")
+	connectCmd.Flags().StringArrayVarP(&remoteFwdFlags, "remote-forward", "R", nil, "Remote port forward: [bind:]remoteport:localhost:localport (may be repeated)")
+	connectCmd.Flags().StringArrayVarP(&dynamicFwdFlags, "dynamic", "D", nil, "Dynamic SOCKS5 proxy: [bind:]port (may be repeated)")
 	root.AddCommand(connectCmd)
+
+	// ------------------------------------------------------------------ proxy
+	var (
+		proxyCaServiceFlag  string
+		proxySshServiceFlag string
+		proxyServiceFlag    string
+		proxyKeyFlag        string
+		proxyOidcIssuerFlag string
+	)
+	proxyCmd := &cobra.Command{
+		Use:   "proxy [user@]<target>",
+		Short: "Dial the target over Ziti and bridge stdio to it (ProxyCommand mode)",
+		Long: `proxy dials the target Ziti service and copies os.Stdin/os.Stdout to the raw
+TCP connection. No SSH session is established by ziti-ssh itself — the caller's
+ssh process handles authentication over the bridged stream.
+
+This is intended for use as a ProxyCommand in ~/.ssh/config:
+
+  Host web-server-prod
+      ProxyCommand ziti-ssh proxy %h
+      User ziggy
+
+With this in place, standard tools (ssh, git, rsync, VS Code Remote SSH, ansible)
+connect through the Ziti overlay transparently without any awareness of ziti-ssh.
+
+The optional user@ prefix is accepted for syntax compatibility with ssh(1) but
+the username is not used by ziti-ssh proxy — it only dials the Ziti service.
+
+If the local SSH certificate is missing or will expire within 5 minutes it is
+automatically refreshed before dialling, so that the ssh process that invokes
+ProxyCommand will find a valid cert in ~/.ssh/<key>-cert.pub.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			identityFile := config.EnvOrFlag(identityFlag, "ZITI_IDENTITY", cfg.Identity)
+			if identityFile == "" {
+				return fmt.Errorf("--identity (or ZITI_IDENTITY) is required")
+			}
+			caService := config.EnvOrFlag(proxyCaServiceFlag, "ZITI_CA_SERVICE", orDefault(cfg.CAService, "ssh-ca"))
+			sshService := config.EnvOrFlag(proxySshServiceFlag, "ZITI_SSH_SERVICE", orDefault(cfg.SSHService, "ssh"))
+			resolvedKey := proxyKeyFlag
+			if resolvedKey == "" {
+				resolvedKey = cfg.SSHKeyPath
+			}
+			proxyCallbackPort := cfg.OIDC.CallbackPort
+			if proxyCallbackPort == "" {
+				proxyCallbackPort = defaultCallbackPort
+			}
+			return runProxy(proxyParams{
+				identityFile: identityFile,
+				caService:    caService,
+				sshService:   sshService,
+				service:      proxyServiceFlag,
+				keyFile:      resolvedKey,
+				oidc: oidcFlowParams{
+					Issuer:       orDefault(proxyOidcIssuerFlag, cfg.OIDC.Issuer),
+					ClientID:     cfg.OIDC.ClientID,
+					ClientSecret: cfg.OIDC.ClientSecret,
+					CallbackPort: proxyCallbackPort,
+				},
+				zitiTimeout: zitiTimeout,
+				target:      args[0],
+				verbose:     verbose,
+			})
+		},
+	}
+	proxyCmd.Flags().StringVar(&proxyCaServiceFlag, "ca-service", "", "CA service name (or ZITI_CA_SERVICE, default: ssh-ca)")
+	proxyCmd.Flags().StringVar(&proxySshServiceFlag, "ssh-service", "", "SSH service name (or ZITI_SSH_SERVICE, default: ssh)")
+	proxyCmd.Flags().StringVar(&proxyServiceFlag, "service", "", "SSH service name to dial (alias for --ssh-service)")
+	proxyCmd.Flags().StringVar(&proxyKeyFlag, "key", "", "SSH private key path (default: auto-detect from ~/.ssh/)")
+	proxyCmd.Flags().StringVar(&proxyOidcIssuerFlag, "oidc-issuer", "", "OIDC issuer URL; triggers browser-based OIDC auth before dialling (or set oidc.issuer in config)")
+	root.AddCommand(proxyCmd)
 
 	// ------------------------------------------------------------------ sign
 	var (

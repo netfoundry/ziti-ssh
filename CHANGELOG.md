@@ -2,6 +2,65 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased] - 2026-04-09
+
+### Added
+
+#### `ziti-ssh connect` — port forwarding (`-L`, `-R`, `-D`, `-N`)
+
+Port forwarding flags added to `ziti-ssh connect`, mirroring `ssh(1)` syntax. All flags may be repeated to open multiple forwards simultaneously.
+
+**New flags on `connect`:**
+- `-L` / `--local-forward` `[bind:]localport:remotehost:remoteport` — local port forward; `ziti-ssh` listens locally and forwards each accepted connection to `remotehost:remoteport` through the SSH tunnel via a `direct-tcpip` channel. Default bind: `127.0.0.1`.
+- `-R` / `--remote-forward` `[bind:]remoteport:localhost:localport` — remote port forward; uses `(*ssh.Client).Listen` to ask sshd to bind on the remote side; each incoming connection is forwarded to `localhost:localport` on the client machine.
+- `-D` / `--dynamic` `[bind:]port` — dynamic SOCKS5 proxy; implements RFC 1928 CONNECT with no-auth (`METHOD=0x00`); for each SOCKS5 CONNECT request a `direct-tcpip` channel is opened to the requested destination. Supports IPv4 (ATYP 0x01), domain name (ATYP 0x03), and IPv6 (ATYP 0x04). Default bind: `127.0.0.1`.
+- `-N` / `--no-shell` — do not open a shell; only run the requested forwards; block until SIGINT/SIGTERM.
+
+**Implementation:**
+- When any forward flag is present, `runConnect` calls `client.NewSSHClient` to obtain a `*ssh.Client`, then starts each forward in a goroutine under a shared `context.Context`.
+- SIGINT/SIGTERM cancels the context, closing all local listeners and unblocking all goroutines cleanly.
+- Without `-N`, a shell (or remote command) runs concurrently; when the shell exits it cancels the context and terminates all forwards. A `sync.WaitGroup` ensures all goroutines finish before `runConnect` returns.
+- Without any forward flags the previous fast path (`client.RunSession` / `client.RunCommand`) is used unchanged — no regression for existing users.
+- Forward-spec parse helpers added to `cmd/ziti-ssh/main.go`: `parseLocalForward`, `parseRemoteForward`, `parseDynamicForward`.
+
+**New functions in `client/ssh.go`:**
+- `NewSSHClient(conn net.Conn, user, host string, signer ssh.Signer) (*ssh.Client, error)` — performs the SSH handshake and returns a `*ssh.Client` without opening any session.
+- `RunLocalForward(ctx context.Context, sshClient *ssh.Client, spec LocalForwardSpec) error` — local forward loop; cancels cleanly on ctx.
+- `RunRemoteForward(ctx context.Context, sshClient *ssh.Client, spec RemoteForwardSpec) error` — remote forward loop; uses `sshClient.Listen`.
+- `RunDynamicProxy(ctx context.Context, sshClient *ssh.Client, spec DynamicForwardSpec) error` — SOCKS5 proxy loop.
+- `LocalForwardSpec`, `RemoteForwardSpec`, `DynamicForwardSpec` — typed spec structs for each forwarding mode.
+- `biCopy(ctx, a, b net.Conn)` — bidirectional `io.Copy` helper; half-closes the write side when one direction closes.
+
+**New helper in `cmd/ziti-ssh/main.go`:**
+- `runSSHClientSession(*ssh.Client) error` — PTY shell on a pre-built `*ssh.Client`; mirrors `client.RunSession` but avoids repeating the SSH handshake.
+- `runSSHClientCommand(*ssh.Client, string) error` — non-interactive command on a pre-built `*ssh.Client`.
+
+#### `ziti-ssh proxy` — ProxyCommand / stdio bridge subcommand
+
+New `proxy [user@]<target>` subcommand. Dials the Ziti service raw (no SSH handshake) and bridges `os.Stdin`/`os.Stdout` to the connection via two `io.Copy` goroutines. Exits when either side closes (EOF).
+
+Intended for use as a `ProxyCommand` in `~/.ssh/config`:
+
+```
+Host web-server-prod
+    ProxyCommand ziti-ssh proxy %h
+    User ziggy
+```
+
+With this entry, `ssh`, `git`, `rsync`, `ansible`, VS Code Remote SSH, and any other SSH-based tool work through the Ziti overlay transparently without any Ziti awareness.
+
+- Auto-refreshes the SSH certificate (same 5-minute threshold as `connect`) so the caller's `ssh` process finds a valid cert in `~/.ssh/<key>-cert.pub`.
+- Uses the same Ziti service resolution as `connect`: direct service name check, then terminator address on `--ssh-service`.
+- Shares the same `--identity`, `--ssh-service`, `--ca-service`, `--key`, and `--oidc-issuer` flags as `connect`.
+- The `user@` prefix is accepted for compatibility with `ProxyCommand ziti-ssh proxy %r@%h` but is not used.
+- `proxyParams` struct and `runProxy` function added to `cmd/ziti-ssh/main.go`.
+
+#### Documentation
+
+- `docs/usage.md`: new "Port forwarding" section (local, remote, dynamic, `-N`, combined with shell) and "Using `ziti-ssh` as a ProxyCommand" section (config examples, wildcard patterns, VS Code/git/rsync/ansible usage).
+- `docs/configuration.md`: `-N`, `-L`, `-R`, `-D` flags added to the `ziti-ssh connect` table; new `ziti-ssh proxy` flag table.
+- `CLAUDE.md`: `connect` component description updated to cover all forwarding flags and `-N`; `proxy` subcommand added; `client/ssh.go` API section updated with new exported functions.
+
 ## [Unreleased] - 2026-04-06
 
 ### Added
