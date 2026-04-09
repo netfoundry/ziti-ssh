@@ -176,8 +176,8 @@ func wrapWithCert(signer ssh.Signer, keyPath string) (ssh.Signer, error) {
 }
 
 // CertNeedsRefresh returns true when the certificate file at certPath is
-// either absent or will expire within 30 minutes of the time this function is
-// called. It returns false if the file is present and has more than 30 minutes
+// either absent or will expire within 5 minutes of the time this function is
+// called. It returns false if the file is present and has more than 5 minutes
 // of validity remaining.
 func CertNeedsRefresh(certPath string) bool {
 	data, err := os.ReadFile(certPath)
@@ -203,7 +203,7 @@ func CertNeedsRefresh(certPath string) bool {
 	}
 
 	expiry := time.Unix(int64(cert.ValidBefore), 0)
-	return time.Until(expiry) < 30*time.Minute
+	return time.Until(expiry) < 5*time.Minute
 }
 
 // RunSession opens an interactive SSH shell session over conn.
