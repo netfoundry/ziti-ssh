@@ -362,7 +362,7 @@ func runConnect(p connectParams) error {
 		fmt.Fprintf(os.Stderr, "%-12s %s\n", "SSH key:", privKeyPath)
 	}
 
-	// Auto-sign if the cert is missing or expiring within 30 minutes.
+	// Auto-sign if the cert is missing or expiring within 5 minutes.
 	needsRefresh := client.CertNeedsRefresh(certPath)
 	if needsRefresh {
 		if p.verbose {
@@ -745,7 +745,7 @@ func main() {
 When invoked with a target argument it opens an interactive SSH session using
 short-lived SSH certificates. Certificates are obtained from the ziti-ssh-ca
 service and cached in ~/.ssh/<key>-cert.pub. They are refreshed automatically
-when fewer than 30 minutes of validity remain.
+when fewer than 5 minutes of validity remain.
 
 If a command is provided after the target (after -- or as trailing arguments),
 it is executed non-interactively on the remote host instead of opening a shell.
@@ -825,7 +825,7 @@ interactive SSH session. If a command is provided after the target (separated by
 -- or as trailing arguments), it is executed non-interactively on the remote host
 instead of opening a shell. The remote exit code is propagated to the local process.
 
-If the local SSH certificate is missing or will expire within 30 minutes it is
+If the local SSH certificate is missing or will expire within 5 minutes it is
 automatically refreshed via the ziti-ssh-ca service before connecting.
 
 The target may be given as:

@@ -134,7 +134,7 @@ The client binary. It provides five subcommands (and a root shorthand for `conne
 **`connect [user@]<target>`** (also the root default when a target argument is given):
 
 1. Resolve the SSH private key (auto-detect from `~/.ssh/` or use `--key`).
-2. Call `client.CertNeedsRefresh(certPath)` — if the cert is missing or will expire within 30 minutes, run the sign flow automatically before opening the session.
+2. Call `client.CertNeedsRefresh(certPath)` — if the cert is missing or will expire within 5 minutes, run the sign flow automatically before opening the session.
 3. Call `client.NewCertSigner(privKeyPath)` to load the private key and, if a `<key>-cert.pub` file is present, wrap it in an `ssh.CertSigner`. If the key is passphrase-protected, fall back to the SSH agent (`SSH_AUTH_SOCK`).
 4. Authenticate to Ziti and dial the `ssh` service, specifying the target identity name as the terminator address via `ziti.DialOptions{Identity: terminatorAddr}`. If the target matches a known Ziti service name directly, it is dialled without a terminator.
 5. Call `client.RunSession(conn, username, host, signer)` to run an interactive PTY session over the Ziti connection.

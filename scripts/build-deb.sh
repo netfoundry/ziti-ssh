@@ -310,7 +310,7 @@ Depends: openssh-client
 Description: Ziti SSH client with certificate-based authentication
  A full SSH client that operates over an OpenZiti network. Certificates are
  obtained from the ziti-ssh-ca service and cached in ~/.ssh/<key>-cert.pub.
- They are refreshed automatically when fewer than 30 minutes of validity
+ They are refreshed automatically when fewer than 5 minutes of validity
  remain.
  .
  Subcommands: connect (default), sign, enroll, list, mfa.

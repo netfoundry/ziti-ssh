@@ -552,7 +552,7 @@ Examples:
   ziti-scp file1 file2 alice@web-server:/remote/dir/
 
 Certificates are obtained from the ziti-ssh-ca service and cached in
-~/.ssh/<key>-cert.pub, refreshed automatically when fewer than 30 minutes
+~/.ssh/<key>-cert.pub, refreshed automatically when fewer than 5 minutes
 of validity remain.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if versionFlag {

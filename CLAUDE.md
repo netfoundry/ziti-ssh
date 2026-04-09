@@ -18,7 +18,7 @@ Four cooperating binaries:
 
 2. **`ziti-ssh-host`** — a host daemon that enrolls the host into a Ziti network, configures sshd to trust the CA, and proxies Ziti connections to the local sshd. In `per-identity` mode, creates ephemeral Linux users and applies per-identity permissions (groups, sudoers rules) sourced from a `ziti-ssh-host.v1` config attached to the Ziti service. A single instance can bind to multiple Ziti services simultaneously, each with independent permissions.
 
-3. **`ziti-ssh`** — a full SSH client over OpenZiti. Subcommands: `connect` (default), `sign`, `enroll`, `list`, `mfa`. Obtains and caches SSH certificates from the CA; auto-refreshes when fewer than 30 minutes of validity remain.
+3. **`ziti-ssh`** — a full SSH client over OpenZiti. Subcommands: `connect` (default), `sign`, `enroll`, `list`, `mfa`. Obtains and caches SSH certificates from the CA; auto-refreshes when fewer than 5 minutes of validity remain.
 
 4. **`ziti-scp`** — a file copy tool over OpenZiti. Uses the SFTP subsystem over the same Ziti overlay. Mirrors `scp(1)` behaviour: upload, download, recursive directory copy, preserve mode. Shares the same identity, certificate, config infrastructure, and cert auto-refresh logic as `ziti-ssh`.
 
@@ -89,7 +89,7 @@ Each `ziti-ssh-host` instance listens on a Ziti service with its identity name a
 Five subcommands:
 
 **`connect [user@]<target>`** (also the default when a bare argument is given):
-- Auto-refreshes the SSH cert if missing or expiring within 30 min.
+- Auto-refreshes the SSH cert if missing or expiring within 5 min.
 - Resolves whether the target is a direct Ziti service name or a terminator address on `--ssh-service`.
 - Uses `ziti.DialOptions{Identity: terminatorAddr}` when dialling via a terminator.
 - Wraps the private key and cert into an `ssh.CertSigner` via `client.NewCertSigner`.
@@ -108,7 +108,7 @@ Config file at `~/.config/ziti-ssh/config.yaml` (XDG_CONFIG_HOME respected). Fie
 ### SSH Session / SFTP Library (`client/ssh.go`, `client/sftp.go`)
 
 - `NewCertSigner(keyPath string) (ssh.Signer, error)` — loads key and cert; returns `ssh.CertSigner` if cert present.
-- `CertNeedsRefresh(certPath string) bool` — true if cert absent or expires within 30 min.
+- `CertNeedsRefresh(certPath string) bool` — true if cert absent or expires within 5 min.
 - `RunSession(conn net.Conn, user, host string, signer ssh.Signer) error` — PTY SSH session over an existing `net.Conn`.
 - `RunSFTP(conn, user, host, signer, isUpload, localPaths, remotePath, recursive, preserve, quiet) error` — SFTP file copy over an existing `net.Conn`; uses `github.com/pkg/sftp`.
 

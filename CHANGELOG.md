@@ -74,7 +74,7 @@ Flags (`--controller`, `--username`, `--password`, `--insecure`, `--controller-c
 - `-p` / `--preserve` flag to copy file timestamps and permissions (uses SFTP `Chtimes` on remote, `os.Chtimes` locally)
 - `-q` / `--quiet` flag to suppress per-file progress output
 - scp-style progress reporting to stderr: filename, percentage, bytes transferred, transfer rate, and ETA; updates at 500ms intervals, final line at 100%
-- Same cert auto-refresh logic as `ziti-ssh connect`: calls `client.CertNeedsRefresh` and auto-signs via the CA when fewer than 30 minutes of validity remain
+- Same cert auto-refresh logic as `ziti-ssh connect`: calls `client.CertNeedsRefresh` and auto-signs via the CA when fewer than 5 minutes of validity remain
 - Same Ziti service resolution: checks the service list for a direct service-name match, falls back to terminator address on `--ssh-service`
 - Same config file (`~/.config/ziti-ssh/config.yaml`) and same flag/env/default precedence via `config.EnvOrFlag`
 - `enroll` subcommand for identity enrollment (mirrors `ziti-ssh enroll`; writes identity JSON to `~/.config/ziti-ssh/<name>.json` by default)
@@ -186,7 +186,7 @@ Flags (`--controller`, `--username`, `--password`, `--insecure`, `--controller-c
 - Configured via `/etc/ziti-ssh-host/env` (installed by `.deb` package)
 
 #### `ziti-ssh` — client
-- `connect [user@]<target>` (default command): opens an interactive SSH session over Ziti; auto-runs `sign` if cert is missing or expires within 30 minutes
+- `connect [user@]<target>` (default command): opens an interactive SSH session over Ziti; auto-runs `sign` if cert is missing or expires within 5 minutes
 - Target resolution: `--service` for explicit service name; otherwise checks service list for exact match, falls back to terminator address on `--ssh-service`
 - `sign`: obtains a signed SSH certificate from `ziti-ssh-ca`; discovers SSH keys in standard order (`id_ed25519`, `id_ecdsa`, `id_rsa`); prompts to generate via `ssh-keygen` if none found; writes cert to `~/.ssh/<key>-cert.pub`; displays cert details via `ssh-keygen -L`
 - `enroll --jwt <path>`: enrolls a Ziti identity from a JWT

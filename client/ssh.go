@@ -8,7 +8,7 @@
 //     is presented during authentication.
 //
 //   - CertNeedsRefresh — returns true when the cert file is missing or will
-//     expire within 30 minutes.
+//     expire within 5 minutes.
 //
 //   - RunSession       — runs a full interactive SSH session with PTY over a
 //     net.Conn that has already been dialled (e.g. via ziti.Dial).
