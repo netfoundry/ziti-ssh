@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build binaries
+        run: |
+          VERSION=${{ github.ref_name }}
+          BINARIES=(ziti-ssh ziti-scp ziti-ssh-ca ziti-ssh-host)
+          PLATFORMS=(linux/amd64 linux/arm64)
+
+          for platform in "${PLATFORMS[@]}"; do
+            GOOS=${platform%/*}
+            GOARCH=${platform#*/}
+            for bin in "${BINARIES[@]}"; do
+              CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH \
+                go build -trimpath -o ${bin} ./cmd/${bin}
+              tar -czf ${bin}_${VERSION}_${GOOS}_${GOARCH}.tar.gz ${bin}
+              rm ${bin}
+            done
+          done
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: '*.tar.gz'
+          generate_release_notes: true
+          fail_on_unmatched_files: true
