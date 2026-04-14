@@ -37,10 +37,21 @@ jobs:
             done
           done
 
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: '*.tar.gz'
+          files: |
+            *.tar.gz
+            sbom.spdx.json
           generate_release_notes: true
           fail_on_unmatched_files: true
           prerelease: true
