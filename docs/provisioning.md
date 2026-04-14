@@ -6,42 +6,7 @@ For end-user usage see [usage.md](usage.md). For a full flag and config referenc
 
 ---
 
-## Building the packages
-
-The deb packages are not yet published to an apt repository. Build them locally from source.
-
-**Prerequisites:**
-
-- `go` 1.21 or later
-- `dpkg-deb` (included in the `dpkg` package on Debian/Ubuntu)
-
-**Build:**
-
-```sh
-# Default version (0.1.0):
-./scripts/build-deb.sh
-
-# Explicit version:
-VERSION=1.2.0 ./scripts/build-deb.sh
-```
-
-Output lands in `dist/`:
-
-```
-dist/ziti-ssh-ca_<version>_amd64.deb
-dist/ziti-ssh-host_<version>_amd64.deb
-dist/ziti-ssh_<version>_amd64.deb
-dist/ziti-scp_<version>_amd64.deb
-```
-
-Each component has its own installation section below. Copy the packages to their target machines as directed:
-
-| Package | Destination |
-|---|---|
-| `ziti-ssh-ca_<version>_amd64.deb` | Ziti controller host |
-| `ziti-ssh-host_<version>_amd64.deb` | Each target SSH host |
-| `ziti-ssh_<version>_amd64.deb` | Each user's machine |
-| `ziti-scp_<version>_amd64.deb` | Each user's machine (optional) |
+For installation options — including pre-built binary downloads, Docker-based .deb builds, and local builds — see [building.md](building.md).
 
 ---
 

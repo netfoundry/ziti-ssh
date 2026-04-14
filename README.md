@@ -26,23 +26,13 @@ The Ziti network enforces who can reach which machines; `sshd` on each machine o
 
 - An operational OpenZiti network (controller + at least one edge router). See the [OpenZiti quickstart](https://openziti.io/docs/learn/quickstarts/) if you do not have one yet.
 - **On user machines:** `ziti-ssh` installed (from this repo) and a Ziti identity enrolled.
-- **On the CA host:** Go 1.22 or later (to build from source), or the pre-built `ziti-ssh-ca` binary.
-- **On each SSH target host:** Go 1.22 or later (to build from source), or the pre-built `ziti-ssh-host` binary. Ubuntu 22.04 or later (or any distro with OpenSSH 8.2+ and systemd).
+- **On each SSH target host:** Ubuntu 22.04 or later (or any distro with OpenSSH 8.2+ and systemd).
 
 ---
 
 ## Building
 
-```sh
-git clone https://github.com/netfoundry/ziti-ssh.git
-cd ziti-ssh
-go build -o ziti-ssh-ca   ./cmd/ziti-ssh-ca
-go build -o ziti-ssh-host ./cmd/ziti-ssh-host
-go build -o ziti-ssh      ./cmd/ziti-ssh
-go build -o ziti-scp      ./cmd/ziti-scp
-```
-
-All binaries are statically linked (no CGO). Copy each binary to the machine where it will run. `ziti-ssh` and `ziti-scp` belong on user machines; `ziti-ssh-ca` and `ziti-ssh-host` are server-side components.
+See [docs/building.md](docs/building.md) for all installation and build options.
 
 ---
 
@@ -50,6 +40,7 @@ All binaries are statically linked (no CGO). Copy each binary to the machine whe
 
 | File | Purpose |
 |---|---|
+| [docs/building.md](docs/building.md) | Getting binaries: download, Docker build, local build |
 | [docs/provisioning.md](docs/provisioning.md) | Ziti network setup, per-component installation |
 | [docs/usage.md](docs/usage.md) | End-user guide: certs, connecting, file copy, MFA |
 | [docs/configuration.md](docs/configuration.md) | Full flag/env/config reference for all binaries |
