@@ -202,7 +202,7 @@ In `per-identity` mode, Linux permissions for each connecting identity are resol
 {
   "permissions": {
     "*":              { "groups": ["developers"] },
-    "*@corp.com":     { "groups": ["developers", "docker"] },
+    "dba-*":          { "groups": ["developers", "docker"] },
     "alice@corp.com": { "groups": ["docker", "adm"], "sudoers_rule": "ALL=(ALL) NOPASSWD: /bin/systemctl status *" },
     "ops-automation": { "sudoers_rule": "ALL=(ALL) NOPASSWD: ALL" }
   }
@@ -220,8 +220,8 @@ In `per-identity` mode, Linux permissions for each connecting identity are resol
 ```
 DB server running:  ziti-ssh-host run --ssh-service ssh-ops --ssh-service ssh-db
 
-ssh-ops config: alice → [sudo, adm]    ← ops team, OS-level access
-ssh-db  config: carol → [mysql]        ← DBA team, database-level access
+ssh-ops config: ops-alice → [sudo, adm]    ← ops team, OS-level access
+ssh-db  config: dba-carol → [mysql]        ← DBA team, database-level access
 ```
 
 **Config type registration:** `ziti-ssh-ca config apply` registers the `ziti-ssh-host.v1` schema on the controller as a one-time setup step. Subsequent `ziti edge update config` commands update individual permission configs; changes propagate live to all running `ziti-ssh-host` instances within seconds.
@@ -310,7 +310,7 @@ The CA derives a Linux username from each caller's Ziti identity name using `ca.
 3. If the result starts with a digit, prefix it with `z`.
 4. Truncate to 32 characters.
 
-Example: `Alice@Corp` → `alice_corp`
+Example: `Alice` → `alice`, `dba-Alice` → `dba-alice`, `123bot` → `z123bot`
 
 **Ephemeral user lifecycle:**
 - `ziti-ssh-host run` creates the user with `useradd -m -s /bin/bash <username>` on the first connection from that identity.
@@ -322,9 +322,9 @@ Example: `Alice@Corp` → `alice_corp`
 
 **Connecting in per-identity mode:**
 ```sh
-ziti-ssh alice_corp@web-server-prod
+ziti-ssh dba-alice@web-server-prod
 ```
-The username before `@` must match the derived username for the caller's identity.
+The username before `@` is the Ziti identity name (which is also the derived Linux username when it contains only lowercase letters, digits, hyphens, and underscores).
 
 ## SSH Host Configuration
 

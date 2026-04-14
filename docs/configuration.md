@@ -194,8 +194,8 @@ This config is only consulted in `per-identity` mode. It has no effect in `share
 {
   "permissions": {
     "*":              {"groups": ["developers"]},
-    "*@corp.com":     {"groups": ["developers", "docker"]},
-    "alice@corp.com": {"groups": ["docker", "adm"], "sudoers_rule": "ALL=(ALL) NOPASSWD: /bin/systemctl status *"},
+    "ops-*":          {"groups": ["developers", "docker"]},
+    "ops-alice":      {"groups": ["docker", "adm"], "sudoers_rule": "ALL=(ALL) NOPASSWD: /bin/systemctl status *"},
     "ops-automation": {"sudoers_rule": "ALL=(ALL) NOPASSWD: ALL"}
   }
 }
