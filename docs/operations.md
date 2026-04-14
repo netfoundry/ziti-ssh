@@ -61,13 +61,17 @@ For the full schema and worked example, see [`ziti-ssh-host.v1` config type](con
 
 For each connecting identity, `ziti-ssh-host` resolves permissions as follows:
 
-1. **Config attached, identity has an entry** — apply that entry's `groups` and `sudoers_rule`. Global fallbacks (`ZITI_SSH_GROUPS`, `ZITI_SUDOERS_RULE`) are ignored for this identity. An entry that omits a field means that field gets nothing — there is no merging with globals for matched identities.
+1. **Exact match** — if the config has an entry whose key is the exact Ziti identity name, that entry is used. Global fallbacks are ignored.
 
-2. **Config attached, identity not in it** — apply global fallbacks: groups from `ZITI_SSH_GROUPS` (if set) and the sudoers rule from `ZITI_SUDOERS_RULE` (if set). If neither is set, the user is created with no extra permissions.
+2. **Most-specific glob match** — if no exact key exists, all glob patterns in the config (keys containing `*` or `?`) are tested via `path.Match`. The pattern with the longest literal prefix before the first wildcard wins. Global fallbacks are ignored for the matched identity.
 
-3. **No config attached** — apply global fallbacks to all users (equivalent to the existing behaviour before per-identity permissions were introduced).
+3. **`"*"` catch-all** — if neither an exact key nor a more-specific glob matches, a key of `"*"` in the config is used. This is the preferred way to define a default permission set, because the config propagates live to all running `ziti-ssh-host` instances without requiring an env file edit or service restart.
 
-Identity keys in the config are the **Ziti identity names** exactly as they appear in the controller (case-sensitive). `ziti-ssh-host` derives the Linux username internally via `DeriveUsername`.
+4. **No config match, config attached** — apply global fallbacks: groups from `ZITI_SSH_GROUPS` (if set) and the sudoers rule from `ZITI_SUDOERS_RULE` (if set). If neither is set, the user is created with no extra permissions.
+
+5. **No config attached** — apply global fallbacks to all users (equivalent to the behaviour before per-identity permissions were introduced).
+
+An entry that omits a field means that field gets nothing — globals are not merged in for matched identities. Identity keys are the **Ziti identity names** exactly as they appear in the controller (case-sensitive). `ziti-ssh-host` derives the Linux username internally via `DeriveUsername`.
 
 #### Live config reload
 
@@ -104,7 +108,7 @@ Each host has its own service (e.g., `ssh-web-01`, `ssh-web-02`) with a fully in
 
 - **Groups must exist on the host.** `ziti-ssh-host` does not create Linux groups. If a config entry references a group that does not exist, `usermod -aG` will fail. The failure is logged and the session proceeds with the user account created but without the requested group membership.
 - **First-connection-wins for concurrent cross-service sessions.** If the same identity connects through two services simultaneously, the Linux account is created once with the permissions from the first connection. The second service's config is not applied retroactively.
-- **A config entry suppresses global fallbacks entirely.** An identity matched by a config entry receives only what that entry specifies — globals are not merged in.
+- **Any matched config entry suppresses global fallbacks entirely.** An identity matched by an exact key, a glob pattern, or the `"*"` catch-all receives only what that entry specifies — globals are not merged in.
 - **No config attached is not an error.** `ziti-ssh-host` logs a debug message and uses global fallbacks.
 - **`shared` mode is unaffected.** The `ziti-ssh-host.v1` config is consulted only in `per-identity` mode.
 
