@@ -40,7 +40,7 @@ Examples: `Alice` → `alice`, `dba-Alice` → `dba-alice`, `123bot` → `z123bo
 - If `ZITI_SUDOERS_RULE` is set, a sudoers file is written to `/etc/sudoers.d/<username>` (validated with `visudo -c` before installation).
 - Concurrent sessions from the same identity are reference-counted — `useradd` is only called once.
 - When the last session from an identity closes, the cleanup sequence runs: `loginctl terminate-user <username>` drains the systemd session, the process list is polled until the user's processes exit (up to 5 seconds), and then `userdel -r <username>` removes the account and home directory. The sudoers file is removed unconditionally at this point (group membership is implicit in account deletion).
-- Set `ZITI_USER_CLEANUP=false` to keep the Linux account across disconnects (useful for persistent home-directory setups). The sudoers file is still removed on disconnect when this option is set.
+- By default the Linux account is kept after disconnect. Set `ZITI_USER_CLEANUP=true` to delete the account when the last session closes. The sudoers file is removed on disconnect regardless of this setting.
 - Active managed usernames are persisted to `/var/lib/ziti-ssh-host/managed-users`. On startup, `CleanupOrphans` reads this file and deletes any listed users (they had sessions open when the process was last killed), preventing accumulation of stale accounts after crashes.
 
 **Connecting in per-identity mode:**

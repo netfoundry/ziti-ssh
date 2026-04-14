@@ -201,7 +201,7 @@ Safe on a nil receiver — returns the global fallbacks when no config is attach
 
 - `ZITI_SUDOERS_RULE` — sudoers rule fragment applied to any identity not matched by a `ziti-ssh-host.v1` config entry.
 - `ZITI_SSH_GROUPS` — comma-separated Linux group names applied to any identity not matched by a config entry.
-- `ZITI_USER_CLEANUP` — set to `false` to keep Linux accounts after the last session closes (default: `true`).
+- `ZITI_USER_CLEANUP` — set to `true` to delete Linux accounts after the last session closes (default: `false`).
 
 **`host.deleteUser(username)`** — the internal cleanup sequence:
 

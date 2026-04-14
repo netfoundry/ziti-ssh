@@ -282,7 +282,7 @@ Flags (`--controller`, `--username`, `--password`, `--insecure`, `--controller-c
 - `run`: binds the `ssh` Ziti service with identity name as addressable terminator, proxies inbound connections to `127.0.0.1:22`
 - Per-identity mode (`ZITI_SSH_MODE=per-identity`): creates ephemeral Linux accounts on connect via `useradd -m -s /bin/bash`, removes them on disconnect via `loginctl terminate-user` → process polling → `userdel -r`
 - `ZITI_SUDOERS_RULE`: optional sudoers rule written to `/etc/sudoers.d/<username>` on connect; validated with `visudo -c` before installation; removed on disconnect
-- `ZITI_USER_CLEANUP=false`: keeps user accounts after disconnect (sudoers still removed); orphan cleanup always runs on startup
+- `ZITI_USER_CLEANUP=true`: deletes user accounts on disconnect; default is `false` (accounts kept); orphan cleanup always runs on startup
 - Reference-counted `UserManager` — safe for concurrent sessions from the same identity; state persisted at `/var/lib/ziti-ssh-host/managed-users` for crash recovery
 - Configured via `/etc/ziti-ssh-host/env` (installed by `.deb` package)
 

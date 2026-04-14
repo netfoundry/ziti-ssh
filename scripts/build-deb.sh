@@ -267,9 +267,9 @@ if [ ! -f /etc/ziti-ssh-host/env ]; then
 #ZITI_SUDOERS_RULE=ALL=(ALL) NOPASSWD:ALL
 
 # USER_CLEANUP — whether to delete the Linux user and sudoers file on disconnect.
-# true (default): ephemeral users — account removed when last session closes.
-# false: persistent users — account remains after disconnect.
-#ZITI_USER_CLEANUP=true
+# false (default): persistent users — account remains after disconnect.
+# true: ephemeral users — account removed when last session closes.
+#ZITI_USER_CLEANUP=false
 ENVEOF
     chmod 640 /etc/ziti-ssh-host/env
 fi

@@ -771,7 +771,7 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 	// Global fallback permissions from environment variables.
 	globalSudoersRule := os.Getenv("ZITI_SUDOERS_RULE")
 	globalGroups := parseGlobalGroups()
-	cleanupOnDisconnect := os.Getenv("ZITI_USER_CLEANUP") != "false"
+	cleanupOnDisconnect := os.Getenv("ZITI_USER_CLEANUP") == "true"
 
 	listenOpts := &ziti.ListenOptions{
 		BindUsingEdgeIdentity: true,

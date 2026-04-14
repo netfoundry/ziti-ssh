@@ -128,7 +128,7 @@ The `run` subcommand also accepts:
 | `--mode` | `ZITI_SSH_MODE` | `shared` | Principal mode: `shared` or `per-identity` |
 | — | `ZITI_SSH_GROUPS` | — | Comma-separated Linux groups applied (via `usermod -aG`) to users not matched by a `ziti-ssh-host.v1` config entry. Global fallback; per-identity mode only. Groups must already exist on the host. |
 | — | `ZITI_SUDOERS_RULE` | — | If set, a sudoers rule `<username> <value>` is written to `/etc/sudoers.d/<username>` on first connect. Global fallback applied to users not matched by a `ziti-ssh-host.v1` config entry; per-identity mode only. |
-| — | `ZITI_USER_CLEANUP` | `true` | Set to `false` to keep the Linux account after the last session closes rather than running `userdel -r` (per-identity mode only) |
+| — | `ZITI_USER_CLEANUP` | `false` | Set to `true` to delete the Linux account after the last session closes via `userdel -r` (per-identity mode only) |
 
 `enroll` also requires `--jwt <path>` (no environment variable equivalent).
 
