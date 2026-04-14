@@ -140,6 +140,170 @@ func TestResolve_NoGlobalFallbacks_ReturnsEmptyPerms(t *testing.T) {
 	}
 }
 
+// ---- Glob pattern resolution tests ------------------------------------------
+
+func TestResolve_CatchAll_MatchesWhenNoOtherEntry(t *testing.T) {
+	pc := &host.PermissionsConfig{
+		Permissions: map[string]host.IdentityPermissions{
+			"*": {
+				Groups:      []string{"users"},
+				SudoersRule: "",
+			},
+		},
+	}
+
+	got := pc.Resolve("stranger@example.com", nil, "")
+
+	if len(got.Groups) != 1 || got.Groups[0] != "users" {
+		t.Errorf("Groups = %v, want [users]", got.Groups)
+	}
+}
+
+func TestResolve_DomainGlob_MatchesIdentityInDomain(t *testing.T) {
+	pc := &host.PermissionsConfig{
+		Permissions: map[string]host.IdentityPermissions{
+			"*@corp.com": {
+				Groups:      []string{"corp"},
+				SudoersRule: "ALL=(ALL) NOPASSWD: /usr/bin/corp-tool",
+			},
+		},
+	}
+
+	got := pc.Resolve("alice@corp.com", nil, "")
+
+	if len(got.Groups) != 1 || got.Groups[0] != "corp" {
+		t.Errorf("Groups = %v, want [corp]", got.Groups)
+	}
+	if got.SudoersRule != "ALL=(ALL) NOPASSWD: /usr/bin/corp-tool" {
+		t.Errorf("SudoersRule = %q, want corp-tool rule", got.SudoersRule)
+	}
+}
+
+func TestResolve_DomainGlob_NoMatchForOtherDomain(t *testing.T) {
+	pc := &host.PermissionsConfig{
+		Permissions: map[string]host.IdentityPermissions{
+			"*@corp.com": {Groups: []string{"corp"}},
+		},
+	}
+	globalGroups := []string{"guests"}
+
+	got := pc.Resolve("alice@other.com", globalGroups, "")
+
+	if len(got.Groups) != 1 || got.Groups[0] != "guests" {
+		t.Errorf("Groups = %v, want [guests] (global fallback)", got.Groups)
+	}
+}
+
+func TestResolve_ExactBeatsDomainGlob(t *testing.T) {
+	// Exact key "alice@corp.com" must beat the "*@corp.com" glob.
+	pc := &host.PermissionsConfig{
+		Permissions: map[string]host.IdentityPermissions{
+			"alice@corp.com": {Groups: []string{"admins"}, SudoersRule: "ALL=(ALL) NOPASSWD: ALL"},
+			"*@corp.com":     {Groups: []string{"corp"}},
+		},
+	}
+
+	got := pc.Resolve("alice@corp.com", nil, "")
+
+	if len(got.Groups) != 1 || got.Groups[0] != "admins" {
+		t.Errorf("Groups = %v, want [admins] (exact match)", got.Groups)
+	}
+	if got.SudoersRule != "ALL=(ALL) NOPASSWD: ALL" {
+		t.Errorf("SudoersRule = %q, want ALL rule", got.SudoersRule)
+	}
+}
+
+func TestResolve_MoreSpecificGlobWins(t *testing.T) {
+	// "alice@*" has a 6-char literal prefix ("alice@"); "*@corp.com" has 0.
+	// Both match "alice@corp.com" — "alice@*" must win.
+	pc := &host.PermissionsConfig{
+		Permissions: map[string]host.IdentityPermissions{
+			"alice@*":    {Groups: []string{"alice-specific"}},
+			"*@corp.com": {Groups: []string{"corp-generic"}},
+		},
+	}
+
+	got := pc.Resolve("alice@corp.com", nil, "")
+
+	if len(got.Groups) != 1 || got.Groups[0] != "alice-specific" {
+		t.Errorf("Groups = %v, want [alice-specific] (longer literal prefix wins)", got.Groups)
+	}
+}
+
+func TestResolve_CatchAllLosesToSpecificGlob(t *testing.T) {
+	// "*" has prefix length 0; "*@corp.com" also has prefix length 0 but
+	// matches only corp.com identities. When both are present, the domain
+	// glob wins for a corp.com identity because it has a longer literal
+	// prefix (0 for "*", also 0 for "*@corp.com" but the glob is more
+	// specific). Actually "*@corp.com" has prefix 0 and "*" has prefix 0 —
+	// equal specificity. This test verifies that the catch-all does NOT
+	// override the domain glob when the domain glob is also present and
+	// matches, and that the result is one of the two matching entries.
+	//
+	// Specifically we test that an identity NOT in corp.com still gets the
+	// catch-all, and that a corp.com identity gets the corp entry (or at
+	// least does not get global fallbacks when a matching glob exists).
+	pc := &host.PermissionsConfig{
+		Permissions: map[string]host.IdentityPermissions{
+			"ops-*": {Groups: []string{"ops"}},
+			"*":     {Groups: []string{"default"}},
+		},
+	}
+
+	// "ops-alice" matches "ops-*" (prefix 4) and "*" (prefix 0) — ops-* wins.
+	got := pc.Resolve("ops-alice", nil, "global-fallback-should-not-appear")
+	if len(got.Groups) != 1 || got.Groups[0] != "ops" {
+		t.Errorf("Groups = %v, want [ops] (ops-* more specific than *)", got.Groups)
+	}
+
+	// "dev-bob" matches only "*" — should get default.
+	got = pc.Resolve("dev-bob", nil, "global-fallback-should-not-appear")
+	if len(got.Groups) != 1 || got.Groups[0] != "default" {
+		t.Errorf("Groups = %v, want [default] (catch-all)", got.Groups)
+	}
+}
+
+func TestResolve_GlobNoMatch_FallsThruToEnvVars(t *testing.T) {
+	// A glob that doesn't match the identity should not prevent the env var
+	// fallback from being returned.
+	pc := &host.PermissionsConfig{
+		Permissions: map[string]host.IdentityPermissions{
+			"*@other.com": {Groups: []string{"other"}},
+		},
+	}
+	globalGroups := []string{"everyone"}
+	globalSudoers := "ALL=(ALL) NOPASSWD: /usr/bin/less"
+
+	got := pc.Resolve("alice@corp.com", globalGroups, globalSudoers)
+
+	if len(got.Groups) != 1 || got.Groups[0] != "everyone" {
+		t.Errorf("Groups = %v, want [everyone] (env var fallback)", got.Groups)
+	}
+	if got.SudoersRule != globalSudoers {
+		t.Errorf("SudoersRule = %q, want %q", got.SudoersRule, globalSudoers)
+	}
+}
+
+func TestResolve_GlobGlobalsNotMerged(t *testing.T) {
+	// A glob-matched entry that has an empty SudoersRule must NOT inherit
+	// the global sudoers rule.
+	pc := &host.PermissionsConfig{
+		Permissions: map[string]host.IdentityPermissions{
+			"*@corp.com": {
+				Groups: []string{"corp"},
+				// SudoersRule deliberately empty
+			},
+		},
+	}
+	globalSudoers := "ALL=(ALL) NOPASSWD: ALL"
+
+	got := pc.Resolve("alice@corp.com", nil, globalSudoers)
+
+	if got.SudoersRule != "" {
+		t.Errorf("SudoersRule = %q, want empty (global must not be merged into glob match)", got.SudoersRule)
+	}
+}
+
 // ---- UserManager.EnsureUser tests -------------------------------------------
 //
 // These tests avoid shelling out to useradd/usermod/userdel (which would

@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -41,19 +42,77 @@ type PermissionsConfig struct {
 // Resolve returns the effective IdentityPermissions for zitiIdentity.
 //
 // Resolution order:
-//  1. If pc is non-nil and zitiIdentity has an entry → return that entry
-//     as-is. Global fallbacks are not merged in.
-//  2. Otherwise → return global fallbacks (globalGroups, globalSudoersRule).
+//  1. Exact key match — zitiIdentity found as a literal key in the map.
+//  2. Most specific glob pattern — among all map keys containing '*' or '?'
+//     that match zitiIdentity (via path.Match), the one with the longest
+//     literal prefix before the first wildcard character wins. If two
+//     patterns have equal specificity the result is unspecified (one of
+//     the matching entries is returned, no guarantee which).
+//  3. Env var fallback — globalGroups / globalSudoersRule (unchanged).
+//
+// In all matching cases the matched entry is returned as-is; global
+// fallbacks are not merged in.
 func (pc *PermissionsConfig) Resolve(zitiIdentity string, globalGroups []string, globalSudoersRule string) IdentityPermissions {
 	if pc != nil {
+		// Step 1: exact match.
 		if entry, ok := pc.Permissions[zitiIdentity]; ok {
 			return entry
 		}
+
+		// Step 2: glob match — find the most specific pattern that matches.
+		bestLen := -1
+		var bestEntry IdentityPermissions
+		for pattern, entry := range pc.Permissions {
+			if !strings.ContainsAny(pattern, "*?") {
+				// Pure literal key that didn't match exactly — skip.
+				continue
+			}
+			matched, err := path.Match(pattern, zitiIdentity)
+			if err != nil {
+				// path.Match only errors on malformed patterns (unclosed '[').
+				// Log and skip rather than crashing.
+				slog.Warn("invalid glob pattern in permissions config, skipping",
+					"pattern", pattern, "err", err)
+				continue
+			}
+			if !matched {
+				continue
+			}
+			pl := literalPrefixLen(pattern)
+			if pl > bestLen {
+				bestLen = pl
+				bestEntry = entry
+			}
+		}
+		if bestLen >= 0 {
+			return bestEntry
+		}
 	}
+
+	// Step 3: env var fallback.
 	return IdentityPermissions{
 		Groups:      globalGroups,
 		SudoersRule: globalSudoersRule,
 	}
+}
+
+// literalPrefixLen returns the number of literal (non-wildcard) characters
+// at the start of a glob pattern. This is used to determine pattern
+// specificity: a pattern with a longer literal prefix is considered more
+// specific than one with a shorter prefix.
+//
+// Examples:
+//
+//	"alice@*"   → 6  ("alice@")
+//	"*@corp.com"→ 0
+//	"*"         → 0
+func literalPrefixLen(pattern string) int {
+	for i, ch := range pattern {
+		if ch == '*' || ch == '?' {
+			return i
+		}
+	}
+	return len(pattern) // no wildcards — treat as fully literal (exact match)
 }
 
 // ProxyHooks carries optional callbacks for per-connection user lifecycle

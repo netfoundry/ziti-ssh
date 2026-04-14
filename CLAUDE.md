@@ -196,27 +196,24 @@ Three subcommands:
 
 In `per-identity` mode, Linux permissions for each connecting identity are resolved from two sources in order:
 
-1. **`ziti-ssh-host.v1` Ziti service config** (per-identity, per-service): a config of this type attached to the Ziti service the connection arrived on. The config is a JSON object mapping exact Ziti identity names to a permissions entry:
+1. **`ziti-ssh-host.v1` Ziti service config** (per-identity, per-service): a config of this type attached to the Ziti service the connection arrived on. The config is a JSON object mapping Ziti identity names (or patterns) to a permissions entry. Keys may be exact identity names, glob patterns (using `*` and `?` via `path.Match`), or the `"*"` catch-all:
 
 ```json
 {
   "permissions": {
-    "alice@corp.com": {
-      "groups":       ["docker", "adm"],
-      "sudoers_rule": "ALL=(ALL) NOPASSWD: /bin/systemctl status *"
-    },
-    "ops-automation": {
-      "sudoers_rule": "ALL=(ALL) NOPASSWD: ALL"
-    }
+    "*":              { "groups": ["developers"] },
+    "*@corp.com":     { "groups": ["developers", "docker"] },
+    "alice@corp.com": { "groups": ["docker", "adm"], "sudoers_rule": "ALL=(ALL) NOPASSWD: /bin/systemctl status *" },
+    "ops-automation": { "sudoers_rule": "ALL=(ALL) NOPASSWD: ALL" }
   }
 }
 ```
 
-2. **Global fallbacks** (apply when no config is attached, or when the identity has no entry in the config):
+2. **Global fallbacks** (apply when no config is attached, or when no config key matches the identity):
    - `ZITI_SSH_GROUPS` — comma-separated Linux group names
    - `ZITI_SUDOERS_RULE` — sudoers rule fragment
 
-**Resolution:** if an identity has a config entry, that entry is its complete permission specification — global fallbacks are not merged in. If there is no config entry, global fallbacks apply in full.
+**Resolution order:** (1) exact key match; (2) most-specific glob pattern (longest literal prefix before the first wildcard wins); (3) `"*"` catch-all; (4) global fallbacks. Any matched config entry is the complete permission specification — global fallbacks are not merged in. The `"*"` catch-all is preferred over env var fallbacks because it lives in the Ziti config and propagates live without restarting hosts.
 
 **Scope:** the `ziti-ssh-host.v1` config is attached to a specific Ziti service. Because a host can bind to multiple services simultaneously, different permission sets can apply to the same physical host depending on which service a caller dials. This enables role-tiered deployments:
 

@@ -174,7 +174,7 @@ This config is only consulted in `per-identity` mode. It has no effect in `share
 ```json
 {
   "permissions": {
-    "<ziti-identity-name>": {
+    "<ziti-identity-name-or-pattern>": {
       "groups":       ["<linux-group>", ...],
       "sudoers_rule": "<sudoers rule fragment>"
     }
@@ -184,38 +184,39 @@ This config is only consulted in `per-identity` mode. It has no effect in `share
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `permissions` | object | yes | Map of Ziti identity name → permission entry. Keys are exact Ziti identity names (case-sensitive). |
-| `permissions.<name>.groups` | array of strings | no | Linux groups to add the ephemeral user to via `usermod -aG` after account creation. Groups must already exist on the host. |
-| `permissions.<name>.sudoers_rule` | string | no | The rule fragment placed after the username in `/etc/sudoers.d/<username>`. Validated with `visudo -c` before installation. Omit to grant no sudo access. |
+| `permissions` | object | yes | Map of Ziti identity name (or pattern) → permission entry. Keys may be exact identity names, glob patterns (using `*` and `?`), or the `"*"` catch-all. All matches are case-sensitive. |
+| `permissions.<key>.groups` | array of strings | no | Linux groups to add the ephemeral user to via `usermod -aG` after account creation. Groups must already exist on the host. |
+| `permissions.<key>.sudoers_rule` | string | no | The rule fragment placed after the username in `/etc/sudoers.d/<username>`. Validated with `visudo -c` before installation. Omit to grant no sudo access. |
 
 ### Example
 
 ```json
 {
   "permissions": {
-    "alice@corp.com": {
-      "groups":       ["docker", "adm"],
-      "sudoers_rule": "ALL=(ALL) NOPASSWD: /bin/systemctl status *"
-    },
-    "bob@corp.com": {
-      "groups":       ["developers"]
-    },
-    "ops-automation": {
-      "sudoers_rule": "ALL=(ALL) NOPASSWD: ALL"
-    }
+    "*":              {"groups": ["developers"]},
+    "*@corp.com":     {"groups": ["developers", "docker"]},
+    "alice@corp.com": {"groups": ["docker", "adm"], "sudoers_rule": "ALL=(ALL) NOPASSWD: /bin/systemctl status *"},
+    "ops-automation": {"sudoers_rule": "ALL=(ALL) NOPASSWD: ALL"}
   }
 }
 ```
 
 Identity keys are the **Ziti identity names** as they appear in the controller — not the derived Linux usernames. `ziti-ssh-host` applies `DeriveUsername` internally to obtain the Linux username for `useradd`, `usermod`, and the sudoers filename.
 
+Keys may be:
+- **Exact identity names** — matched literally (case-sensitive).
+- **Glob patterns** — keys containing `*` or `?` are matched via `path.Match`. The most specific match wins (longest literal prefix before the first wildcard).
+- **`"*"` catch-all** — matches any identity not covered by an exact key or more-specific pattern. This is the preferred alternative to `ZITI_SSH_GROUPS`/`ZITI_SUDOERS_RULE` for setting a default permission set, because it lives in the config and propagates live without a host restart.
+
 ### Interaction with global fallbacks
 
 The resolution order for each connecting identity is:
 
-1. Config attached and identity has an entry → apply that entry's `groups` and `sudoers_rule`. `ZITI_SSH_GROUPS` and `ZITI_SUDOERS_RULE` are ignored for this identity.
-2. Config attached but identity not in it → apply global fallbacks (`ZITI_SSH_GROUPS`, `ZITI_SUDOERS_RULE`).
-3. No config attached → apply global fallbacks to all users.
+1. Exact key match → apply that entry's `groups` and `sudoers_rule`. Global fallbacks are ignored.
+2. Most-specific glob pattern match (longest literal prefix wins) → apply that entry. Global fallbacks are ignored.
+3. `"*"` catch-all match → apply that entry. Global fallbacks are ignored.
+4. Config attached but no key matches → apply global fallbacks (`ZITI_SSH_GROUPS`, `ZITI_SUDOERS_RULE`).
+5. No config attached → apply global fallbacks to all users.
 
 A config entry that omits a field means that field gets nothing — globals are not merged in for matched identities.
 

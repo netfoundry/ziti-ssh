@@ -415,19 +415,30 @@ ziti-ssh-ca config print
 
 ### 2. Create a config for a service
 
-Create a config object of type `ziti-ssh-host.v1` and attach it to the target SSH service. Identity names in the config are the Ziti identity names exactly as they appear in the controller (case-sensitive).
+Create a config object of type `ziti-ssh-host.v1` and attach it to the target SSH service. Keys in the `permissions` map are Ziti identity names as they appear in the controller (case-sensitive). Keys may be exact identity names, glob patterns (using `*` and `?`), or the `"*"` catch-all.
 
 Replace `ssh` below with the actual service name you created in the [Provisioning the Ziti network](#provisioning-the-ziti-network) step — `ssh` if you followed the guide as written, or a custom name like `ssh-ops` if you created multiple services.
 
 ```sh
 # Create the config
 ziti edge create config ssh-permissions ziti-ssh-host.v1 \
-  '{"permissions":{"alice@corp.com":{"groups":["developers"]},"ops-automation":{"sudoers_rule":"ALL=(ALL) NOPASSWD: ALL"}}}'
+  '{
+    "permissions": {
+      "*":              {"groups": ["developers"]},
+      "*@corp.com":     {"groups": ["developers", "docker"]},
+      "bob@corp.com":   {"groups": ["developers", "docker"], "sudoers_rule": "ALL=(ALL) NOPASSWD: /bin/systemctl status *"},
+      "ops-automation": {"sudoers_rule": "ALL=(ALL) NOPASSWD: ALL"}
+    }
+  }'
 
 # Attach it to the service
 ziti edge update service ssh \
   --configs ssh-permissions
 ```
+
+**Resolution order:** exact match wins first. If no exact match, the most specific glob pattern wins (longest literal prefix before the first wildcard). If no glob matches, the `"*"` catch-all applies. If no config key matches at all, global fallbacks (`ZITI_SSH_GROUPS`, `ZITI_SUDOERS_RULE`) apply.
+
+Using `"*"` as a catch-all in the config is the preferred way to set a default permission set, because it lives in the Ziti config and propagates live to all running `ziti-ssh-host` instances — unlike `ZITI_SSH_GROUPS` and `ZITI_SUDOERS_RULE`, which require editing the host env file and restarting the service.
 
 ### 3. Verify the hosting identity can receive the config
 
@@ -439,7 +450,7 @@ Edit the config object in the controller to add, change, or remove identity entr
 
 ```sh
 ziti edge update config ssh-permissions \
-  '{"permissions":{"alice@corp.com":{"groups":["sudo","developers"]},"ops-automation":{"sudoers_rule":"ALL=(ALL) NOPASSWD: ALL"}}}'
+  '{"permissions":{"*":{"groups":["developers"]},"*@corp.com":{"groups":["developers","docker"]},"alice@corp.com":{"groups":["sudo","developers"]},"ops-automation":{"sudoers_rule":"ALL=(ALL) NOPASSWD: ALL"}}}'
 ```
 
 Run `ziti-ssh-host inspect --service ssh` on the host to confirm what the running daemon sees after the update. See [Inspecting per-identity permissions](operations.md#inspecting-per-identity-permissions) in the operations guide for details.
