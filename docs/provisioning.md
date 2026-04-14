@@ -201,11 +201,10 @@ The exact path depends on how the controller was installed. For controllers depl
 Copy the JWT produced in the provisioning step above to the CA host, then enroll it:
 
 ```sh
-ziti edge enroll \
-  --jwt /tmp/ssh-ca-server.jwt \
-  --out /etc/ziti-ssh-ca/identity.json
-chmod 600 /etc/ziti-ssh-ca/identity.json
+ziti-ssh-ca enroll --jwt /tmp/ssh-ca-server.jwt
 ```
+
+The identity file is written to `/etc/ziti-ssh-ca/identity.json` (mode 0600) by default. Pass `--out <path>` to override the output path.
 
 ### 4. Edit the env file
 

@@ -14,7 +14,7 @@ Both approaches are operationally expensive. The credentials-on-host requirement
 
 Four cooperating binaries:
 
-1. **`ziti-ssh-ca`** — a CA service hosted as a Ziti service that signs short-lived SSH certificates for authorized callers. SSH hosts trust only the CA's public key — not a credential. Also provides a `config` subcommand that installs and manages the `ziti-ssh-host.v1` config type on the Ziti controller.
+1. **`ziti-ssh-ca`** — a CA service hosted as a Ziti service that signs short-lived SSH certificates for authorized callers. SSH hosts trust only the CA's public key — not a credential. Also provides an `enroll` subcommand for identity enrollment and a `config` subcommand that installs and manages the `ziti-ssh-host.v1` config type on the Ziti controller.
 
 2. **`ziti-ssh-host`** — a host daemon that enrolls the host into a Ziti network, configures sshd to trust the CA, and proxies Ziti connections to the local sshd. In `per-identity` mode, creates ephemeral Linux users and applies per-identity permissions (groups, sudoers rules) sourced from a `ziti-ssh-host.v1` config attached to the Ziti service. A single instance can bind to multiple Ziti services simultaneously, each with independent permissions.
 
@@ -144,7 +144,7 @@ Config file at `~/.config/ziti-ssh/config.yaml` (XDG_CONFIG_HOME respected). Fie
 
 ### CA Service (`ziti-ssh-ca`)
 
-Two modes of operation: a long-running service, and a one-shot `config` management command.
+Three modes of operation: a long-running service, a one-shot `enroll` command, and a one-shot `config` management command.
 
 **Service (default / root command):**
 - Binds to a named Ziti service (default: `ssh-ca`)
@@ -157,6 +157,8 @@ Two modes of operation: a long-running service, and a one-shot `config` manageme
 - Embeds the Ziti identity name as the certificate Key ID (for audit logging)
 - Issues certs with a configurable principal (default: `ziggy`) and 8h validity
 - Enforces a per-identity token-bucket rate limit (default: 5 req/min, burst 3)
+
+**`enroll` subcommand** — enrolls the CA server's Ziti identity from a one-time JWT file. Writes the identity JSON to `/etc/ziti-ssh-ca/identity.json` (mode 0600) by default; `--out` overrides the path. No CA-specific post-enrollment steps needed.
 
 **`config` subcommand** — manages the `ziti-ssh-host.v1` config type on the Ziti controller via the management API (HTTPS, username/password auth):
 
@@ -380,7 +382,7 @@ ziti-ssh/
 │   ├── ziti-scp/
 │   │   └── main.go         # SCP-style file copy tool (upload, download, recursive, enroll)
 │   ├── ziti-ssh-ca/
-│   │   ├── main.go         # CA service entry point and run loop
+│   │   ├── main.go         # CA service entry point, run loop, enroll subcommand
 │   │   └── config.go       # config subcommand (print, apply, remove)
 │   └── ziti-ssh-host/
 │       └── main.go         # enroll, run (multi-service), inspect subcommands
