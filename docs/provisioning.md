@@ -425,8 +425,8 @@ ziti edge create config ssh-permissions ziti-ssh-host.v1 \
   '{
     "permissions": {
       "*":              {"groups": ["developers"]},
-      "*@corp.com":     {"groups": ["developers", "docker"]},
-      "bob@corp.com":   {"groups": ["developers", "docker"], "sudoers_rule": "ALL=(ALL) NOPASSWD: /bin/systemctl status *"},
+      "ops-*":          {"groups": ["developers", "docker"]},
+      "ops-bob":        {"groups": ["developers", "docker"], "sudoers_rule": "ALL=(ALL) NOPASSWD: /bin/systemctl status *"},
       "ops-automation": {"sudoers_rule": "ALL=(ALL) NOPASSWD: ALL"}
     }
   }'
@@ -450,7 +450,7 @@ Edit the config object in the controller to add, change, or remove identity entr
 
 ```sh
 ziti edge update config ssh-permissions \
-  '{"permissions":{"*":{"groups":["developers"]},"*@corp.com":{"groups":["developers","docker"]},"alice@corp.com":{"groups":["sudo","developers"]},"ops-automation":{"sudoers_rule":"ALL=(ALL) NOPASSWD: ALL"}}}'
+  '{"permissions":{"*":{"groups":["developers"]},"ops-*":{"groups":["developers","docker"]},"ops-alice":{"groups":["sudo","developers"]},"ops-automation":{"sudoers_rule":"ALL=(ALL) NOPASSWD: ALL"}}}'
 ```
 
 Run `ziti-ssh-host inspect --service ssh` on the host to confirm what the running daemon sees after the update. See [Inspecting per-identity permissions](operations.md#inspecting-per-identity-permissions) in the operations guide for details.

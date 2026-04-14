@@ -32,7 +32,7 @@ The CA derives a Linux username from each caller's Ziti identity name and places
 3. If the result starts with a digit, prefix it with `z`.
 4. Truncate to 32 characters.
 
-Examples: `Alice` → `alice`, `alice@corp.com` → `alice_corp_com`, `123bot` → `z123bot`
+Examples: `Alice` → `alice`, `dba-Alice` → `dba-alice`, `123bot` → `z123bot`
 
 **Ephemeral user lifecycle:**
 - On first connection from an identity, `useradd -m -s /bin/bash <username>` runs.
@@ -45,9 +45,9 @@ Examples: `Alice` → `alice`, `alice@corp.com` → `alice_corp_com`, `123bot` �
 
 **Connecting in per-identity mode:**
 ```sh
-ziti-ssh alice_corp_com@web-server-prod
+ziti-ssh dba-alice@web-server-prod
 ```
-The username before `@` is the derived username for the caller's identity.
+The username before `@` is the Ziti identity name (which is also the derived Linux username when it contains only lowercase letters, digits, hyphens, and underscores).
 
 > **Important:** `--mode` must be set consistently on both `ziti-ssh-ca` and `ziti-ssh-host run`. If the CA issues certs with per-identity principals but the host is in shared mode (or vice versa), SSH authentication will fail.
 
