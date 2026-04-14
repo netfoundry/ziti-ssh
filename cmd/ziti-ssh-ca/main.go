@@ -10,14 +10,16 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
-	"net/url"
 	"sync"
 	"syscall"
 	"time"
@@ -30,9 +32,9 @@ import (
 	"github.com/edwardm/ziti-ssh/config"
 	"github.com/edwardm/ziti-ssh/internal/ratelimit"
 
-	zitiEdge "github.com/openziti/sdk-golang/ziti/edge"
-
 	ziti "github.com/openziti/sdk-golang/ziti"
+	zitiEnroll "github.com/openziti/sdk-golang/ziti/enroll"
+	zitiEdge "github.com/openziti/sdk-golang/ziti/edge"
 )
 
 // version is set at build time via -ldflags "-X main.version=<ver>".
@@ -131,12 +133,85 @@ func main() {
 			fmt.Printf("ziti-ssh-ca version %s\n", version)
 		},
 	}
+	// ------------------------------------------------------------------ enroll
+	var (
+		enrollJWTFlag string
+		enrollOutFlag string
+	)
+	enrollCmd := &cobra.Command{
+		Use:   "enroll",
+		Short: "Enroll a Ziti identity from a JWT file",
+		Long: `enroll reads the one-time enrollment JWT produced by "ziti edge create identity"
+and produces an enrolled identity JSON file that can be used with --identity.
+
+The output path defaults to /etc/ziti-ssh-ca/identity.json.
+
+Example:
+  ziti-ssh-ca enroll --jwt /tmp/ssh-ca-server.jwt
+  ziti-ssh-ca enroll --jwt /tmp/ssh-ca-server.jwt --out /etc/ziti-ssh-ca/identity.json`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			outPath := enrollOutFlag
+			if outPath == "" {
+				outPath = "/etc/ziti-ssh-ca/identity.json"
+			}
+			return runEnroll(enrollJWTFlag, outPath)
+		},
+	}
+	enrollCmd.Flags().StringVar(&enrollJWTFlag, "jwt", "", "Path to enrollment JWT file (required)")
+	enrollCmd.Flags().StringVar(&enrollOutFlag, "out", "", "Output path for identity JSON (default: /etc/ziti-ssh-ca/identity.json)")
+	_ = enrollCmd.MarkFlagRequired("jwt")
+
 	root.AddCommand(versionCmd)
+	root.AddCommand(enrollCmd)
 	root.AddCommand(configCmd)
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+// runEnroll enrolls a Ziti identity from a one-time JWT file and writes the
+// resulting identity JSON to outPath (mode 0600).
+func runEnroll(jwtPath, outPath string) error {
+	jwtBytes, err := os.ReadFile(jwtPath)
+	if err != nil {
+		return fmt.Errorf("read JWT from %q: %w", jwtPath, err)
+	}
+	jwtString := strings.TrimSpace(string(jwtBytes))
+
+	token, jwtToken, err := zitiEnroll.ParseToken(jwtString)
+	if err != nil {
+		return fmt.Errorf("parse enrollment JWT: %w", err)
+	}
+
+	keyAlg := ziti.KeyAlgVar("EC")
+	enrollFlags := zitiEnroll.EnrollmentFlags{
+		Token:     token,
+		JwtToken:  jwtToken,
+		JwtString: jwtString,
+		KeyAlg:    keyAlg,
+	}
+
+	slog.Info("enrolling Ziti identity", "jwt", jwtPath, "out", outPath)
+	cfg, err := zitiEnroll.Enroll(enrollFlags)
+	if err != nil {
+		return fmt.Errorf("enroll: %w", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(outPath), 0700); err != nil {
+		return fmt.Errorf("create output directory: %w", err)
+	}
+	cfgJSON, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal identity config: %w", err)
+	}
+	if err := os.WriteFile(outPath, cfgJSON, 0600); err != nil {
+		return fmt.Errorf("write identity file %q: %w", outPath, err)
+	}
+
+	slog.Info("identity enrolled", "path", outPath)
+	fmt.Printf("Identity enrolled and written to %s\n", outPath)
+	return nil
 }
 
 const drainTimeout = 30 * time.Second

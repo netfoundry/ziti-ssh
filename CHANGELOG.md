@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased] - 2026-04-14
+
+### Added
+
+#### `ziti-ssh-ca enroll` subcommand
+
+`ziti-ssh-ca` now has an `enroll` subcommand that mirrors `ziti-ssh enroll` and `ziti-scp enroll` exactly.
+
+- Reads the one-time JWT file, calls `enroll.Enroll` with `KeyAlg = "EC"`, and writes the enrolled identity JSON to `/etc/ziti-ssh-ca/identity.json` (mode 0600) by default.
+- `--out <path>` overrides the output path.
+- `--jwt <path>` is required.
+- No CA-specific post-enrollment steps are performed (unlike `ziti-ssh-host enroll`, which also fetches CA public keys and configures sshd).
+
+**Updated docs:**
+- `docs/provisioning.md`: "Setting up `ziti-ssh-ca`" step 3 now uses `ziti-ssh-ca enroll --jwt /tmp/ssh-ca-server.jwt` instead of the `ziti edge enroll` + `chmod` two-step.
+- `docs/configuration.md`: `ziti-ssh-ca enroll` flag table added before the existing `config` subcommands section.
+- `CLAUDE.md`: updated the `ziti-ssh-ca` description and component section to list `enroll` as a subcommand.
+
+---
+
 ## [Unreleased] - 2026-04-09
 
 ### Added

@@ -78,6 +78,15 @@ All binaries resolve each setting in the same order: CLI flag > environment vari
 | `--rate-burst` | `ZITI_RATE_BURST` | `3` | No | Burst allowance for the per-identity token-bucket rate limiter |
 | `--ziti-timeout` | `ZITI_TIMEOUT` | `30s` | No | Timeout for blocking Ziti network operations (authenticate, listen). Accepts any `time.Duration` string, e.g. `30s`, `1m`. |
 
+### `ziti-ssh-ca enroll` subcommand
+
+Enrolls the CA server's Ziti identity from a one-time JWT file. Writes the identity JSON to `/etc/ziti-ssh-ca/identity.json` (mode 0600) by default.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--jwt` | — (required) | Path to the one-time enrollment JWT file |
+| `--out` | `/etc/ziti-ssh-ca/identity.json` | Output path for the enrolled identity JSON |
+
 ### `ziti-ssh-ca config` subcommands
 
 The `config` subcommand manages the `ziti-ssh-host.v1` config type on the Ziti controller via the management API (HTTPS, username/password). It does not use the Ziti identity file.
