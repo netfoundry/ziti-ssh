@@ -44,10 +44,11 @@ type PermissionsConfig struct {
 // Resolution order:
 //  1. Exact key match — zitiIdentity found as a literal key in the map.
 //  2. Most specific glob pattern — among all map keys containing '*' or '?'
-//     that match zitiIdentity (via path.Match), the one with the longest
-//     literal prefix before the first wildcard character wins. If two
-//     patterns have equal specificity the result is unspecified (one of
-//     the matching entries is returned, no guarantee which).
+//     that match zitiIdentity (via path.Match), the winner is determined by
+//     a two-field score: (prefixLen, totalLiterals) compared lexicographically
+//     descending. prefixLen is the count of literal characters before the first
+//     wildcard; totalLiterals is the count of all non-wildcard characters in
+//     the pattern. This correctly ranks "*@dba" (0, 4) above "*" (0, 0).
 //  3. Env var fallback — globalGroups / globalSudoersRule (unchanged).
 //
 // In all matching cases the matched entry is returned as-is; global
@@ -60,7 +61,8 @@ func (pc *PermissionsConfig) Resolve(zitiIdentity string, globalGroups []string,
 		}
 
 		// Step 2: glob match — find the most specific pattern that matches.
-		bestLen := -1
+		bestPrefixLen := -1
+		bestTotalLiterals := 0
 		var bestEntry IdentityPermissions
 		for pattern, entry := range pc.Permissions {
 			if !strings.ContainsAny(pattern, "*?") {
@@ -78,13 +80,14 @@ func (pc *PermissionsConfig) Resolve(zitiIdentity string, globalGroups []string,
 			if !matched {
 				continue
 			}
-			pl := literalPrefixLen(pattern)
-			if pl > bestLen {
-				bestLen = pl
+			pl, tl := patternSpecificity(pattern)
+			if pl > bestPrefixLen || (pl == bestPrefixLen && tl > bestTotalLiterals) {
+				bestPrefixLen = pl
+				bestTotalLiterals = tl
 				bestEntry = entry
 			}
 		}
-		if bestLen >= 0 {
+		if bestPrefixLen >= 0 {
 			return bestEntry
 		}
 	}
@@ -96,23 +99,35 @@ func (pc *PermissionsConfig) Resolve(zitiIdentity string, globalGroups []string,
 	}
 }
 
-// literalPrefixLen returns the number of literal (non-wildcard) characters
-// at the start of a glob pattern. This is used to determine pattern
-// specificity: a pattern with a longer literal prefix is considered more
-// specific than one with a shorter prefix.
+// patternSpecificity returns two counts for a glob pattern:
+//   - prefixLen: the number of literal (non-wildcard) characters before the
+//     first '*' or '?' in the pattern.
+//   - totalLiterals: the total count of all non-wildcard characters in the
+//     pattern (including those after wildcards).
+//
+// Both values are used together to rank competing glob patterns: a longer
+// literal prefix wins outright; when prefixes are equal, more total literal
+// characters indicate a more specific pattern (e.g. "*@dba" beats "*").
 //
 // Examples:
 //
-//	"alice@*"   → 6  ("alice@")
-//	"*@corp.com"→ 0
-//	"*"         → 0
-func literalPrefixLen(pattern string) int {
-	for i, ch := range pattern {
+//	"alice@*"    → prefixLen=6, totalLiterals=6
+//	"*@corp.com" → prefixLen=0, totalLiterals=9
+//	"*@dba"      → prefixLen=0, totalLiterals=4
+//	"*"          → prefixLen=0, totalLiterals=0
+func patternSpecificity(pattern string) (prefixLen, totalLiterals int) {
+	seenWildcard := false
+	for _, ch := range pattern {
 		if ch == '*' || ch == '?' {
-			return i
+			seenWildcard = true
+			continue
+		}
+		totalLiterals++
+		if !seenWildcard {
+			prefixLen++
 		}
 	}
-	return len(pattern) // no wildcards — treat as fully literal (exact match)
+	return prefixLen, totalLiterals
 }
 
 // ProxyHooks carries optional callbacks for per-connection user lifecycle

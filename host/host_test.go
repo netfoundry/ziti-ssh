@@ -284,6 +284,55 @@ func TestResolve_GlobNoMatch_FallsThruToEnvVars(t *testing.T) {
 	}
 }
 
+func TestResolve_SuffixGlobBeatesCatchAll(t *testing.T) {
+	// "*@dba" (prefixLen=0, totalLiterals=4) must beat "*" (prefixLen=0, totalLiterals=0)
+	// for an identity that matches both.
+	pc := &host.PermissionsConfig{
+		Permissions: map[string]host.IdentityPermissions{
+			"*": {
+				Groups:      []string{"adm"},
+				SudoersRule: "",
+			},
+			"*@dba": {
+				Groups:      []string{"adm"},
+				SudoersRule: "ALL=(ALL) NOPASSWD: /bin/systemctl *",
+			},
+		},
+	}
+
+	got := pc.Resolve("edwardm@dba", nil, "")
+
+	if got.SudoersRule != "ALL=(ALL) NOPASSWD: /bin/systemctl *" {
+		t.Errorf("SudoersRule = %q, want systemctl rule (*@dba should beat *)", got.SudoersRule)
+	}
+}
+
+func TestResolve_DomainGlobBeatesCatchAll_TotalLiterals(t *testing.T) {
+	// "*@corp.com" (prefixLen=0, totalLiterals=9) must beat "*" (prefixLen=0, totalLiterals=0)
+	// for a corp.com identity.
+	pc := &host.PermissionsConfig{
+		Permissions: map[string]host.IdentityPermissions{
+			"*": {
+				Groups:      []string{"everyone"},
+				SudoersRule: "",
+			},
+			"*@corp.com": {
+				Groups:      []string{"corp"},
+				SudoersRule: "ALL=(ALL) NOPASSWD: /usr/bin/corp-tool",
+			},
+		},
+	}
+
+	got := pc.Resolve("alice@corp.com", nil, "")
+
+	if len(got.Groups) != 1 || got.Groups[0] != "corp" {
+		t.Errorf("Groups = %v, want [corp] (*@corp.com should beat *)", got.Groups)
+	}
+	if got.SudoersRule != "ALL=(ALL) NOPASSWD: /usr/bin/corp-tool" {
+		t.Errorf("SudoersRule = %q, want corp-tool rule", got.SudoersRule)
+	}
+}
+
 func TestResolve_GlobGlobalsNotMerged(t *testing.T) {
 	// A glob-matched entry that has an empty SudoersRule must NOT inherit
 	// the global sudoers rule.
