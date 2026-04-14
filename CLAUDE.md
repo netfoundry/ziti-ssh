@@ -292,7 +292,7 @@ Persistent flags (accepted by all subcommands):
 | `--mode` | `ZITI_SSH_MODE` | `shared` | Principal mode: `shared` or `per-identity` |
 | — | `ZITI_SUDOERS_RULE` | — | Global fallback sudoers rule (per-identity mode only) |
 | — | `ZITI_SSH_GROUPS` | — | Global fallback Linux groups, comma-separated (per-identity mode only) |
-| — | `ZITI_USER_CLEANUP` | `true` | Set to `false` to keep Linux accounts after the last session closes |
+| — | `ZITI_USER_CLEANUP` | `false` | Set to `true` to delete Linux accounts after the last session closes |
 
 **Important:** `--mode` must be set consistently on both `ziti-ssh-ca` and `ziti-ssh-host run`. If the CA issues certs with per-identity principals but the host is in shared mode (or vice versa), SSH authentication will fail.
 
@@ -320,7 +320,7 @@ Example: `Alice` → `alice`, `dba-Alice` → `dba-alice`, `123bot` → `z123bot
 - A reference count tracks concurrent sessions for the same identity.
 - When the last session closes, the cleanup sequence runs: `loginctl terminate-user`, process poll (up to 5 s), `userdel -r`. The sudoers file is removed unconditionally at this point; group membership is removed implicitly by account deletion.
 - The set of active managed usernames is persisted to `/var/lib/ziti-ssh-host/managed-users` (one username per line). On startup, `CleanupOrphans` reads this file and deletes any users still listed there (they had active sessions when the process was killed). This prevents accumulation of stale accounts after crashes.
-- Set `ZITI_USER_CLEANUP=false` to keep the Linux account across disconnects (useful for persistent home-directory setups). The sudoers file is still removed on disconnect.
+- By default the Linux account is kept after disconnect. Set `ZITI_USER_CLEANUP=true` to delete the account when the last session closes (useful when ephemeral-only accounts are required). The sudoers file is still removed on disconnect.
 
 **Connecting in per-identity mode:**
 ```sh

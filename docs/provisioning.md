@@ -337,7 +337,7 @@ ZITI_SSH_SERVICE=ssh
 ZITI_SSH_MODE=shared
 # ZITI_SSH_GROUPS=adm,systemd-journal   # per-identity mode only; global fallback groups
 # ZITI_SUDOERS_RULE=ALL=(ALL) NOPASSWD:ALL   # per-identity mode only; global fallback sudoers
-# ZITI_USER_CLEANUP=true                      # per-identity mode only; set to false to keep accounts
+# ZITI_USER_CLEANUP=true                      # per-identity mode only; set to true to delete accounts on disconnect
 ```
 
 `ZITI_SSH_MODE` must match the value set on `ziti-ssh-ca`. See [Modes](operations.md#modes) for a full explanation.
