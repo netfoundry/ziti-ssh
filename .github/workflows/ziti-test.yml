@@ -57,6 +57,7 @@ jobs:
     uses: netfoundry/ziti-test-suite/.github/workflows/ziti-network.yml@main
     with:
       topology_file: suites/ziti-ssh/suite.yml
+      artifacts: ziti-ssh-debs
       keep_on_failure: ${{ inputs.keep_on_failure || 'false' }}
     secrets:
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
