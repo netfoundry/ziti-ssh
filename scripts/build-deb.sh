@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-0.0.0}"
 ARCH="amd64"
 MAINTAINER="Edward Moscardini[edward.moscardini@netfoundry.io]"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

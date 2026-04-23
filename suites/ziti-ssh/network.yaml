@@ -1,0 +1,71 @@
+# suites/ziti-ssh/network.yaml
+#
+# Declarative Ziti network resources for the ziti-ssh integration test suite.
+# Applied via ``ziti ops import`` after all edge routers are online and before
+# any client post_install scripts run.
+#
+# Defines:
+#   • ssh-ca  service — CA signs short-lived SSH certificates
+#   • ssh     service — Ziti-tunneled SSH sessions to the ER hosts
+#
+# Identities are NOT declared here; each post_install script creates its own
+# identity via the management REST API so that each VM can enroll itself.
+#
+# Policy model:
+#   #ssh-ca-servers  BIND  ssh-ca   (the CA on ctrl-0)
+#   #ssh-clients     DIAL  ssh-ca   (the client VM requesting certs)
+#   #ssh-hosts       BIND  ssh      (each ER running ziti-ssh-host)
+#   #ssh-clients     DIAL  ssh      (the client VM opening SSH sessions)
+
+services:
+  - name: ssh-ca
+    encryptionRequired: true
+    roleAttributes:
+      - ssh-ca
+
+  - name: ssh
+    encryptionRequired: true
+    roleAttributes:
+      - ssh
+
+servicePolicies:
+  - name: bind-ssh-ca
+    type: Bind
+    serviceRoles: ['#ssh-ca']
+    identityRoles: ['#ssh-ca-servers']
+    semantic: AnyOf
+
+  - name: dial-ssh-ca
+    type: Dial
+    serviceRoles: ['#ssh-ca']
+    identityRoles: ['#ssh-clients']
+    semantic: AnyOf
+
+  - name: bind-ssh
+    type: Bind
+    serviceRoles: ['#ssh']
+    identityRoles: ['#ssh-hosts']
+    semantic: AnyOf
+
+  - name: dial-ssh
+    type: Dial
+    serviceRoles: ['#ssh']
+    identityRoles: ['#ssh-clients']
+    semantic: AnyOf
+
+edgeRouterPolicies:
+  - name: erp-ziti-ssh
+    identityRoles: ['#ssh-ca-servers', '#ssh-hosts', '#ssh-clients']
+    edgeRouterRoles: ['#all']
+    semantic: AnyOf
+
+serviceEdgeRouterPolicies:
+  - name: serp-ssh-ca
+    serviceRoles: ['#ssh-ca']
+    edgeRouterRoles: ['#all']
+    semantic: AnyOf
+
+  - name: serp-ssh
+    serviceRoles: ['#ssh']
+    edgeRouterRoles: ['#all']
+    semantic: AnyOf
