@@ -516,8 +516,28 @@ func refreshTrustedCAs(urls []*url.URL, rootPool *x509.CertPool) error {
 		slog.Info("removing trusted CA(s) no longer in cluster", "count", removedCount)
 	}
 
-	if err := os.WriteFile(sshdCAPubKeyFile, newKeyBytes, 0644); err != nil {
-		return fmt.Errorf("write %q: %w", sshdCAPubKeyFile, err)
+	// Write atomically: sshd may read the file at any time, and a
+	// truncate-then-write window would leave it with an empty TrustedUserCAKeys,
+	// causing cert auth to fail for connections that arrive during the write.
+	tmp, err := os.CreateTemp(filepath.Dir(sshdCAPubKeyFile), ".ziti_ca_tmp_*")
+	if err != nil {
+		return fmt.Errorf("create temp CA key file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op if rename succeeds
+	if _, err := tmp.Write(newKeyBytes); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write temp CA key file: %w", err)
+	}
+	if err := tmp.Chmod(0644); err != nil {
+		tmp.Close()
+		return fmt.Errorf("chmod temp CA key file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp CA key file: %w", err)
+	}
+	if err := os.Rename(tmpName, sshdCAPubKeyFile); err != nil {
+		return fmt.Errorf("rename temp CA key file to %q: %w", sshdCAPubKeyFile, err)
 	}
 	return host.ReloadSSHD()
 }
