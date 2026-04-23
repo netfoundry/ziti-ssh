@@ -281,14 +281,30 @@ func WriteSSHConfig(caPubKey []byte, confFile, keyFile string) error {
 	return nil
 }
 
-// ReloadSSHD signals sshd to reload its configuration by running
-// "systemctl reload ssh". Returns an error if the command exits non-zero.
+// ReloadSSHD signals sshd to reload its configuration.
+//
+// It first reloads the systemd-managed sshd via "systemctl reload ssh", then
+// broadcasts SIGHUP to any other top-level sshd listener processes. Linux's
+// SO_REUSEPORT allows multiple sshd parents to co-listen on :22; this arises
+// when a mid-provisioning service restart leaves an orphaned sshd alongside
+// the new one. "systemctl reload" only signals the managed instance — the
+// orphan never picks up TrustedUserCAKeys and causes intermittent cert auth
+// failures. Targeting ppid=1 avoids sending SIGHUP to child sshd processes
+// that handle active connections; those children call signal(SIGHUP, SIG_IGN)
+// before the fork and are unaffected.
 func ReloadSSHD() error {
 	cmd := exec.Command("systemctl", "reload", "ssh")
 	cmd.Env = childEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("systemctl reload ssh: %w (output: %s)", err, out)
 	}
+
+	// pkill exits 1 when no processes match — not an error. Errors here are
+	// non-fatal: the systemctl reload above already covered the managed sshd.
+	if err := exec.Command("pkill", "-HUP", "-P", "1", "-x", "sshd").Run(); err != nil {
+		slog.Debug("pkill sshd: no additional listener processes to signal", "err", err)
+	}
+
 	slog.Info("sshd reloaded")
 	return nil
 }
