@@ -1,0 +1,63 @@
+name: Integration Test
+
+# Builds .deb packages from HEAD, provisions a real Ziti network on AWS,
+# stages the packages onto each VM, and runs end-to-end connectivity tests.
+#
+# Prerequisites (one-time setup):
+#   AWS_ROLE_ARN   — OIDC IAM role for AWS credential federation
+#                    (see ziti-test-suite/docs/setup/aws-oidc.md)
+#   ZTS_CHECKOUT_TOKEN — fine-grained PAT with read access to
+#                        netfoundry/ziti-test-suite
+#
+# The topology is defined in suites/ziti-ssh/suite.yml:
+#   • 1 Ziti controller  — runs ziti-ssh-ca
+#   • 2 edge routers     — each runs ziti-ssh-host (proxies Ziti → local sshd)
+#   • 1 client VM        — runs ziti-ssh and ziti-scp
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep_on_failure:
+        description: 'Leave infra running if tests fail (for SSH debugging)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build-debs:
+    name: Build Debian Packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build .deb packages
+        run: VERSION=0.0.0 ./scripts/build-deb.sh
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: ziti-ssh-debs
+          path: dist/*.deb
+          retention-days: 1
+
+  integration-test:
+    name: Integration Test
+    needs: build-debs
+    uses: netfoundry/ziti-test-suite/.github/workflows/ziti-network.yml@main
+    with:
+      topology_file: suites/ziti-ssh/suite.yml
+      keep_on_failure: ${{ inputs.keep_on_failure || 'false' }}
+    secrets:
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+      ZTS_CHECKOUT_TOKEN: ${{ secrets.ZTS_CHECKOUT_TOKEN }}
