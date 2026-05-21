@@ -13,6 +13,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -456,8 +457,22 @@ func intCAFromController(controllerURL string, rootPool *x509.CertPool) (*x509.C
 			"selfSigned", cert.Subject.String() == cert.Issuer.String())
 	}
 
+	if len(state.PeerCertificates) == 0 {
+		return nil, fmt.Errorf("no certificates in TLS chain from %q", host)
+	}
+	leaf := state.PeerCertificates[0]
+	// Walk the chain and pick the cert whose Subject matches the leaf's Issuer
+	// field. Raw-bytes comparison avoids encoding differences that string
+	// formatting can obscure, and correctly identifies the signing intermediate
+	// even when the chain contains cross-signed or multiple intermediate certs.
+	for _, cert := range state.PeerCertificates[1:] {
+		if cert.IsCA && bytes.Equal(cert.RawSubject, leaf.RawIssuer) {
+			return cert, nil
+		}
+	}
+	// Fallback to the original heuristic for unusual chain orderings.
 	for _, cert := range state.PeerCertificates {
-		if cert.IsCA && cert.Subject.String() != cert.Issuer.String() {
+		if cert.IsCA && !bytes.Equal(cert.RawSubject, cert.RawIssuer) {
 			return cert, nil
 		}
 	}
@@ -987,6 +1002,10 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 	go func() {
 		sig := <-sigCh
 		slog.Info("received signal, stopping proxy listeners", "signal", sig)
+		// Restore default signal handling so a second SIGINT/SIGTERM exits
+		// immediately if the drain hangs (instead of being silently swallowed
+		// by the now-drained channel).
+		signal.Reset(syscall.SIGTERM, syscall.SIGINT)
 		if _, err := daemon.SdNotify(false, "STOPPING=1"); err != nil {
 			slog.Debug("sd_notify STOPPING failed", "err", err)
 		}

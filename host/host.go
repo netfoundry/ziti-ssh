@@ -642,6 +642,14 @@ func (m *UserManager) CleanupOrphans() error {
 		if username == "" {
 			continue
 		}
+		if !m.cleanupOnDisconnect {
+			// Users are intentionally persistent; do not delete them on
+			// restart. Clear the state file so they are no longer tracked
+			// by this process instance — they will not be cleaned up on the
+			// next restart either, which is the correct behaviour.
+			slog.Info("cleanup disabled; skipping orphan user deletion on restart", "username", username)
+			continue
+		}
 		slog.Info("cleaning up orphan user", "username", username)
 		if err := deleteUser(username); err != nil {
 			slog.Error("failed to delete orphan user", "username", username, "err", err)

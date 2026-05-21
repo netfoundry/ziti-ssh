@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # suites/ziti-ssh/scripts/install-host.sh
 #
+# WARNING: TEST SUITE ONLY — not for production use.
+# curl calls use --insecure and credentials are passed in environment variables.
+#
 # Edge router post_install: installs and starts ziti-ssh-host on each ER.
 #
 # This script runs on each edge router VM.  With count: 2 in the suite
@@ -73,7 +76,7 @@ log "Authenticating to controller ${ZITI_CTRL_URL}"
 SESSION_TOKEN=$(curl --silent --fail --insecure \
     --request POST \
     --header "Content-Type: application/json" \
-    --data "{\"username\":\"admin\",\"password\":\"${ZITI_ADMIN_PASSWORD}\"}" \
+    --data "$(python3 -c "import json,os; print(json.dumps({'username':'admin','password':os.environ['ZITI_ADMIN_PASSWORD']}))")" \
     "${ZITI_CTRL_URL}/edge/management/v1/authenticate?method=password" \
     | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['token'])")
 
@@ -96,7 +99,7 @@ IDENTITY_ID=$(curl --silent --fail --insecure \
     --request POST \
     --header "Content-Type: application/json" \
     --header "zt-session: ${SESSION_TOKEN}" \
-    --data "{\"name\":\"${IDENTITY_NAME}\",\"type\":\"Default\",\"roleAttributes\":[\"ssh-hosts\"],\"isAdmin\":false,\"enrollment\":{\"ott\":true}}" \
+    --data "$(python3 -c "import json,os; print(json.dumps({'name':os.environ['IDENTITY_NAME'],'type':'Default','roleAttributes':['ssh-hosts'],'isAdmin':False,'enrollment':{'ott':True}}))")" \
     "${ZITI_CTRL_URL}/edge/management/v1/identities" \
     | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['id'])")
 
@@ -140,8 +143,8 @@ After=network-online.target ssh.service
 Wants=network-online.target
 
 [Service]
-Type=simple
-EnvironmentFile=/etc/ziti-ssh-host/env
+Type=notify
+EnvironmentFile=-/etc/ziti-ssh-host/env
 ExecStart=/usr/local/bin/ziti-ssh-host run
 Restart=on-failure
 RestartSec=5
