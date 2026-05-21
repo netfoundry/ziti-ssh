@@ -1,3 +1,19 @@
+/*
+    Copyright NetFoundry Inc.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
+
 // Command ziti-ssh-ca is an SSH Certificate Authority service that runs over an
 // OpenZiti network. It signs short-lived SSH user certificates for callers
 // whose Ziti identity is authorized to dial the configured service. The Ziti
@@ -29,9 +45,9 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 
-	"github.com/edwardm/ziti-ssh/ca"
-	"github.com/edwardm/ziti-ssh/config"
-	"github.com/edwardm/ziti-ssh/internal/ratelimit"
+	"github.com/netfoundry/ziti-ssh/ca"
+	"github.com/netfoundry/ziti-ssh/config"
+	"github.com/netfoundry/ziti-ssh/internal/ratelimit"
 
 	ziti "github.com/openziti/sdk-golang/ziti"
 	zitiEnroll "github.com/openziti/sdk-golang/ziti/enroll"
