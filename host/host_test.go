@@ -384,7 +384,7 @@ func TestEnsureUser_AcceptsIdentityPermissions(t *testing.T) {
 
 	// Clean up regardless.
 	t.Cleanup(func() {
-		exec.Command("userdel", "-r", username).Run()
+		_ = exec.Command("userdel", "-r", username).Run()
 	})
 
 	const identity = "test-identity-01"
@@ -420,7 +420,7 @@ func TestEnsureUser_RefCounting(t *testing.T) {
 	perms := host.IdentityPermissions{}
 
 	t.Cleanup(func() {
-		exec.Command("userdel", "-r", username).Run()
+		_ = exec.Command("userdel", "-r", username).Run()
 	})
 
 	// Three sessions open.
@@ -449,7 +449,7 @@ func TestEnsureUser_RefCounting(t *testing.T) {
 	}
 	if err := exec.Command("id", username).Run(); err == nil {
 		t.Errorf("user %q should have been deleted after all sessions released", username)
-		exec.Command("userdel", "-r", username).Run()
+		_ = exec.Command("userdel", "-r", username).Run()
 	}
 }
 
@@ -517,7 +517,7 @@ func TestEnsureUser_CollisionRejected(t *testing.T) {
 		identityB = "alice_corp"
 		username  = "alice_corp"
 	)
-	t.Cleanup(func() { exec.Command("userdel", "-r", username).Run() })
+	t.Cleanup(func() { _ = exec.Command("userdel", "-r", username).Run() })
 
 	if err := mgr.EnsureUser(identityA, username, host.IdentityPermissions{}); err != nil {
 		t.Fatalf("EnsureUser(identityA): %v", err)
