@@ -688,6 +688,30 @@ func removeSudoers(username string) error {
 
 // deleteUser drains the user's systemd session, waits for all owned processes
 // to exit, then removes the user and their home directory with userdel -r.
+// userProcessesGone polls pgrep until no processes owned by username remain or
+// the timeout elapses. Returns true when the user has no remaining processes.
+func userProcessesGone(username string, timeout time.Duration) bool {
+	const pollInterval = 200 * time.Millisecond
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		pgrep := exec.Command("pgrep", "-u", username)
+		pgrep.Env = childEnv()
+		err := pgrep.Run()
+		if err != nil {
+			// pgrep exits 1 when no processes match — user is clear.
+			if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+				return true
+			}
+			// Unexpected pgrep error (e.g. command not found) — stop polling.
+			slog.Warn("pgrep error while waiting for user processes to exit",
+				"username", username, "err", err)
+			return false
+		}
+		time.Sleep(pollInterval)
+	}
+	return false
+}
+
 func deleteUser(username string) error {
 	// Remove the sudoers file before tearing down the account.
 	if err := removeSudoers(username); err != nil {
@@ -704,39 +728,49 @@ func deleteUser(username string) error {
 			"username", username, "err", err, "output", strings.TrimSpace(string(out)))
 	}
 
-	// Step 2: poll until no processes owned by the user remain, or timeout.
-	const (
-		pollInterval = 200 * time.Millisecond
-		pollTimeout  = 5 * time.Second
-	)
-	deadline := time.Now().Add(pollTimeout)
-	for time.Now().Before(deadline) {
-		pgrep := exec.Command("pgrep", "-u", username)
-		pgrep.Env = childEnv()
-		err := pgrep.Run()
-		if err != nil {
-			// pgrep exits 1 when no processes match — user is clear.
-			if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-				break
-			}
-			// Any other error from pgrep (e.g. command not found) — stop
-			// polling and proceed; userdel will surface the real problem.
-			slog.Warn("pgrep error while waiting for user processes to exit",
-				"username", username, "err", err)
-			break
+	// Step 2: wait up to 5 s for session processes to exit naturally.
+	if !userProcessesGone(username, 5*time.Second) {
+		// Step 3: escalate to SIGTERM for detached processes (nohup, screen,
+		// tmux) that loginctl does not reach.
+		slog.Info("user processes still running after loginctl; sending SIGTERM", "username", username)
+		pkillTerm := exec.Command("pkill", "-TERM", "-u", username)
+		pkillTerm.Env = childEnv()
+		if out, err := pkillTerm.CombinedOutput(); err != nil {
+			slog.Info("pkill -TERM returned non-zero (ignored)",
+				"username", username, "err", err, "output", strings.TrimSpace(string(out)))
 		}
-		// pgrep exited 0 — processes still exist; wait and retry.
-		time.Sleep(pollInterval)
-	}
-	if !time.Now().Before(deadline) {
-		slog.Warn("timed out waiting for user processes to exit, proceeding with userdel",
-			"username", username, "timeout", pollTimeout)
+
+		// Step 4: wait up to 10 s for SIGTERM to take effect.
+		if !userProcessesGone(username, 10*time.Second) {
+			// Step 5: escalate to SIGKILL — cannot be caught or ignored.
+			slog.Warn("user processes still running after SIGTERM; sending SIGKILL", "username", username)
+			pkillKill := exec.Command("pkill", "-KILL", "-u", username)
+			pkillKill.Env = childEnv()
+			if out, err := pkillKill.CombinedOutput(); err != nil {
+				slog.Info("pkill -KILL returned non-zero (ignored)",
+					"username", username, "err", err, "output", strings.TrimSpace(string(out)))
+			}
+
+			// Step 6: wait up to 5 s for the kernel to reap SIGKILL'd processes.
+			if !userProcessesGone(username, 5*time.Second) {
+				slog.Warn("user processes still running after SIGKILL; proceeding with userdel",
+					"username", username)
+			}
+		}
 	}
 
-	// Step 3: remove the user and their home directory.
+	// Step 7: remove the user and their home directory.
 	cmd := exec.Command("userdel", "-r", username)
 	cmd.Env = childEnv()
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 8 {
+			// Exit code 8: user still has running processes. The account and
+			// home directory were NOT deleted. The caller should retry after
+			// the processes exit.
+			return fmt.Errorf("userdel %q: user still has running processes; account not deleted (exit 8): %s",
+				username, strings.TrimSpace(string(out)))
+		}
 		return fmt.Errorf("userdel -r %q: %w (output: %s)", username, err, out)
 	}
 	slog.Info("deleted Linux user", "username", username)
