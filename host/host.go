@@ -350,6 +350,7 @@ type UserManager struct {
 	mu                  sync.Mutex
 	sessions            map[string]int    // username → active session count
 	owners              map[string]string // username → Ziti identity that created the account
+	userLocks           map[string]*sync.Mutex // username → per-user lock for slow OS ops
 	stateFile           string
 	cleanupOnDisconnect bool // if false, skip deleteUser on ReleaseUser
 }
@@ -364,6 +365,7 @@ func NewUserManager(stateFile string, cleanupOnDisconnect bool) *UserManager {
 	return &UserManager{
 		sessions:            make(map[string]int),
 		owners:              make(map[string]string),
+		userLocks:           make(map[string]*sync.Mutex),
 		stateFile:           stateFile,
 		cleanupOnDisconnect: cleanupOnDisconnect,
 	}
@@ -389,29 +391,37 @@ func NewUserManager(stateFile string, cleanupOnDisconnect bool) *UserManager {
 // The username is recorded in the state file so that CleanupOrphans can
 // remove it after a crash.
 func (m *UserManager) EnsureUser(zitiIdentity, username string, perms IdentityPermissions) error {
+	// Phase 1 (global lock, fast): ownership check, session bookkeeping, and
+	// per-user lock acquisition. No blocking OS calls are made here.
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Reject if this derived username is already owned by a different Ziti
-	// identity. Two distinct identities that collapse to the same Linux username
-	// must not share an account — one would inherit the other's permissions.
 	if owner, owned := m.owners[username]; owned && owner != zitiIdentity {
+		m.mu.Unlock()
 		return fmt.Errorf("username %q (derived from %q) is already in use by Ziti identity %q: connection rejected to prevent privilege collision",
 			username, zitiIdentity, owner)
 	}
-
 	m.sessions[username]++
+	isFirst := m.sessions[username] == 1
+	if isFirst {
+		// Record ownership atomically with the session increment so there is no
+		// window where the account exists without a recorded owner.
+		m.owners[username] = zitiIdentity
+	}
+	ul, ok := m.userLocks[username]
+	if !ok {
+		ul = &sync.Mutex{}
+		m.userLocks[username] = ul
+	}
+	m.mu.Unlock()
 
-	// Only run useradd on the first session for this username.
-	if m.sessions[username] > 1 {
+	if !isFirst {
 		slog.Info("user already tracked, skipping useradd", "username", username, "sessions", m.sessions[username])
 		return nil
 	}
 
-	// Record ownership atomically with the session increment (both under the
-	// same mutex hold) so there is no window where the account exists without
-	// a recorded owner.
-	m.owners[username] = zitiIdentity
+	// Phase 2 (per-user lock only): slow OS operations. The global lock is not
+	// held here, so other usernames proceed concurrently.
+	ul.Lock()
+	defer ul.Unlock()
 
 	slog.Info("creating Linux user", "username", username)
 	cmd := exec.Command("useradd", "-m", "-s", "/bin/bash", username)
@@ -422,12 +432,14 @@ func (m *UserManager) EnsureUser(zitiIdentity, username string, perms IdentityPe
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 9 {
 			slog.Info("user already exists, treating as success", "username", username)
 		} else {
-			// Undo both the session increment and the ownership record.
+			// Rollback: undo the session increment and ownership record.
+			m.mu.Lock()
 			m.sessions[username]--
 			if m.sessions[username] == 0 {
 				delete(m.sessions, username)
 				delete(m.owners, username)
 			}
+			m.mu.Unlock()
 			return fmt.Errorf("useradd %q: %w (output: %s)", username, err, out)
 		}
 	}
@@ -471,22 +483,31 @@ func (m *UserManager) EnsureUser(zitiIdentity, username string, perms IdentityPe
 // reaches zero, the Linux user is deleted with "userdel -r <username>" and
 // the username is removed from the state file.
 func (m *UserManager) ReleaseUser(username string) error {
+	// Phase 1 (global lock, fast): session bookkeeping only.
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if m.sessions[username] <= 0 {
+		m.mu.Unlock()
 		slog.Warn("ReleaseUser called for untracked username", "username", username)
 		return nil
 	}
-
 	m.sessions[username]--
 	if m.sessions[username] > 0 {
-		slog.Info("session released, user still active", "username", username, "sessions", m.sessions[username])
+		remaining := m.sessions[username]
+		m.mu.Unlock()
+		slog.Info("session released, user still active", "username", username, "sessions", remaining)
 		return nil
 	}
-
 	delete(m.sessions, username)
 	delete(m.owners, username)
+	ul := m.userLocks[username]
+	m.mu.Unlock()
+
+	// Phase 2 (per-user lock only): slow OS operations. The global lock is not
+	// held here, so other usernames proceed concurrently.
+	if ul != nil {
+		ul.Lock()
+		defer ul.Unlock()
+	}
 
 	if !m.cleanupOnDisconnect {
 		slog.Info("last session closed, cleanup disabled — keeping Linux user", "username", username)
@@ -714,17 +735,20 @@ func deleteUser(username string) error {
 }
 
 // syncStateFile atomically rewrites the state file from the current contents
-// of m.sessions. Must be called with m.mu held.
+// of m.sessions. It briefly acquires m.mu to take a consistent snapshot, then
+// releases it before performing file I/O — so callers must not hold m.mu.
 //
 // This replaces both the old addToStateFile (append) and removeFromStateFile
 // (read-filter-rewrite) with a single always-correct snapshot: the in-memory
 // sessions map is the source of truth, so there is no need to read the file
 // and no risk of divergence between the file and the map.
 func (m *UserManager) syncStateFile() error {
-	var lines []string
+	m.mu.Lock()
+	lines := make([]string, 0, len(m.sessions))
 	for username := range m.sessions {
 		lines = append(lines, username)
 	}
+	m.mu.Unlock()
 	return m.writeStateFile(lines)
 }
 
