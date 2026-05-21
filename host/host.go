@@ -260,24 +260,72 @@ func proxyConn(src net.Conn, target string, hooks *ProxyHooks) {
 //	    "/etc/ssh/sshd_config.d/ziti-ssh.conf",
 //	    "/etc/ssh/ziti_ca.pub")
 func WriteSSHConfig(caPubKey []byte, confFile, keyFile string) error {
-	// Write CA public key file.
+	// Write CA public key file atomically so sshd never sees a truncated file.
 	if err := os.MkdirAll(filepath.Dir(keyFile), 0755); err != nil {
 		return fmt.Errorf("create dir for %q: %w", keyFile, err)
 	}
-	if err := os.WriteFile(keyFile, caPubKey, 0644); err != nil {
+	if err := atomicWriteFile(keyFile, caPubKey, 0644); err != nil {
 		return fmt.Errorf("write CA public key to %q: %w", keyFile, err)
 	}
 
-	// Write sshd drop-in config.
+	// Write sshd drop-in config atomically.
 	if err := os.MkdirAll(filepath.Dir(confFile), 0755); err != nil {
 		return fmt.Errorf("create dir for %q: %w", confFile, err)
 	}
 	conf := fmt.Sprintf("TrustedUserCAKeys %s\n", keyFile)
-	if err := os.WriteFile(confFile, []byte(conf), 0644); err != nil {
+	if err := atomicWriteFile(confFile, []byte(conf), 0644); err != nil {
 		return fmt.Errorf("write sshd config to %q: %w", confFile, err)
 	}
 
 	slog.Info("wrote sshd CA config", "conf", confFile, "key", keyFile)
+	return nil
+}
+
+// atomicWriteFile writes data to a temp file in the same directory as dest,
+// fsyncs, sets mode, renames over dest, then fsyncs the parent directory.
+// A crash at any point leaves either the old or the new file fully intact.
+func atomicWriteFile(dest string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(dest)
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	// Clean up the temp file on any error path.
+	ok := false
+	defer func() {
+		if !ok {
+			os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, dest); err != nil {
+		return err
+	}
+	// Fsync the parent directory so the rename is durable.
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil {
+		return err
+	}
+	ok = true
 	return nil
 }
 
