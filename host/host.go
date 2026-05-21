@@ -414,18 +414,20 @@ func (m *UserManager) EnsureUser(zitiIdentity, username string, perms IdentityPe
 		}
 	}
 
-	// Add the user to supplementary groups if any are specified.
-	if len(perms.Groups) > 0 {
-		groupList := strings.Join(perms.Groups, ",")
-		slog.Info("adding user to groups", "username", username, "groups", groupList)
-		usermod := exec.Command("usermod", "-aG", groupList, username)
-		usermod.Env = childEnv()
-		if out, err := usermod.CombinedOutput(); err != nil {
-			// Non-fatal: the user was created successfully; group membership
-			// failure (e.g. group does not exist) is logged but does not abort
-			// the session.
-			slog.Error("usermod -aG failed", "username", username, "groups", groupList, "err", err, "output", strings.TrimSpace(string(out)))
-		}
+	// Set the user's supplementary groups to exactly the configured list.
+	// -G replaces the full supplementary group membership rather than
+	// appending (-aG), so revocations take effect on the next reconnect
+	// without needing to delete and recreate the account. An empty list
+	// clears all supplementary groups.
+	groupList := strings.Join(perms.Groups, ",")
+	slog.Info("setting user supplementary groups", "username", username, "groups", groupList)
+	usermod := exec.Command("usermod", "-G", groupList, username)
+	usermod.Env = childEnv()
+	if out, err := usermod.CombinedOutput(); err != nil {
+		// Non-fatal: the user was created successfully; group membership
+		// failure (e.g. group does not exist) is logged but does not abort
+		// the session.
+		slog.Error("usermod -G failed", "username", username, "groups", groupList, "err", err, "output", strings.TrimSpace(string(out)))
 	}
 
 	// Write sudoers file if a rule is configured.
