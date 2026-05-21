@@ -238,13 +238,13 @@ func proxyConn(src net.Conn, target string, hooks *ProxyHooks) {
 	defer dst.Close()
 
 	done := make(chan struct{}, 2)
-	copy := func(w io.Writer, r io.Reader) {
+	pipeCopy := func(w io.Writer, r io.Reader) {
 		_, _ = io.Copy(w, r)
 		done <- struct{}{}
 	}
 
-	go copy(dst, src)
-	go copy(src, dst)
+	go pipeCopy(dst, src)
+	go pipeCopy(src, dst)
 
 	// Wait for either direction to finish then let defers close both.
 	<-done
@@ -366,9 +366,14 @@ func ReloadSSHD() error {
 		}
 	}
 
-	// pkill exits 1 when no processes match — not an error.
-	if err := exec.Command("pkill", "-HUP", "-P", "1", "-x", "sshd").Run(); err != nil {
-		slog.Debug("pkill sshd: no additional listener processes to signal", "err", err)
+	// Under ssh.service (non-socket), also signal any top-level sshd listener
+	// that may have been spawned outside systemd. Skip this under socket
+	// activation: per-connection sshd children have PPID 1 there too, and
+	// sending SIGHUP to an active connection sshd disconnects the session.
+	if !socketActive {
+		if err := exec.Command("pkill", "-HUP", "-P", "1", "-x", "sshd").Run(); err != nil {
+			slog.Debug("pkill sshd: no additional listener processes to signal", "err", err)
+		}
 	}
 
 	slog.Info("sshd reloaded")
@@ -510,7 +515,7 @@ func (m *UserManager) EnsureUser(zitiIdentity, username string, perms IdentityPe
 	if err != nil {
 		// useradd exits with code 9 when the user already exists.
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 9 {
-			slog.Info("user already exists, treating as success", "username", username)
+			slog.Info("user already exists, treating as success", "username", username, "ziti_identity", zitiIdentity)
 		} else {
 			// Rollback: undo the session increment and ownership record.
 			m.mu.Lock()
@@ -567,8 +572,7 @@ func (m *UserManager) ReleaseUser(username string) error {
 	m.mu.Lock()
 	if m.sessions[username] <= 0 {
 		m.mu.Unlock()
-		slog.Warn("ReleaseUser called for untracked username", "username", username)
-		return nil
+		return fmt.Errorf("ReleaseUser called for untracked username %q: indicates a session accounting bug", username)
 	}
 	m.sessions[username]--
 	if m.sessions[username] > 0 {

@@ -59,7 +59,9 @@ sudo systemctl enable --now ssh
 #    user must exist on every SSH host.
 # ---------------------------------------------------------------------------
 log "Ensuring 'ziggy' user exists"
-sudo useradd --create-home --shell /bin/bash ziggy 2>/dev/null || true
+if ! id ziggy >/dev/null 2>&1; then
+    sudo useradd --create-home --shell /bin/bash ziggy
+fi
 
 # ---------------------------------------------------------------------------
 # 3) Install the ziti-ssh-host package staged by the suite runner.
@@ -108,7 +110,9 @@ JWT=$(curl --silent --fail --insecure \
     --header "zt-session: ${SESSION_TOKEN}" \
     "${ZITI_CTRL_URL}/edge/management/v1/identities/${IDENTITY_ID}" \
     | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['enrollment']['ott']['jwt'])")
-printf '%s' "${JWT}" > "${JWT_FILE}"
+# Write JWT with restrictive permissions — one-time enrollment tokens are
+# secret for their lifetime.
+(umask 077 && printf '%s' "${JWT}" > "${JWT_FILE}")
 
 # ---------------------------------------------------------------------------
 # 5) Enroll the identity.
@@ -155,5 +159,13 @@ UNITEOF
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now ziti-ssh-host
+
+# With Type=notify, systemd waits for READY=1 before reporting active, so
+# is-active here confirms the daemon fully initialised and opened its listener.
+if ! sudo systemctl is-active --quiet ziti-ssh-host; then
+    log "ziti-ssh-host failed to start — recent journal output:"
+    sudo journalctl -u ziti-ssh-host --no-pager -n 50 >&2
+    exit 1
+fi
 
 log "install-host.sh complete — ziti-ssh-host running as ${IDENTITY_NAME}"
