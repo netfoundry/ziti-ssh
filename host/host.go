@@ -458,7 +458,7 @@ func (m *UserManager) EnsureUser(zitiIdentity, username string, perms IdentityPe
 	}
 
 	// Persist the username so orphan cleanup can find it after a restart.
-	if err := m.addToStateFile(username); err != nil {
+	if err := m.syncStateFile(); err != nil {
 		slog.Error("failed to write state file", "username", username, "err", err)
 		// Non-fatal: the user was created; orphan cleanup may miss it after a
 		// crash, but the session ref-count is correct for this run.
@@ -495,7 +495,7 @@ func (m *UserManager) ReleaseUser(username string) error {
 		if err := removeSudoers(username); err != nil {
 			slog.Error("failed to remove sudoers file", "username", username, "err", err)
 		}
-		if err := m.removeFromStateFile(username); err != nil {
+		if err := m.syncStateFile(); err != nil {
 			slog.Error("failed to update state file", "username", username, "err", err)
 		}
 		return nil
@@ -506,7 +506,7 @@ func (m *UserManager) ReleaseUser(username string) error {
 		return err
 	}
 
-	if err := m.removeFromStateFile(username); err != nil {
+	if err := m.syncStateFile(); err != nil {
 		slog.Error("failed to update state file after deletion", "username", username, "err", err)
 		// Non-fatal.
 	}
@@ -713,54 +713,66 @@ func deleteUser(username string) error {
 	return nil
 }
 
-// addToStateFile appends username to the state file (one entry per line).
-// Parent directories are created as needed.
-func (m *UserManager) addToStateFile(username string) error {
-	if err := os.MkdirAll(filepath.Dir(m.stateFile), 0755); err != nil {
-		return fmt.Errorf("create state file dir: %w", err)
+// syncStateFile atomically rewrites the state file from the current contents
+// of m.sessions. Must be called with m.mu held.
+//
+// This replaces both the old addToStateFile (append) and removeFromStateFile
+// (read-filter-rewrite) with a single always-correct snapshot: the in-memory
+// sessions map is the source of truth, so there is no need to read the file
+// and no risk of divergence between the file and the map.
+func (m *UserManager) syncStateFile() error {
+	var lines []string
+	for username := range m.sessions {
+		lines = append(lines, username)
 	}
-	f, err := os.OpenFile(m.stateFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("open state file %q: %w", m.stateFile, err)
-	}
-	defer f.Close()
-	_, err = fmt.Fprintln(f, username)
-	return err
+	return m.writeStateFile(lines)
 }
 
-// removeFromStateFile rewrites the state file omitting username.
-func (m *UserManager) removeFromStateFile(username string) error {
-	data, err := os.ReadFile(m.stateFile)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("read state file %q: %w", m.stateFile, err)
-	}
-
-	scanner := bufio.NewScanner(strings.NewReader(string(data)))
-	var keep []string
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" && line != username {
-			keep = append(keep, line)
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scan state file: %w", err)
-	}
-
-	return m.writeStateFile(keep)
-}
-
-// writeStateFile atomically replaces the state file contents with lines.
+// writeStateFile atomically replaces the state file with lines.
+// It writes to a temp file in the same directory, fsyncs, renames, then
+// fsyncs the parent directory — so a crash at any point leaves either the old
+// or the new file fully intact, never a zero-length or partially-written file.
 func (m *UserManager) writeStateFile(lines []string) error {
-	if err := os.MkdirAll(filepath.Dir(m.stateFile), 0755); err != nil {
+	dir := filepath.Dir(m.stateFile)
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("create state file dir: %w", err)
 	}
 	content := strings.Join(lines, "\n")
 	if len(lines) > 0 {
 		content += "\n"
 	}
-	return os.WriteFile(m.stateFile, []byte(content), 0644)
+	tmp, err := os.CreateTemp(dir, ".managed-users-tmp-*")
+	if err != nil {
+		return fmt.Errorf("create state file temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.WriteString(content); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write state file temp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("sync state file temp: %w", err)
+	}
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("chmod state file temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("close state file temp: %w", err)
+	}
+	if err := os.Rename(tmpPath, m.stateFile); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename state file: %w", err)
+	}
+	// Fsync the parent directory to make the rename durable across power loss.
+	if dirF, err := os.Open(dir); err == nil {
+		_ = dirF.Sync()
+		dirF.Close()
+	}
+	return nil
 }
