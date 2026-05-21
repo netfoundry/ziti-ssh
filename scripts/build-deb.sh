@@ -157,8 +157,8 @@ if [ ! -f /etc/ziti-ssh-ca/env ]; then
 #ZITI_SSH_MODE=shared
 #ZITI_SSH_PRINCIPAL=ziggy
 
-# Certificate validity duration (default 8h). Examples: 4h, 12h, 24h.
-#ZITI_CERT_TTL=8h
+# Certificate validity duration (default 5m). Examples: 5m, 15m, 1h.
+#ZITI_CERT_TTL=5m
 ENVEOF
     chmod 640 /etc/ziti-ssh-ca/env
 fi

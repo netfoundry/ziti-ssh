@@ -64,7 +64,7 @@ func TestSignCert(t *testing.T) {
 
 	const identity = "alice@example"
 	const principal = "ziggy"
-	const ttl = 8 * time.Hour
+	const ttl = 5 * time.Minute
 
 	before := time.Now()
 	certBytes, err := ca.SignCert(caSigner, clientPub, identity, principal, ttl)
@@ -122,7 +122,7 @@ func TestSignCert(t *testing.T) {
 			t.Errorf("ValidAfter %v is after test end %v", validAfter, after)
 		}
 
-		// ValidBefore must be approximately now+8h (within 5 seconds).
+		// ValidBefore must be approximately now+5m (within 5 seconds).
 		expectedBefore := before.Add(ttl)
 		diff := validBefore.Sub(expectedBefore)
 		if diff < -5*time.Second || diff > 5*time.Second {

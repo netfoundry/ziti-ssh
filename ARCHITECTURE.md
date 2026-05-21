@@ -370,7 +370,7 @@ Certificates are issued on demand and are ephemeral. There is no certificate sto
 | `KeyId` | `ziti:<identity-name>` | Extracted from Ziti connection |
 | `ValidPrincipals` | `[]string{principal}` | shared mode: `--principal` flag (default: `ziggy`); per-identity mode: `ca.DeriveUsername(callerIdentity)` |
 | `ValidAfter` | `time.Now().Unix()` | Signing time |
-| `ValidBefore` | `time.Now().Add(ttl).Unix()` | Signing time + TTL (default 8h, configurable via `--cert-ttl` / `ZITI_CERT_TTL`) |
+| `ValidBefore` | `time.Now().Add(ttl).Unix()` | Signing time + TTL (default 5m, configurable via `--cert-ttl` / `ZITI_CERT_TTL`) |
 | `Extensions["permit-pty"]` | `""` | Hardcoded |
 | `Extensions["permit-port-forwarding"]` | `""` | Hardcoded |
 | `Extensions["permit-agent-forwarding"]` | `""` | Hardcoded |
@@ -387,7 +387,7 @@ For most operational scenarios this is sufficient. If immediate hard revocation 
 ### Signing Implementation
 
 ```go
-// ttl is time.Duration resolved from --cert-ttl / ZITI_CERT_TTL (default 8h).
+// ttl is time.Duration resolved from --cert-ttl / ZITI_CERT_TTL (default 5m).
 cert := &ssh.Certificate{
     CertType:        ssh.UserCert,
     Key:             pubKey,
