@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/edwardm/ziti-ssh/host"
@@ -386,12 +387,13 @@ func TestEnsureUser_AcceptsIdentityPermissions(t *testing.T) {
 		exec.Command("userdel", "-r", username).Run()
 	})
 
-	if err := mgr.EnsureUser(username, perms); err != nil {
+	const identity = "test-identity-01"
+	if err := mgr.EnsureUser(identity, username, perms); err != nil {
 		t.Fatalf("EnsureUser returned error: %v", err)
 	}
 
-	// Second call (same session) must not error.
-	if err := mgr.EnsureUser(username, perms); err != nil {
+	// Second call (same identity, second concurrent session) must not error.
+	if err := mgr.EnsureUser(identity, username, perms); err != nil {
 		t.Fatalf("second EnsureUser returned error: %v", err)
 	}
 
@@ -422,8 +424,9 @@ func TestEnsureUser_RefCounting(t *testing.T) {
 	})
 
 	// Three sessions open.
+	const identity = "test-identity-refcnt"
 	for i := 0; i < 3; i++ {
-		if err := mgr.EnsureUser(username, perms); err != nil {
+		if err := mgr.EnsureUser(identity, username, perms); err != nil {
 			t.Fatalf("EnsureUser #%d: %v", i+1, err)
 		}
 	}
@@ -457,5 +460,36 @@ func TestNewUserManager_Signature(t *testing.T) {
 	mgr := host.NewUserManager(filepath.Join(dir, "state"), true)
 	if mgr == nil {
 		t.Fatal("NewUserManager returned nil")
+	}
+}
+
+func TestEnsureUser_CollisionRejected(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("EnsureUser collision test requires root (useradd); skipping")
+	}
+
+	dir := t.TempDir()
+	mgr := host.NewUserManager(filepath.Join(dir, "state"), true)
+
+	// "alice.corp" and "alice_corp" are different Ziti identities that both
+	// derive to the Linux username "alice_corp" (period → underscore).
+	const (
+		identityA = "alice.corp"
+		identityB = "alice_corp"
+		username  = "alice_corp"
+	)
+	t.Cleanup(func() { exec.Command("userdel", "-r", username).Run() })
+
+	if err := mgr.EnsureUser(identityA, username, host.IdentityPermissions{}); err != nil {
+		t.Fatalf("EnsureUser(identityA): %v", err)
+	}
+
+	// identityB collides with identityA's Linux account — must be rejected.
+	err := mgr.EnsureUser(identityB, username, host.IdentityPermissions{})
+	if err == nil {
+		t.Fatal("expected collision error for identityB, got nil")
+	}
+	if !strings.Contains(err.Error(), "already in use") {
+		t.Errorf("expected 'already in use' in error, got: %v", err)
 	}
 }

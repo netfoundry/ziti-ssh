@@ -679,6 +679,30 @@ func loadPermissionsConfig(zitiCtx ziti.Context, serviceName string) (*host.Perm
 			SudoersRule: entry.SudoersRule,
 		}
 	}
+	// Validate that no two explicit (non-glob) config keys derive to the same
+	// Linux username. A collision allows one Ziti identity to connect as another
+	// identity's Linux account, potentially inheriting elevated permissions.
+	// Glob patterns are skipped — they match many identities and have no single
+	// derived username. Runtime collision detection in UserManager.EnsureUser
+	// handles the glob case.
+	derived := make(map[string]string, len(pc.Permissions))
+	var collisions []string
+	for identity := range pc.Permissions {
+		if strings.ContainsAny(identity, "*?") {
+			continue
+		}
+		uname := ca.DeriveUsername(identity)
+		if prev, exists := derived[uname]; exists {
+			collisions = append(collisions, fmt.Sprintf("%q and %q both derive to %q", prev, identity, uname))
+		} else {
+			derived[uname] = identity
+		}
+	}
+	if len(collisions) > 0 {
+		return nil, fmt.Errorf("service %q config has username collisions (fix or remove one of each pair): %s",
+			serviceName, strings.Join(collisions, "; "))
+	}
+
 	slog.Info("loaded ziti-ssh-host.v1 config", "service", serviceName, "identities", len(pc.Permissions))
 	return pc, nil
 }
@@ -922,7 +946,7 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 						"username", username,
 						"groups", perms.Groups,
 						"has_sudoers", perms.SudoersRule != "")
-					return mgr.EnsureUser(username, perms)
+					return mgr.EnsureUser(zitiIdentity, username, perms)
 				},
 				OnDisconnect: func(zitiIdentity string) {
 					username := ca.DeriveUsername(zitiIdentity)

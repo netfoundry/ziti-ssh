@@ -330,7 +330,8 @@ func childEnv() []string {
 // All exported methods are safe for concurrent use.
 type UserManager struct {
 	mu                  sync.Mutex
-	sessions            map[string]int // username → active session count
+	sessions            map[string]int    // username → active session count
+	owners              map[string]string // username → Ziti identity that created the account
 	stateFile           string
 	cleanupOnDisconnect bool // if false, skip deleteUser on ReleaseUser
 }
@@ -344,15 +345,22 @@ type UserManager struct {
 func NewUserManager(stateFile string, cleanupOnDisconnect bool) *UserManager {
 	return &UserManager{
 		sessions:            make(map[string]int),
+		owners:              make(map[string]string),
 		stateFile:           stateFile,
 		cleanupOnDisconnect: cleanupOnDisconnect,
 	}
 }
 
 // EnsureUser creates the Linux user if this is the first session for that
-// username. useradd is called with "-m -s /bin/bash <username>". If useradd
-// reports that the user already exists (exit code 9) the error is ignored so
-// that concurrent connections that race to create the same user are handled
+// username. zitiIdentity is the caller's Ziti identity name; username is its
+// derived Linux username (from ca.DeriveUsername). The pair is recorded so
+// that if a different Ziti identity later derives the same Linux username the
+// connection is rejected rather than silently inheriting the first caller's
+// permissions.
+//
+// useradd is called with "-m -s /bin/bash <username>". If useradd reports
+// that the user already exists (exit code 9) the error is ignored so that
+// concurrent connections that race to create the same user are handled
 // gracefully.
 //
 // perms carries the resolved per-identity permissions for this connection.
@@ -362,9 +370,17 @@ func NewUserManager(stateFile string, cleanupOnDisconnect bool) *UserManager {
 //
 // The username is recorded in the state file so that CleanupOrphans can
 // remove it after a crash.
-func (m *UserManager) EnsureUser(username string, perms IdentityPermissions) error {
+func (m *UserManager) EnsureUser(zitiIdentity, username string, perms IdentityPermissions) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// Reject if this derived username is already owned by a different Ziti
+	// identity. Two distinct identities that collapse to the same Linux username
+	// must not share an account — one would inherit the other's permissions.
+	if owner, owned := m.owners[username]; owned && owner != zitiIdentity {
+		return fmt.Errorf("username %q (derived from %q) is already in use by Ziti identity %q: connection rejected to prevent privilege collision",
+			username, zitiIdentity, owner)
+	}
 
 	m.sessions[username]++
 
@@ -373,6 +389,11 @@ func (m *UserManager) EnsureUser(username string, perms IdentityPermissions) err
 		slog.Info("user already tracked, skipping useradd", "username", username, "sessions", m.sessions[username])
 		return nil
 	}
+
+	// Record ownership atomically with the session increment (both under the
+	// same mutex hold) so there is no window where the account exists without
+	// a recorded owner.
+	m.owners[username] = zitiIdentity
 
 	slog.Info("creating Linux user", "username", username)
 	cmd := exec.Command("useradd", "-m", "-s", "/bin/bash", username)
@@ -383,10 +404,11 @@ func (m *UserManager) EnsureUser(username string, perms IdentityPermissions) err
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 9 {
 			slog.Info("user already exists, treating as success", "username", username)
 		} else {
-			// Undo the session increment — the user was not created.
+			// Undo both the session increment and the ownership record.
 			m.sessions[username]--
 			if m.sessions[username] == 0 {
 				delete(m.sessions, username)
+				delete(m.owners, username)
 			}
 			return fmt.Errorf("useradd %q: %w (output: %s)", username, err, out)
 		}
@@ -444,6 +466,7 @@ func (m *UserManager) ReleaseUser(username string) error {
 	}
 
 	delete(m.sessions, username)
+	delete(m.owners, username)
 
 	if !m.cleanupOnDisconnect {
 		slog.Info("last session closed, cleanup disabled — keeping Linux user", "username", username)
