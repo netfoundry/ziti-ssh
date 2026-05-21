@@ -462,16 +462,39 @@ func (m *UserManager) EnsureUser(zitiIdentity, username string, perms IdentityPe
 	m.mu.Unlock()
 
 	if !isFirst {
-		// Wait for the first caller to finish creating the Linux user before
-		// returning nil. Without this barrier a concurrent second session could
-		// race ahead and attempt SSH login before useradd has written /etc/passwd,
-		// causing intermittent "user unknown" failures.
+		// Acquire the per-user lock to:
+		//   (a) wait for the first caller to finish useradd before proceeding
+		//       (H5 barrier — prevents SSH login before /etc/passwd is written), and
+		//   (b) re-apply permissions idempotently, so a config change takes effect
+		//       on the next concurrent session without waiting for all sessions to
+		//       close (C2 fix — "regardless of session count").
 		//
 		// Invariant: by the time EnsureUser returns nil, the Linux user exists in
 		// /etc/passwd (or useradd reported it already existed).
 		ul.Lock()
-		ul.Unlock()
-		slog.Info("user already tracked, skipping useradd", "username", username, "sessions", m.sessions[username])
+		defer ul.Unlock()
+
+		slog.Info("user already exists, re-applying permissions", "username", username, "sessions", m.sessions[username])
+
+		groupList := strings.Join(perms.Groups, ",")
+		slog.Info("setting user supplementary groups", "username", username, "groups", groupList)
+		usermod := exec.Command("usermod", "-G", groupList, username)
+		usermod.Env = childEnv()
+		if out, err := usermod.CombinedOutput(); err != nil {
+			slog.Error("usermod -G failed", "username", username, "groups", groupList, "err", err, "output", strings.TrimSpace(string(out)))
+		}
+
+		if perms.SudoersRule != "" {
+			if err := createSudoers(username, perms.SudoersRule); err != nil {
+				slog.Error("failed to update sudoers file", "username", username, "err", err)
+			}
+		} else {
+			// Config no longer specifies a sudoers rule — remove any stale file.
+			if err := removeSudoers(username); err != nil {
+				slog.Error("failed to remove stale sudoers file", "username", username, "err", err)
+			}
+		}
+
 		return nil
 	}
 
