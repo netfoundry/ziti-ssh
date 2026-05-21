@@ -16,6 +16,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/pkg/sftp"
@@ -48,6 +49,11 @@ func RunSFTP(
 	cfg := &ssh.ClientConfig{
 		User:            user,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		// Host key verification is intentionally skipped. The connection arrives
+		// over a Ziti overlay that enforces mutual TLS using the controller's
+		// PKI — the host's Ziti identity is cryptographically proven before any
+		// SSH bytes are exchanged. A traditional known-hosts check would be
+		// redundant and weaker than the guarantee Ziti already provides.
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec
 	}
 
@@ -272,6 +278,9 @@ func downloadDir(client *sftp.Client, remoteDir, localDir string, preserve, quie
 	}
 
 	for _, entry := range entries {
+		if err := safeName(entry.Name()); err != nil {
+			return fmt.Errorf("remote dir %q: %w", remoteDir, err)
+		}
 		rPath := path.Join(remoteDir, entry.Name())
 		lPath := filepath.Join(localDir, entry.Name())
 		if entry.IsDir() {
@@ -338,6 +347,19 @@ func downloadFile(client *sftp.Client, remotePath, localPath string, preserve, q
 
 	if preserve {
 		_ = os.Chtimes(localPath, fi.ModTime(), fi.ModTime())
+	}
+	return nil
+}
+
+// safeName rejects remote-supplied entry names that could escape the local
+// download target via path traversal (e.g. "..", "../etc/passwd", or names
+// embedding a path separator).
+func safeName(name string) error {
+	if name == "" || name == "." || name == ".." {
+		return fmt.Errorf("rejected unsafe remote entry name %q", name)
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("rejected unsafe remote entry name %q", name)
 	}
 	return nil
 }

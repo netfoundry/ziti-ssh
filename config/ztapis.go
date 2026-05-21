@@ -46,13 +46,5 @@ func PersistZtAPIs(identityFile string, urls []string) error {
 		mode = fi.Mode()
 	}
 
-	tmp := identityFile + ".tmp"
-	if err := os.WriteFile(tmp, out, mode); err != nil {
-		return fmt.Errorf("write temp identity file: %w", err)
-	}
-	if err := os.Rename(tmp, identityFile); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("rename temp identity file: %w", err)
-	}
-	return nil
+	return AtomicWriteFile(identityFile, out, mode)
 }

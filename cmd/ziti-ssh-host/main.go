@@ -254,7 +254,7 @@ func runEnroll(jwtPath, identityFile string) error {
 	if err != nil {
 		return fmt.Errorf("marshal identity config: %w", err)
 	}
-	if err := os.WriteFile(identityFile, cfgJSON, 0600); err != nil {
+	if err := config.AtomicWriteFile(identityFile, cfgJSON, 0600); err != nil {
 		return fmt.Errorf("write identity file %q: %w", identityFile, err)
 	}
 	slog.Info("identity enrolled", "path", identityFile)

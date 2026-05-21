@@ -12,6 +12,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/url"
@@ -205,7 +206,7 @@ func runEnroll(jwtPath, outPath string) error {
 	if err != nil {
 		return fmt.Errorf("marshal identity config: %w", err)
 	}
-	if err := os.WriteFile(outPath, cfgJSON, 0600); err != nil {
+	if err := config.AtomicWriteFile(outPath, cfgJSON, 0600); err != nil {
 		return fmt.Errorf("write identity file %q: %w", outPath, err)
 	}
 
@@ -379,7 +380,15 @@ func handleConn(conn net.Conn, signer ssh.Signer, caPubBytes []byte, principal, 
 		log = log.With("derived_principal", effectivePrincipal)
 	}
 
-	reader := bufio.NewReader(conn)
+	// Bound the connection lifetime: 30 s is generous for a single-line request.
+	// The size cap (4 KiB) is well above any real SSH public key but prevents a
+	// slow-sender from holding the connection indefinitely.
+	if err := conn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		log.Error("set deadline", "err", err)
+		return
+	}
+	const maxRequestBytes = 4096
+	reader := bufio.NewReader(io.LimitReader(conn, maxRequestBytes))
 	line, err := reader.ReadString('\n')
 	if err != nil {
 		log.Error("read request", "err", err)
