@@ -295,6 +295,14 @@ func WriteSSHConfig(caPubKey []byte, confFile, keyFile string) error {
 // during provisioning. Per-connection children call signal(SIGHUP, SIG_IGN)
 // after privilege separation (OpenSSH 8.x+) and are unaffected.
 func ReloadSSHD() error {
+	// Validate configuration before reloading. sshd -t reads the full config
+	// tree (including sshd_config.d drop-ins) and checks that referenced files
+	// such as TrustedUserCAKeys exist and are well-formed. Failing here is
+	// preferable to reloading with a broken config that locks out cert auth.
+	if out, err := exec.Command("sshd", "-t").CombinedOutput(); err != nil {
+		return fmt.Errorf("sshd config validation failed (not reloading): %w\n%s", err, strings.TrimSpace(string(out)))
+	}
+
 	// Detect socket-activated sshd (Ubuntu 24.04 default). Under socket
 	// activation, ssh.service is typically masked and "systemctl reload ssh"
 	// would fail — but no reload is needed because each sshd instance reads
