@@ -674,6 +674,11 @@ func loadPermissionsConfig(zitiCtx ziti.Context, serviceName string) (*host.Perm
 		Permissions: make(map[string]host.IdentityPermissions, len(wire.Permissions)),
 	}
 	for identity, entry := range wire.Permissions {
+		if entry.SudoersRule != "" {
+			if err := host.ValidateSudoersRule(entry.SudoersRule); err != nil {
+				return nil, fmt.Errorf("service %q config: identity %q: %w", serviceName, identity, err)
+			}
+		}
 		pc.Permissions[identity] = host.IdentityPermissions{
 			Groups:      entry.Groups,
 			SudoersRule: entry.SudoersRule,

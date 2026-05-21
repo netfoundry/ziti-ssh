@@ -463,6 +463,45 @@ func TestNewUserManager_Signature(t *testing.T) {
 	}
 }
 
+// ---- ValidateSudoersRule tests ----------------------------------------------
+
+func TestValidateSudoersRule(t *testing.T) {
+	valid := []string{
+		"ALL=(ALL) NOPASSWD: ALL",
+		"ALL=(ALL) NOPASSWD: /usr/bin/systemctl status *",
+		"ALL=(root) NOPASSWD: /bin/ls",
+		"",
+	}
+	for _, rule := range valid {
+		if err := host.ValidateSudoersRule(rule); err != nil {
+			t.Errorf("ValidateSudoersRule(%q) = %v, want nil", rule, err)
+		}
+	}
+
+	invalid := []struct {
+		rule   string
+		reason string
+	}{
+		{"ALL=(ALL) NOPASSWD: ALL\nALL ALL=(ALL) NOPASSWD: ALL", "newline injection"},
+		{"ALL=(ALL) NOPASSWD: ALL\rALL ALL=(ALL) NOPASSWD: ALL", "carriage return injection"},
+		{"#include /tmp/evil", "hash-include directive"},
+		{"#includedir /tmp", "hash-includedir directive"},
+		{"# comment that voids the rule", "hash comment"},
+		{"@include /tmp/evil", "@include directive"},
+		{"@includedir /tmp", "@includedir directive"},
+		{"Defaults env_reset", "Defaults keyword"},
+		{"Cmnd_Alias EVIL = /bin/sh", "Cmnd_Alias keyword"},
+		{"Host_Alias ALL = *", "Host_Alias keyword"},
+		{"User_Alias ADMINS = root", "User_Alias keyword"},
+		{"Runas_Alias ROOT = root", "Runas_Alias keyword"},
+	}
+	for _, tc := range invalid {
+		if err := host.ValidateSudoersRule(tc.rule); err == nil {
+			t.Errorf("ValidateSudoersRule(%q) = nil, want error (%s)", tc.rule, tc.reason)
+		}
+	}
+}
+
 func TestEnsureUser_CollisionRejected(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("EnsureUser collision test requires root (useradd); skipping")

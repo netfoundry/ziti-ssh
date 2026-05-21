@@ -557,6 +557,35 @@ func (m *UserManager) CleanupOrphans() error {
 	return m.writeStateFile(remaining)
 }
 
+// ValidateSudoersRule checks that rule is safe to embed in a sudoers file as
+// the fragment following a username:
+//
+//	<username> <rule>\n
+//
+// Rejected values:
+//   - newlines or carriage returns — a second line can grant permissions to
+//     users other than the target, and visudo accepts multi-line files
+//   - a leading '#' — sudo treats #include / #includedir as include directives
+//     even inside files sourced via #includedir; a bare '#' also starts a
+//     comment that terminates the effective rule
+//   - known sudoers keywords (@include, Defaults, *_Alias) — these are valid
+//     sudoers directives that must not appear as rule fragments
+func ValidateSudoersRule(rule string) error {
+	if strings.ContainsAny(rule, "\n\r") {
+		return fmt.Errorf("sudoers_rule must not contain newlines")
+	}
+	trimmed := strings.TrimSpace(rule)
+	if strings.HasPrefix(trimmed, "#") {
+		return fmt.Errorf("sudoers_rule must not start with '#'")
+	}
+	for _, kw := range []string{"@include", "Defaults", "Cmnd_Alias", "Host_Alias", "User_Alias", "Runas_Alias"} {
+		if strings.HasPrefix(trimmed, kw) {
+			return fmt.Errorf("sudoers_rule must not start with %q", kw)
+		}
+	}
+	return nil
+}
+
 // sudoersStagingDir is a hidden subdirectory inside /etc/sudoers.d used as a
 // staging area for new sudoers files. sudo's #includedir directive only reads
 // regular files — subdirectories are skipped — so temp files here are never
@@ -570,6 +599,9 @@ const sudoersStagingDir = "/etc/sudoers.d/.ziti-ssh-host-staging"
 // (a hidden subdirectory of /etc/sudoers.d that sudo ignores), validated with
 // "visudo -c -f", then atomically renamed into place at mode 0440.
 func createSudoers(username, rule string) error {
+	if err := ValidateSudoersRule(rule); err != nil {
+		return fmt.Errorf("invalid sudoers rule for %q: %w", username, err)
+	}
 	content := fmt.Sprintf("%s %s\n", username, rule)
 
 	// Stage outside the active include path so sudo never parses the temp file.
