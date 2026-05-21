@@ -414,6 +414,15 @@ func (m *UserManager) EnsureUser(zitiIdentity, username string, perms IdentityPe
 	m.mu.Unlock()
 
 	if !isFirst {
+		// Wait for the first caller to finish creating the Linux user before
+		// returning nil. Without this barrier a concurrent second session could
+		// race ahead and attempt SSH login before useradd has written /etc/passwd,
+		// causing intermittent "user unknown" failures.
+		//
+		// Invariant: by the time EnsureUser returns nil, the Linux user exists in
+		// /etc/passwd (or useradd reported it already existed).
+		ul.Lock()
+		ul.Unlock()
 		slog.Info("user already tracked, skipping useradd", "username", username, "sessions", m.sessions[username])
 		return nil
 	}
