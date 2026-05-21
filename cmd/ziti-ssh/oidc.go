@@ -4,7 +4,7 @@ package main
 // of main.go can use the same short names it always has.
 
 import (
-	zitioidc "github.com/edwardm/ziti-ssh/internal/oidc"
+	zitioidc "github.com/netfoundry/ziti-ssh/internal/oidc"
 	ziti "github.com/openziti/sdk-golang/ziti"
 )
 

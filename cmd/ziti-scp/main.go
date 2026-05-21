@@ -40,9 +40,9 @@ import (
 	"github.com/spf13/cobra"
 	"go.yaml.in/yaml/v3"
 
-	"github.com/edwardm/ziti-ssh/client"
-	"github.com/edwardm/ziti-ssh/config"
-	zitioidc "github.com/edwardm/ziti-ssh/internal/oidc"
+	"github.com/netfoundry/ziti-ssh/client"
+	"github.com/netfoundry/ziti-ssh/config"
+	zitioidc "github.com/netfoundry/ziti-ssh/internal/oidc"
 )
 
 // ---------------------------------------------------------------------------

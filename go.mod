@@ -1,4 +1,4 @@
-module github.com/edwardm/ziti-ssh
+module github.com/netfoundry/ziti-ssh
 
 go 1.25.0
 

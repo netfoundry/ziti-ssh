@@ -29,9 +29,9 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 
-	"github.com/edwardm/ziti-ssh/ca"
-	"github.com/edwardm/ziti-ssh/config"
-	"github.com/edwardm/ziti-ssh/internal/ratelimit"
+	"github.com/netfoundry/ziti-ssh/ca"
+	"github.com/netfoundry/ziti-ssh/config"
+	"github.com/netfoundry/ziti-ssh/internal/ratelimit"
 
 	ziti "github.com/openziti/sdk-golang/ziti"
 	zitiEnroll "github.com/openziti/sdk-golang/ziti/enroll"

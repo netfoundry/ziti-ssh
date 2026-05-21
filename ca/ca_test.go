@@ -9,7 +9,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/edwardm/ziti-ssh/ca"
+	"github.com/netfoundry/ziti-ssh/ca"
 )
 
 // generateTestCA creates an ephemeral Ed25519 CA key pair in memory and

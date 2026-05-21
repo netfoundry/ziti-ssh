@@ -97,7 +97,7 @@ install -D -m 0644 /dev/stdin \
     "${PKG_DIR}/lib/systemd/system/ziti-ssh-ca.service" <<'EOF'
 [Unit]
 Description=Ziti SSH Certificate Authority
-Documentation=https://github.com/edwardm/ziti-ssh
+Documentation=https://github.com/netfoundry/ziti-ssh
 After=network-online.target
 Wants=network-online.target
 
@@ -197,7 +197,7 @@ install -D -m 0644 /dev/stdin \
     "${PKG_DIR}/lib/systemd/system/ziti-ssh-host.service" <<'EOF'
 [Unit]
 Description=Ziti SSH Host Proxy
-Documentation=https://github.com/edwardm/ziti-ssh
+Documentation=https://github.com/netfoundry/ziti-ssh
 After=network-online.target
 Wants=network-online.target
 

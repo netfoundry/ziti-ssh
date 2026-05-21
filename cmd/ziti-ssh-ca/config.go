@@ -20,7 +20,7 @@ import (
 	"github.com/openziti/edge-api/rest_model"
 	"github.com/openziti/edge-api/rest_util"
 
-	"github.com/edwardm/ziti-ssh/config"
+	"github.com/netfoundry/ziti-ssh/config"
 )
 
 // configTypeSchema is the JSON schema for the ziti-ssh-host.v1 config type.

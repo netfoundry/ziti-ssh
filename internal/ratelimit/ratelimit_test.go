@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/edwardm/ziti-ssh/internal/ratelimit"
+	"github.com/netfoundry/ziti-ssh/internal/ratelimit"
 )
 
 // neverStop returns a channel that is never closed, suitable for tests that

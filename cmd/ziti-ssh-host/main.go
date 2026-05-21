@@ -37,9 +37,9 @@ import (
 	zitiEdge "github.com/openziti/sdk-golang/ziti/edge"
 	"github.com/openziti/sdk-golang/ziti/enroll"
 
-	"github.com/edwardm/ziti-ssh/ca"
-	"github.com/edwardm/ziti-ssh/config"
-	"github.com/edwardm/ziti-ssh/host"
+	"github.com/netfoundry/ziti-ssh/ca"
+	"github.com/netfoundry/ziti-ssh/config"
+	"github.com/netfoundry/ziti-ssh/host"
 )
 
 const (

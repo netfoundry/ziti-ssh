@@ -43,8 +43,8 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 
-	"github.com/edwardm/ziti-ssh/client"
-	"github.com/edwardm/ziti-ssh/config"
+	"github.com/netfoundry/ziti-ssh/client"
+	"github.com/netfoundry/ziti-ssh/config"
 )
 
 // ---------------------------------------------------------------------------

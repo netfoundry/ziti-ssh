@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/edwardm/ziti-ssh/host"
+	"github.com/netfoundry/ziti-ssh/host"
 )
 
 // ---- PermissionsConfig.Resolve tests ----------------------------------------
