@@ -283,24 +283,34 @@ func WriteSSHConfig(caPubKey []byte, confFile, keyFile string) error {
 
 // ReloadSSHD signals sshd to reload its configuration.
 //
-// It first reloads the systemd-managed sshd via "systemctl reload ssh", then
-// broadcasts SIGHUP to any other top-level sshd listener processes. Linux's
-// SO_REUSEPORT allows multiple sshd parents to co-listen on :22; this arises
-// when a mid-provisioning service restart leaves an orphaned sshd alongside
-// the new one. "systemctl reload" only signals the managed instance — the
-// orphan never picks up TrustedUserCAKeys and causes intermittent cert auth
-// failures. Targeting ppid=1 avoids sending SIGHUP to child sshd processes
-// that handle active connections; those children call signal(SIGHUP, SIG_IGN)
-// before the fork and are unaffected.
+// Ubuntu 24.04 defaults to socket-activated sshd (ssh.socket + ssh@.service):
+// each incoming connection spawns a fresh sshd that re-reads sshd_config at
+// fork, so no daemon reload is required — the next connection automatically
+// picks up TrustedUserCAKeys. When the traditional long-running ssh.service is
+// active instead, SIGHUP is delivered via "systemctl reload ssh".
+//
+// In both cases pkill broadcasts SIGHUP to any top-level sshd listener
+// processes (PPID=1) that may be co-listening via SO_REUSEPORT alongside the
+// managed instance. This covers orphaned sshd parents left by service restarts
+// during provisioning. Per-connection children call signal(SIGHUP, SIG_IGN)
+// after privilege separation (OpenSSH 8.x+) and are unaffected.
 func ReloadSSHD() error {
-	cmd := exec.Command("systemctl", "reload", "ssh")
-	cmd.Env = childEnv()
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("systemctl reload ssh: %w (output: %s)", err, out)
+	// Detect socket-activated sshd (Ubuntu 24.04 default). Under socket
+	// activation, ssh.service is typically masked and "systemctl reload ssh"
+	// would fail — but no reload is needed because each sshd instance reads
+	// its config at fork time.
+	socketActive := exec.Command("systemctl", "is-active", "--quiet", "ssh.socket").Run() == nil
+	if socketActive {
+		slog.Info("sshd is socket-activated; new connections will pick up TrustedUserCAKeys automatically")
+	} else {
+		cmd := exec.Command("systemctl", "reload", "ssh")
+		cmd.Env = childEnv()
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("systemctl reload ssh: %w (output: %s)", err, out)
+		}
 	}
 
-	// pkill exits 1 when no processes match — not an error. Errors here are
-	// non-fatal: the systemctl reload above already covered the managed sshd.
+	// pkill exits 1 when no processes match — not an error.
 	if err := exec.Command("pkill", "-HUP", "-P", "1", "-x", "sshd").Run(); err != nil {
 		slog.Debug("pkill sshd: no additional listener processes to signal", "err", err)
 	}
