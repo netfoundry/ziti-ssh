@@ -76,7 +76,7 @@ log "Authenticating to controller ${ZITI_CTRL_URL}"
 SESSION_TOKEN=$(curl --silent --fail --insecure \
     --request POST \
     --header "Content-Type: application/json" \
-    --data "$(python3 -c "import json,os; print(json.dumps({'username':'admin','password':os.environ['ZITI_ADMIN_PASSWORD']}))")" \
+    --data "$(python3 -c "import json,sys; print(json.dumps({'username':'admin','password':sys.argv[1]}))" "${ZITI_ADMIN_PASSWORD}")" \
     "${ZITI_CTRL_URL}/edge/management/v1/authenticate?method=password" \
     | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['token'])")
 
@@ -99,7 +99,7 @@ IDENTITY_ID=$(curl --silent --fail --insecure \
     --request POST \
     --header "Content-Type: application/json" \
     --header "zt-session: ${SESSION_TOKEN}" \
-    --data "$(python3 -c "import json,os; print(json.dumps({'name':os.environ['IDENTITY_NAME'],'type':'Default','roleAttributes':['ssh-hosts'],'isAdmin':False,'enrollment':{'ott':True}}))")" \
+    --data "$(python3 -c "import json,sys; print(json.dumps({'name':sys.argv[1],'type':'Default','roleAttributes':['ssh-hosts'],'isAdmin':False,'enrollment':{'ott':True}}))" "${IDENTITY_NAME}")" \
     "${ZITI_CTRL_URL}/edge/management/v1/identities" \
     | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['id'])")
 
