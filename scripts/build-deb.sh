@@ -53,25 +53,25 @@ mkdir -p "${DIST_DIR}"
 
 log "Building ziti-ssh-ca..."
 GOARCH=amd64 GOOS=linux CGO_ENABLED=0 go build \
-    -ldflags "-s -w -X main.version=${VERSION}" \
+    -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
     -o "${STAGING_DIR}/binaries/ziti-ssh-ca" \
     "${REPO_ROOT}/cmd/ziti-ssh-ca"
 
 log "Building ziti-ssh-host..."
 GOARCH=amd64 GOOS=linux CGO_ENABLED=0 go build \
-    -ldflags "-s -w -X main.version=${VERSION}" \
+    -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
     -o "${STAGING_DIR}/binaries/ziti-ssh-host" \
     "${REPO_ROOT}/cmd/ziti-ssh-host"
 
 log "Building ziti-ssh..."
 GOARCH=amd64 GOOS=linux CGO_ENABLED=0 go build \
-    -ldflags "-s -w -X main.version=${VERSION}" \
+    -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
     -o "${STAGING_DIR}/binaries/ziti-ssh" \
     "${REPO_ROOT}/cmd/ziti-ssh"
 
 log "Building ziti-scp..."
 GOARCH=amd64 GOOS=linux CGO_ENABLED=0 go build \
-    -ldflags "-s -w -X main.version=${VERSION}" \
+    -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
     -o "${STAGING_DIR}/binaries/ziti-scp" \
     "${REPO_ROOT}/cmd/ziti-scp"
 

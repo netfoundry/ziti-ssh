@@ -238,13 +238,13 @@ func proxyConn(src net.Conn, target string, hooks *ProxyHooks) {
 	defer dst.Close()
 
 	done := make(chan struct{}, 2)
-	copy := func(w io.Writer, r io.Reader) {
+	pipeCopy := func(w io.Writer, r io.Reader) {
 		_, _ = io.Copy(w, r)
 		done <- struct{}{}
 	}
 
-	go copy(dst, src)
-	go copy(src, dst)
+	go pipeCopy(dst, src)
+	go pipeCopy(src, dst)
 
 	// Wait for either direction to finish then let defers close both.
 	<-done
@@ -260,20 +260,20 @@ func proxyConn(src net.Conn, target string, hooks *ProxyHooks) {
 //	    "/etc/ssh/sshd_config.d/ziti-ssh.conf",
 //	    "/etc/ssh/ziti_ca.pub")
 func WriteSSHConfig(caPubKey []byte, confFile, keyFile string) error {
-	// Write CA public key file.
+	// Write CA public key file atomically so sshd never sees a truncated file.
 	if err := os.MkdirAll(filepath.Dir(keyFile), 0755); err != nil {
 		return fmt.Errorf("create dir for %q: %w", keyFile, err)
 	}
-	if err := os.WriteFile(keyFile, caPubKey, 0644); err != nil {
+	if err := atomicWriteFile(keyFile, caPubKey, 0644); err != nil {
 		return fmt.Errorf("write CA public key to %q: %w", keyFile, err)
 	}
 
-	// Write sshd drop-in config.
+	// Write sshd drop-in config atomically.
 	if err := os.MkdirAll(filepath.Dir(confFile), 0755); err != nil {
 		return fmt.Errorf("create dir for %q: %w", confFile, err)
 	}
 	conf := fmt.Sprintf("TrustedUserCAKeys %s\n", keyFile)
-	if err := os.WriteFile(confFile, []byte(conf), 0644); err != nil {
+	if err := atomicWriteFile(confFile, []byte(conf), 0644); err != nil {
 		return fmt.Errorf("write sshd config to %q: %w", confFile, err)
 	}
 
@@ -281,28 +281,99 @@ func WriteSSHConfig(caPubKey []byte, confFile, keyFile string) error {
 	return nil
 }
 
+// atomicWriteFile writes data to a temp file in the same directory as dest,
+// fsyncs, sets mode, renames over dest, then fsyncs the parent directory.
+// A crash at any point leaves either the old or the new file fully intact.
+func atomicWriteFile(dest string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(dest)
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	// Clean up the temp file on any error path.
+	ok := false
+	defer func() {
+		if !ok {
+			os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, dest); err != nil {
+		return err
+	}
+	// Fsync the parent directory so the rename is durable.
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil {
+		return err
+	}
+	ok = true
+	return nil
+}
+
 // ReloadSSHD signals sshd to reload its configuration.
 //
-// It first reloads the systemd-managed sshd via "systemctl reload ssh", then
-// broadcasts SIGHUP to any other top-level sshd listener processes. Linux's
-// SO_REUSEPORT allows multiple sshd parents to co-listen on :22; this arises
-// when a mid-provisioning service restart leaves an orphaned sshd alongside
-// the new one. "systemctl reload" only signals the managed instance — the
-// orphan never picks up TrustedUserCAKeys and causes intermittent cert auth
-// failures. Targeting ppid=1 avoids sending SIGHUP to child sshd processes
-// that handle active connections; those children call signal(SIGHUP, SIG_IGN)
-// before the fork and are unaffected.
+// Ubuntu 24.04 defaults to socket-activated sshd (ssh.socket + ssh@.service):
+// each incoming connection spawns a fresh sshd that re-reads sshd_config at
+// fork, so no daemon reload is required — the next connection automatically
+// picks up TrustedUserCAKeys. When the traditional long-running ssh.service is
+// active instead, SIGHUP is delivered via "systemctl reload ssh".
+//
+// In both cases pkill broadcasts SIGHUP to any top-level sshd listener
+// processes (PPID=1) that may be co-listening via SO_REUSEPORT alongside the
+// managed instance. This covers orphaned sshd parents left by service restarts
+// during provisioning. Per-connection children call signal(SIGHUP, SIG_IGN)
+// after privilege separation (OpenSSH 8.x+) and are unaffected.
 func ReloadSSHD() error {
-	cmd := exec.Command("systemctl", "reload", "ssh")
-	cmd.Env = childEnv()
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("systemctl reload ssh: %w (output: %s)", err, out)
+	// Validate configuration before reloading. sshd -t reads the full config
+	// tree (including sshd_config.d drop-ins) and checks that referenced files
+	// such as TrustedUserCAKeys exist and are well-formed. Failing here is
+	// preferable to reloading with a broken config that locks out cert auth.
+	if out, err := exec.Command("sshd", "-t").CombinedOutput(); err != nil {
+		return fmt.Errorf("sshd config validation failed (not reloading): %w\n%s", err, strings.TrimSpace(string(out)))
 	}
 
-	// pkill exits 1 when no processes match — not an error. Errors here are
-	// non-fatal: the systemctl reload above already covered the managed sshd.
-	if err := exec.Command("pkill", "-HUP", "-P", "1", "-x", "sshd").Run(); err != nil {
-		slog.Debug("pkill sshd: no additional listener processes to signal", "err", err)
+	// Detect socket-activated sshd (Ubuntu 24.04 default). Under socket
+	// activation, ssh.service is typically masked and "systemctl reload ssh"
+	// would fail — but no reload is needed because each sshd instance reads
+	// its config at fork time.
+	socketActive := exec.Command("systemctl", "is-active", "--quiet", "ssh.socket").Run() == nil
+	if socketActive {
+		slog.Info("sshd is socket-activated; new connections will pick up TrustedUserCAKeys automatically")
+	} else {
+		cmd := exec.Command("systemctl", "reload", "ssh")
+		cmd.Env = childEnv()
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("systemctl reload ssh: %w (output: %s)", err, out)
+		}
+	}
+
+	// Under ssh.service (non-socket), also signal any top-level sshd listener
+	// that may have been spawned outside systemd. Skip this under socket
+	// activation: per-connection sshd children have PPID 1 there too, and
+	// sending SIGHUP to an active connection sshd disconnects the session.
+	if !socketActive {
+		if err := exec.Command("pkill", "-HUP", "-P", "1", "-x", "sshd").Run(); err != nil {
+			slog.Debug("pkill sshd: no additional listener processes to signal", "err", err)
+		}
 	}
 
 	slog.Info("sshd reloaded")
@@ -330,7 +401,9 @@ func childEnv() []string {
 // All exported methods are safe for concurrent use.
 type UserManager struct {
 	mu                  sync.Mutex
-	sessions            map[string]int // username → active session count
+	sessions            map[string]int    // username → active session count
+	owners              map[string]string // username → Ziti identity that created the account
+	userLocks           map[string]*sync.Mutex // username → per-user lock for slow OS ops
 	stateFile           string
 	cleanupOnDisconnect bool // if false, skip deleteUser on ReleaseUser
 }
@@ -344,15 +417,23 @@ type UserManager struct {
 func NewUserManager(stateFile string, cleanupOnDisconnect bool) *UserManager {
 	return &UserManager{
 		sessions:            make(map[string]int),
+		owners:              make(map[string]string),
+		userLocks:           make(map[string]*sync.Mutex),
 		stateFile:           stateFile,
 		cleanupOnDisconnect: cleanupOnDisconnect,
 	}
 }
 
 // EnsureUser creates the Linux user if this is the first session for that
-// username. useradd is called with "-m -s /bin/bash <username>". If useradd
-// reports that the user already exists (exit code 9) the error is ignored so
-// that concurrent connections that race to create the same user are handled
+// username. zitiIdentity is the caller's Ziti identity name; username is its
+// derived Linux username (from ca.DeriveUsername). The pair is recorded so
+// that if a different Ziti identity later derives the same Linux username the
+// connection is rejected rather than silently inheriting the first caller's
+// permissions.
+//
+// useradd is called with "-m -s /bin/bash <username>". If useradd reports
+// that the user already exists (exit code 9) the error is ignored so that
+// concurrent connections that race to create the same user are handled
 // gracefully.
 //
 // perms carries the resolved per-identity permissions for this connection.
@@ -362,17 +443,70 @@ func NewUserManager(stateFile string, cleanupOnDisconnect bool) *UserManager {
 //
 // The username is recorded in the state file so that CleanupOrphans can
 // remove it after a crash.
-func (m *UserManager) EnsureUser(username string, perms IdentityPermissions) error {
+func (m *UserManager) EnsureUser(zitiIdentity, username string, perms IdentityPermissions) error {
+	// Phase 1 (global lock, fast): ownership check, session bookkeeping, and
+	// per-user lock acquisition. No blocking OS calls are made here.
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	if owner, owned := m.owners[username]; owned && owner != zitiIdentity {
+		m.mu.Unlock()
+		return fmt.Errorf("username %q (derived from %q) is already in use by Ziti identity %q: connection rejected to prevent privilege collision",
+			username, zitiIdentity, owner)
+	}
 	m.sessions[username]++
+	isFirst := m.sessions[username] == 1
+	if isFirst {
+		// Record ownership atomically with the session increment so there is no
+		// window where the account exists without a recorded owner.
+		m.owners[username] = zitiIdentity
+	}
+	ul, ok := m.userLocks[username]
+	if !ok {
+		ul = &sync.Mutex{}
+		m.userLocks[username] = ul
+	}
+	m.mu.Unlock()
 
-	// Only run useradd on the first session for this username.
-	if m.sessions[username] > 1 {
-		slog.Info("user already tracked, skipping useradd", "username", username, "sessions", m.sessions[username])
+	if !isFirst {
+		// Acquire the per-user lock to:
+		//   (a) wait for the first caller to finish useradd before proceeding
+		//       (H5 barrier — prevents SSH login before /etc/passwd is written), and
+		//   (b) re-apply permissions idempotently, so a config change takes effect
+		//       on the next concurrent session without waiting for all sessions to
+		//       close (C2 fix — "regardless of session count").
+		//
+		// Invariant: by the time EnsureUser returns nil, the Linux user exists in
+		// /etc/passwd (or useradd reported it already existed).
+		ul.Lock()
+		defer ul.Unlock()
+
+		slog.Info("user already exists, re-applying permissions", "username", username, "sessions", m.sessions[username])
+
+		groupList := strings.Join(perms.Groups, ",")
+		slog.Info("setting user supplementary groups", "username", username, "groups", groupList)
+		usermod := exec.Command("usermod", "-G", groupList, username)
+		usermod.Env = childEnv()
+		if out, err := usermod.CombinedOutput(); err != nil {
+			slog.Error("usermod -G failed", "username", username, "groups", groupList, "err", err, "output", strings.TrimSpace(string(out)))
+		}
+
+		if perms.SudoersRule != "" {
+			if err := createSudoers(username, perms.SudoersRule); err != nil {
+				slog.Error("failed to update sudoers file", "username", username, "err", err)
+			}
+		} else {
+			// Config no longer specifies a sudoers rule — remove any stale file.
+			if err := removeSudoers(username); err != nil {
+				slog.Error("failed to remove stale sudoers file", "username", username, "err", err)
+			}
+		}
+
 		return nil
 	}
+
+	// Phase 2 (per-user lock only): slow OS operations. The global lock is not
+	// held here, so other usernames proceed concurrently.
+	ul.Lock()
+	defer ul.Unlock()
 
 	slog.Info("creating Linux user", "username", username)
 	cmd := exec.Command("useradd", "-m", "-s", "/bin/bash", username)
@@ -381,29 +515,34 @@ func (m *UserManager) EnsureUser(username string, perms IdentityPermissions) err
 	if err != nil {
 		// useradd exits with code 9 when the user already exists.
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 9 {
-			slog.Info("user already exists, treating as success", "username", username)
+			slog.Info("user already exists, treating as success", "username", username, "ziti_identity", zitiIdentity)
 		} else {
-			// Undo the session increment — the user was not created.
+			// Rollback: undo the session increment and ownership record.
+			m.mu.Lock()
 			m.sessions[username]--
 			if m.sessions[username] == 0 {
 				delete(m.sessions, username)
+				delete(m.owners, username)
 			}
+			m.mu.Unlock()
 			return fmt.Errorf("useradd %q: %w (output: %s)", username, err, out)
 		}
 	}
 
-	// Add the user to supplementary groups if any are specified.
-	if len(perms.Groups) > 0 {
-		groupList := strings.Join(perms.Groups, ",")
-		slog.Info("adding user to groups", "username", username, "groups", groupList)
-		usermod := exec.Command("usermod", "-aG", groupList, username)
-		usermod.Env = childEnv()
-		if out, err := usermod.CombinedOutput(); err != nil {
-			// Non-fatal: the user was created successfully; group membership
-			// failure (e.g. group does not exist) is logged but does not abort
-			// the session.
-			slog.Error("usermod -aG failed", "username", username, "groups", groupList, "err", err, "output", strings.TrimSpace(string(out)))
-		}
+	// Set the user's supplementary groups to exactly the configured list.
+	// -G replaces the full supplementary group membership rather than
+	// appending (-aG), so revocations take effect on the next reconnect
+	// without needing to delete and recreate the account. An empty list
+	// clears all supplementary groups.
+	groupList := strings.Join(perms.Groups, ",")
+	slog.Info("setting user supplementary groups", "username", username, "groups", groupList)
+	usermod := exec.Command("usermod", "-G", groupList, username)
+	usermod.Env = childEnv()
+	if out, err := usermod.CombinedOutput(); err != nil {
+		// Non-fatal: the user was created successfully; group membership
+		// failure (e.g. group does not exist) is logged but does not abort
+		// the session.
+		slog.Error("usermod -G failed", "username", username, "groups", groupList, "err", err, "output", strings.TrimSpace(string(out)))
 	}
 
 	// Write sudoers file if a rule is configured.
@@ -416,7 +555,7 @@ func (m *UserManager) EnsureUser(username string, perms IdentityPermissions) err
 	}
 
 	// Persist the username so orphan cleanup can find it after a restart.
-	if err := m.addToStateFile(username); err != nil {
+	if err := m.syncStateFile(); err != nil {
 		slog.Error("failed to write state file", "username", username, "err", err)
 		// Non-fatal: the user was created; orphan cleanup may miss it after a
 		// crash, but the session ref-count is correct for this run.
@@ -429,21 +568,30 @@ func (m *UserManager) EnsureUser(username string, perms IdentityPermissions) err
 // reaches zero, the Linux user is deleted with "userdel -r <username>" and
 // the username is removed from the state file.
 func (m *UserManager) ReleaseUser(username string) error {
+	// Phase 1 (global lock, fast): session bookkeeping only.
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if m.sessions[username] <= 0 {
-		slog.Warn("ReleaseUser called for untracked username", "username", username)
-		return nil
+		m.mu.Unlock()
+		return fmt.Errorf("ReleaseUser called for untracked username %q: indicates a session accounting bug", username)
 	}
-
 	m.sessions[username]--
 	if m.sessions[username] > 0 {
-		slog.Info("session released, user still active", "username", username, "sessions", m.sessions[username])
+		remaining := m.sessions[username]
+		m.mu.Unlock()
+		slog.Info("session released, user still active", "username", username, "sessions", remaining)
 		return nil
 	}
-
 	delete(m.sessions, username)
+	delete(m.owners, username)
+	ul := m.userLocks[username]
+	m.mu.Unlock()
+
+	// Phase 2 (per-user lock only): slow OS operations. The global lock is not
+	// held here, so other usernames proceed concurrently.
+	if ul != nil {
+		ul.Lock()
+		defer ul.Unlock()
+	}
 
 	if !m.cleanupOnDisconnect {
 		slog.Info("last session closed, cleanup disabled — keeping Linux user", "username", username)
@@ -452,7 +600,7 @@ func (m *UserManager) ReleaseUser(username string) error {
 		if err := removeSudoers(username); err != nil {
 			slog.Error("failed to remove sudoers file", "username", username, "err", err)
 		}
-		if err := m.removeFromStateFile(username); err != nil {
+		if err := m.syncStateFile(); err != nil {
 			slog.Error("failed to update state file", "username", username, "err", err)
 		}
 		return nil
@@ -463,7 +611,7 @@ func (m *UserManager) ReleaseUser(username string) error {
 		return err
 	}
 
-	if err := m.removeFromStateFile(username); err != nil {
+	if err := m.syncStateFile(); err != nil {
 		slog.Error("failed to update state file after deletion", "username", username, "err", err)
 		// Non-fatal.
 	}
@@ -498,6 +646,14 @@ func (m *UserManager) CleanupOrphans() error {
 		if username == "" {
 			continue
 		}
+		if !m.cleanupOnDisconnect {
+			// Users are intentionally persistent; do not delete them on
+			// restart. Clear the state file so they are no longer tracked
+			// by this process instance — they will not be cleaned up on the
+			// next restart either, which is the correct behaviour.
+			slog.Info("cleanup disabled; skipping orphan user deletion on restart", "username", username)
+			continue
+		}
 		slog.Info("cleaning up orphan user", "username", username)
 		if err := deleteUser(username); err != nil {
 			slog.Error("failed to delete orphan user", "username", username, "err", err)
@@ -514,17 +670,58 @@ func (m *UserManager) CleanupOrphans() error {
 	return m.writeStateFile(remaining)
 }
 
+// ValidateSudoersRule checks that rule is safe to embed in a sudoers file as
+// the fragment following a username:
+//
+//	<username> <rule>\n
+//
+// Rejected values:
+//   - newlines or carriage returns — a second line can grant permissions to
+//     users other than the target, and visudo accepts multi-line files
+//   - a leading '#' — sudo treats #include / #includedir as include directives
+//     even inside files sourced via #includedir; a bare '#' also starts a
+//     comment that terminates the effective rule
+//   - known sudoers keywords (@include, Defaults, *_Alias) — these are valid
+//     sudoers directives that must not appear as rule fragments
+func ValidateSudoersRule(rule string) error {
+	if strings.ContainsAny(rule, "\n\r") {
+		return fmt.Errorf("sudoers_rule must not contain newlines")
+	}
+	trimmed := strings.TrimSpace(rule)
+	if strings.HasPrefix(trimmed, "#") {
+		return fmt.Errorf("sudoers_rule must not start with '#'")
+	}
+	for _, kw := range []string{"@include", "Defaults", "Cmnd_Alias", "Host_Alias", "User_Alias", "Runas_Alias"} {
+		if strings.HasPrefix(trimmed, kw) {
+			return fmt.Errorf("sudoers_rule must not start with %q", kw)
+		}
+	}
+	return nil
+}
+
+// sudoersStagingDir is a hidden subdirectory inside /etc/sudoers.d used as a
+// staging area for new sudoers files. sudo's #includedir directive only reads
+// regular files — subdirectories are skipped — so temp files here are never
+// parsed by sudo. The leading dot is an additional exclusion. Staging inside
+// /etc/sudoers.d guarantees the final os.Rename is atomic (same filesystem).
+const sudoersStagingDir = "/etc/sudoers.d/.ziti-ssh-host-staging"
+
 // createSudoers writes a validated sudoers file to /etc/sudoers.d/<username>.
 //
-// The file content is "<username> <rule>\n". The rule is validated by running
-// "visudo -c -f <tempfile>" before the file is moved into place. On validation
-// failure the temp file is removed and an error is returned. On success the
-// file is placed at /etc/sudoers.d/<username> with mode 0440.
+// The file content is "<username> <rule>\n". It is staged in sudoersStagingDir
+// (a hidden subdirectory of /etc/sudoers.d that sudo ignores), validated with
+// "visudo -c -f", then atomically renamed into place at mode 0440.
 func createSudoers(username, rule string) error {
+	if err := ValidateSudoersRule(rule); err != nil {
+		return fmt.Errorf("invalid sudoers rule for %q: %w", username, err)
+	}
 	content := fmt.Sprintf("%s %s\n", username, rule)
 
-	// Write to a temp file first so we can validate before installing.
-	tmp, err := os.CreateTemp("/etc/sudoers.d", "sudoers-"+username+"-*")
+	// Stage outside the active include path so sudo never parses the temp file.
+	if err := os.MkdirAll(sudoersStagingDir, 0700); err != nil {
+		return fmt.Errorf("create sudoers staging dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(sudoersStagingDir, "sudoers-"+username+"-*")
 	if err != nil {
 		return fmt.Errorf("create sudoers temp file: %w", err)
 	}
@@ -537,7 +734,13 @@ func createSudoers(username, rule string) error {
 	}
 	tmp.Close()
 
-	// visudo -c -f validates the file syntax without installing it.
+	// chmod before visudo so validation runs with the permissions sudo sees.
+	if err := os.Chmod(tmpPath, 0440); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("chmod sudoers temp file: %w", err)
+	}
+
+	// visudo -c -f validates syntax without installing the file.
 	visudo := exec.Command("visudo", "-c", "-f", tmpPath)
 	visudo.Env = childEnv()
 	if out, err := visudo.CombinedOutput(); err != nil {
@@ -545,14 +748,8 @@ func createSudoers(username, rule string) error {
 		return fmt.Errorf("visudo validation failed for %q: %w (output: %s)", username, err, out)
 	}
 
+	// Atomic rename — same filesystem as the staging dir.
 	dest := "/etc/sudoers.d/" + username
-
-	// Set mode 0440 before moving into place.
-	if err := os.Chmod(tmpPath, 0440); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("chmod sudoers temp file: %w", err)
-	}
-
 	if err := os.Rename(tmpPath, dest); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("install sudoers file to %q: %w", dest, err)
@@ -574,6 +771,30 @@ func removeSudoers(username string) error {
 
 // deleteUser drains the user's systemd session, waits for all owned processes
 // to exit, then removes the user and their home directory with userdel -r.
+// userProcessesGone polls pgrep until no processes owned by username remain or
+// the timeout elapses. Returns true when the user has no remaining processes.
+func userProcessesGone(username string, timeout time.Duration) bool {
+	const pollInterval = 200 * time.Millisecond
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		pgrep := exec.Command("pgrep", "-u", username)
+		pgrep.Env = childEnv()
+		err := pgrep.Run()
+		if err != nil {
+			// pgrep exits 1 when no processes match — user is clear.
+			if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+				return true
+			}
+			// Unexpected pgrep error (e.g. command not found) — stop polling.
+			slog.Warn("pgrep error while waiting for user processes to exit",
+				"username", username, "err", err)
+			return false
+		}
+		time.Sleep(pollInterval)
+	}
+	return false
+}
+
 func deleteUser(username string) error {
 	// Remove the sudoers file before tearing down the account.
 	if err := removeSudoers(username); err != nil {
@@ -590,93 +811,118 @@ func deleteUser(username string) error {
 			"username", username, "err", err, "output", strings.TrimSpace(string(out)))
 	}
 
-	// Step 2: poll until no processes owned by the user remain, or timeout.
-	const (
-		pollInterval = 200 * time.Millisecond
-		pollTimeout  = 5 * time.Second
-	)
-	deadline := time.Now().Add(pollTimeout)
-	for time.Now().Before(deadline) {
-		pgrep := exec.Command("pgrep", "-u", username)
-		pgrep.Env = childEnv()
-		err := pgrep.Run()
-		if err != nil {
-			// pgrep exits 1 when no processes match — user is clear.
-			if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-				break
-			}
-			// Any other error from pgrep (e.g. command not found) — stop
-			// polling and proceed; userdel will surface the real problem.
-			slog.Warn("pgrep error while waiting for user processes to exit",
-				"username", username, "err", err)
-			break
+	// Step 2: wait up to 5 s for session processes to exit naturally.
+	if !userProcessesGone(username, 5*time.Second) {
+		// Step 3: escalate to SIGTERM for detached processes (nohup, screen,
+		// tmux) that loginctl does not reach.
+		slog.Info("user processes still running after loginctl; sending SIGTERM", "username", username)
+		pkillTerm := exec.Command("pkill", "-TERM", "-u", username)
+		pkillTerm.Env = childEnv()
+		if out, err := pkillTerm.CombinedOutput(); err != nil {
+			slog.Info("pkill -TERM returned non-zero (ignored)",
+				"username", username, "err", err, "output", strings.TrimSpace(string(out)))
 		}
-		// pgrep exited 0 — processes still exist; wait and retry.
-		time.Sleep(pollInterval)
-	}
-	if !time.Now().Before(deadline) {
-		slog.Warn("timed out waiting for user processes to exit, proceeding with userdel",
-			"username", username, "timeout", pollTimeout)
+
+		// Step 4: wait up to 10 s for SIGTERM to take effect.
+		if !userProcessesGone(username, 10*time.Second) {
+			// Step 5: escalate to SIGKILL — cannot be caught or ignored.
+			slog.Warn("user processes still running after SIGTERM; sending SIGKILL", "username", username)
+			pkillKill := exec.Command("pkill", "-KILL", "-u", username)
+			pkillKill.Env = childEnv()
+			if out, err := pkillKill.CombinedOutput(); err != nil {
+				slog.Info("pkill -KILL returned non-zero (ignored)",
+					"username", username, "err", err, "output", strings.TrimSpace(string(out)))
+			}
+
+			// Step 6: wait up to 5 s for the kernel to reap SIGKILL'd processes.
+			if !userProcessesGone(username, 5*time.Second) {
+				slog.Warn("user processes still running after SIGKILL; proceeding with userdel",
+					"username", username)
+			}
+		}
 	}
 
-	// Step 3: remove the user and their home directory.
+	// Step 7: remove the user and their home directory.
 	cmd := exec.Command("userdel", "-r", username)
 	cmd.Env = childEnv()
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 8 {
+			// Exit code 8: user still has running processes. The account and
+			// home directory were NOT deleted. The caller should retry after
+			// the processes exit.
+			return fmt.Errorf("userdel %q: user still has running processes; account not deleted (exit 8): %s",
+				username, strings.TrimSpace(string(out)))
+		}
 		return fmt.Errorf("userdel -r %q: %w (output: %s)", username, err, out)
 	}
 	slog.Info("deleted Linux user", "username", username)
 	return nil
 }
 
-// addToStateFile appends username to the state file (one entry per line).
-// Parent directories are created as needed.
-func (m *UserManager) addToStateFile(username string) error {
-	if err := os.MkdirAll(filepath.Dir(m.stateFile), 0755); err != nil {
-		return fmt.Errorf("create state file dir: %w", err)
+// syncStateFile atomically rewrites the state file from the current contents
+// of m.sessions. It briefly acquires m.mu to take a consistent snapshot, then
+// releases it before performing file I/O — so callers must not hold m.mu.
+//
+// This replaces both the old addToStateFile (append) and removeFromStateFile
+// (read-filter-rewrite) with a single always-correct snapshot: the in-memory
+// sessions map is the source of truth, so there is no need to read the file
+// and no risk of divergence between the file and the map.
+func (m *UserManager) syncStateFile() error {
+	m.mu.Lock()
+	lines := make([]string, 0, len(m.sessions))
+	for username := range m.sessions {
+		lines = append(lines, username)
 	}
-	f, err := os.OpenFile(m.stateFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("open state file %q: %w", m.stateFile, err)
-	}
-	defer f.Close()
-	_, err = fmt.Fprintln(f, username)
-	return err
+	m.mu.Unlock()
+	return m.writeStateFile(lines)
 }
 
-// removeFromStateFile rewrites the state file omitting username.
-func (m *UserManager) removeFromStateFile(username string) error {
-	data, err := os.ReadFile(m.stateFile)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("read state file %q: %w", m.stateFile, err)
-	}
-
-	scanner := bufio.NewScanner(strings.NewReader(string(data)))
-	var keep []string
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" && line != username {
-			keep = append(keep, line)
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scan state file: %w", err)
-	}
-
-	return m.writeStateFile(keep)
-}
-
-// writeStateFile atomically replaces the state file contents with lines.
+// writeStateFile atomically replaces the state file with lines.
+// It writes to a temp file in the same directory, fsyncs, renames, then
+// fsyncs the parent directory — so a crash at any point leaves either the old
+// or the new file fully intact, never a zero-length or partially-written file.
 func (m *UserManager) writeStateFile(lines []string) error {
-	if err := os.MkdirAll(filepath.Dir(m.stateFile), 0755); err != nil {
+	dir := filepath.Dir(m.stateFile)
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("create state file dir: %w", err)
 	}
 	content := strings.Join(lines, "\n")
 	if len(lines) > 0 {
 		content += "\n"
 	}
-	return os.WriteFile(m.stateFile, []byte(content), 0644)
+	tmp, err := os.CreateTemp(dir, ".managed-users-tmp-*")
+	if err != nil {
+		return fmt.Errorf("create state file temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.WriteString(content); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write state file temp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("sync state file temp: %w", err)
+	}
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("chmod state file temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("close state file temp: %w", err)
+	}
+	if err := os.Rename(tmpPath, m.stateFile); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename state file: %w", err)
+	}
+	// Fsync the parent directory to make the rename durable across power loss.
+	if dirF, err := os.Open(dir); err == nil {
+		_ = dirF.Sync()
+		dirF.Close()
+	}
+	return nil
 }

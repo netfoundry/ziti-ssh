@@ -277,7 +277,7 @@ func runSign(p signParams) error {
 	}
 
 	certPath := deriveCertPath(privKeyPath)
-	if err := os.WriteFile(certPath, []byte(certLine+"\n"), 0644); err != nil {
+	if err := config.AtomicWriteFile(certPath, []byte(certLine+"\n"), 0644); err != nil {
 		return fmt.Errorf("write certificate to %q: %w", certPath, err)
 	}
 
@@ -322,7 +322,7 @@ func runEnroll(jwtPath, outPath string) error {
 	if err != nil {
 		return fmt.Errorf("marshal identity config: %w", err)
 	}
-	if err := os.WriteFile(outPath, cfgJSON, 0600); err != nil {
+	if err := config.AtomicWriteFile(outPath, cfgJSON, 0600); err != nil {
 		return fmt.Errorf("write identity file %q: %w", outPath, err)
 	}
 

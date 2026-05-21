@@ -13,6 +13,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -253,7 +254,7 @@ func runEnroll(jwtPath, identityFile string) error {
 	if err != nil {
 		return fmt.Errorf("marshal identity config: %w", err)
 	}
-	if err := os.WriteFile(identityFile, cfgJSON, 0600); err != nil {
+	if err := config.AtomicWriteFile(identityFile, cfgJSON, 0600); err != nil {
 		return fmt.Errorf("write identity file %q: %w", identityFile, err)
 	}
 	slog.Info("identity enrolled", "path", identityFile)
@@ -456,8 +457,22 @@ func intCAFromController(controllerURL string, rootPool *x509.CertPool) (*x509.C
 			"selfSigned", cert.Subject.String() == cert.Issuer.String())
 	}
 
+	if len(state.PeerCertificates) == 0 {
+		return nil, fmt.Errorf("no certificates in TLS chain from %q", host)
+	}
+	leaf := state.PeerCertificates[0]
+	// Walk the chain and pick the cert whose Subject matches the leaf's Issuer
+	// field. Raw-bytes comparison avoids encoding differences that string
+	// formatting can obscure, and correctly identifies the signing intermediate
+	// even when the chain contains cross-signed or multiple intermediate certs.
+	for _, cert := range state.PeerCertificates[1:] {
+		if cert.IsCA && bytes.Equal(cert.RawSubject, leaf.RawIssuer) {
+			return cert, nil
+		}
+	}
+	// Fallback to the original heuristic for unusual chain orderings.
 	for _, cert := range state.PeerCertificates {
-		if cert.IsCA && cert.Subject.String() != cert.Issuer.String() {
+		if cert.IsCA && !bytes.Equal(cert.RawSubject, cert.RawIssuer) {
 			return cert, nil
 		}
 	}
@@ -674,11 +689,40 @@ func loadPermissionsConfig(zitiCtx ziti.Context, serviceName string) (*host.Perm
 		Permissions: make(map[string]host.IdentityPermissions, len(wire.Permissions)),
 	}
 	for identity, entry := range wire.Permissions {
+		if entry.SudoersRule != "" {
+			if err := host.ValidateSudoersRule(entry.SudoersRule); err != nil {
+				return nil, fmt.Errorf("service %q config: identity %q: %w", serviceName, identity, err)
+			}
+		}
 		pc.Permissions[identity] = host.IdentityPermissions{
 			Groups:      entry.Groups,
 			SudoersRule: entry.SudoersRule,
 		}
 	}
+	// Validate that no two explicit (non-glob) config keys derive to the same
+	// Linux username. A collision allows one Ziti identity to connect as another
+	// identity's Linux account, potentially inheriting elevated permissions.
+	// Glob patterns are skipped — they match many identities and have no single
+	// derived username. Runtime collision detection in UserManager.EnsureUser
+	// handles the glob case.
+	derived := make(map[string]string, len(pc.Permissions))
+	var collisions []string
+	for identity := range pc.Permissions {
+		if strings.ContainsAny(identity, "*?") {
+			continue
+		}
+		uname := ca.DeriveUsername(identity)
+		if prev, exists := derived[uname]; exists {
+			collisions = append(collisions, fmt.Sprintf("%q and %q both derive to %q", prev, identity, uname))
+		} else {
+			derived[uname] = identity
+		}
+	}
+	if len(collisions) > 0 {
+		return nil, fmt.Errorf("service %q config has username collisions (fix or remove one of each pair): %s",
+			serviceName, strings.Join(collisions, "; "))
+	}
+
 	slog.Info("loaded ziti-ssh-host.v1 config", "service", serviceName, "identities", len(pc.Permissions))
 	return pc, nil
 }
@@ -922,7 +966,7 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 						"username", username,
 						"groups", perms.Groups,
 						"has_sudoers", perms.SudoersRule != "")
-					return mgr.EnsureUser(username, perms)
+					return mgr.EnsureUser(zitiIdentity, username, perms)
 				},
 				OnDisconnect: func(zitiIdentity string) {
 					username := ca.DeriveUsername(zitiIdentity)
@@ -958,6 +1002,10 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 	go func() {
 		sig := <-sigCh
 		slog.Info("received signal, stopping proxy listeners", "signal", sig)
+		// Restore default signal handling so a second SIGINT/SIGTERM exits
+		// immediately if the drain hangs (instead of being silently swallowed
+		// by the now-drained channel).
+		signal.Reset(syscall.SIGTERM, syscall.SIGINT)
 		if _, err := daemon.SdNotify(false, "STOPPING=1"); err != nil {
 			slog.Debug("sd_notify STOPPING failed", "err", err)
 		}
