@@ -557,17 +557,26 @@ func (m *UserManager) CleanupOrphans() error {
 	return m.writeStateFile(remaining)
 }
 
+// sudoersStagingDir is a hidden subdirectory inside /etc/sudoers.d used as a
+// staging area for new sudoers files. sudo's #includedir directive only reads
+// regular files — subdirectories are skipped — so temp files here are never
+// parsed by sudo. The leading dot is an additional exclusion. Staging inside
+// /etc/sudoers.d guarantees the final os.Rename is atomic (same filesystem).
+const sudoersStagingDir = "/etc/sudoers.d/.ziti-ssh-host-staging"
+
 // createSudoers writes a validated sudoers file to /etc/sudoers.d/<username>.
 //
-// The file content is "<username> <rule>\n". The rule is validated by running
-// "visudo -c -f <tempfile>" before the file is moved into place. On validation
-// failure the temp file is removed and an error is returned. On success the
-// file is placed at /etc/sudoers.d/<username> with mode 0440.
+// The file content is "<username> <rule>\n". It is staged in sudoersStagingDir
+// (a hidden subdirectory of /etc/sudoers.d that sudo ignores), validated with
+// "visudo -c -f", then atomically renamed into place at mode 0440.
 func createSudoers(username, rule string) error {
 	content := fmt.Sprintf("%s %s\n", username, rule)
 
-	// Write to a temp file first so we can validate before installing.
-	tmp, err := os.CreateTemp("/etc/sudoers.d", "sudoers-"+username+"-*")
+	// Stage outside the active include path so sudo never parses the temp file.
+	if err := os.MkdirAll(sudoersStagingDir, 0700); err != nil {
+		return fmt.Errorf("create sudoers staging dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(sudoersStagingDir, "sudoers-"+username+"-*")
 	if err != nil {
 		return fmt.Errorf("create sudoers temp file: %w", err)
 	}
@@ -580,7 +589,13 @@ func createSudoers(username, rule string) error {
 	}
 	tmp.Close()
 
-	// visudo -c -f validates the file syntax without installing it.
+	// chmod before visudo so validation runs with the permissions sudo sees.
+	if err := os.Chmod(tmpPath, 0440); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("chmod sudoers temp file: %w", err)
+	}
+
+	// visudo -c -f validates syntax without installing the file.
 	visudo := exec.Command("visudo", "-c", "-f", tmpPath)
 	visudo.Env = childEnv()
 	if out, err := visudo.CombinedOutput(); err != nil {
@@ -588,14 +603,8 @@ func createSudoers(username, rule string) error {
 		return fmt.Errorf("visudo validation failed for %q: %w (output: %s)", username, err, out)
 	}
 
+	// Atomic rename — same filesystem as the staging dir.
 	dest := "/etc/sudoers.d/" + username
-
-	// Set mode 0440 before moving into place.
-	if err := os.Chmod(tmpPath, 0440); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("chmod sudoers temp file: %w", err)
-	}
-
 	if err := os.Rename(tmpPath, dest); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("install sudoers file to %q: %w", dest, err)
