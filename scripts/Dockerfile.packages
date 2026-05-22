@@ -1,7 +1,14 @@
 FROM golang:1.25-bookworm
 
+ARG VERSION=0.1.0
+ARG FORMAT=deb,rpm
+ARG ARCHS=amd64
+
+ENV VERSION=${VERSION} FORMAT=${FORMAT} ARCHS=${ARCHS}
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        dpkg-dev \
+        ca-certificates \
+        curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -9,7 +16,4 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 
-ARG VERSION=0.1.0
-ENV VERSION=${VERSION}
-
-RUN scripts/build-deb.sh
+RUN scripts/build-packages.sh

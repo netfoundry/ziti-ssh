@@ -1,0 +1,75 @@
+name: Prerelease
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  NF_DEB_TEST_REPO: ${{ vars.NF_DEB_TEST_REPO || 'nfpax-netfoundry-deb-test' }}
+  NF_RPM_TEST_REPO: ${{ vars.NF_RPM_TEST_REPO || 'nfpax-netfoundry-rpm-test' }}
+  JFROG_CLI_VERSION: ${{ vars.JFROG_CLI_VERSION || '2.78.2' }}
+  NFPM_VERSION: ${{ vars.NFPM_VERSION || '2.38.0' }}
+
+jobs:
+  build_and_publish:
+    name: Build & Publish Packages
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install nfpm
+        run: |
+          curl -sfL \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" \
+            | tar -xz -C /usr/local/bin nfpm
+
+      - name: Configure jFrog CLI
+        uses: jfrog/setup-jfrog-cli@v4
+        with:
+          version: ${{ env.JFROG_CLI_VERSION }}
+          oidc-provider-name: nf-github-actions-setup-jfrog-cli
+        env:
+          JF_URL: https://netfoundry.jfrog.io
+
+      - name: Build packages
+        run: |
+          VERSION=${GITHUB_REF_NAME#v} ARCHS=amd64,arm64 ./scripts/build-packages.sh
+
+      - name: Upload DEBs to test repo
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          for pkg in ziti-ssh ziti-scp ziti-ssh-ca ziti-ssh-host; do
+            for arch in amd64 arm64; do
+              jf rt upload \
+                "dist/${pkg}_${VERSION}-1_${arch}.deb" \
+                "${NF_DEB_TEST_REPO}/pool/${pkg}/${arch}/"
+            done
+          done
+
+      - name: Upload RPMs to test repo
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          declare -A RPM_ARCH=([amd64]=x86_64 [arm64]=aarch64)
+          for pkg in ziti-ssh ziti-scp ziti-ssh-ca ziti-ssh-host; do
+            for arch in amd64 arm64; do
+              jf rt upload \
+                "dist/${pkg}-${VERSION}-1.${RPM_ARCH[$arch]}.rpm" \
+                "${NF_RPM_TEST_REPO}/redhat/${RPM_ARCH[$arch]}/"
+            done
+          done
+
+      - name: Create GitHub prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          prerelease: true

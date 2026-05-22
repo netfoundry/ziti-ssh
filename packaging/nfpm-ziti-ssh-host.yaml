@@ -1,0 +1,36 @@
+name: "ziti-ssh-host"
+arch: "${NFPM_ARCH}"
+platform: "linux"
+version: "${VERSION}"
+release: "1"
+maintainer: "NetFoundry Inc. <support@netfoundry.io>"
+description: |
+  Ziti SSH host proxy daemon.
+  Enrolls an SSH host into an OpenZiti network, configures sshd to trust
+  the Ziti CA, and proxies inbound Ziti connections to the local sshd.
+  Port 22 is never exposed externally; all access is through the Ziti
+  overlay. Run "ziti-ssh-host enroll --jwt <path>" once, then start the
+  service.
+homepage: "https://github.com/netfoundry/ziti-ssh"
+license: "Apache-2.0"
+
+depends:
+  - systemd
+  - openssh-server
+
+contents:
+  - src: "dist/binaries/ziti-ssh-host"
+    dst: /usr/local/bin/ziti-ssh-host
+    file_info:
+      mode: 0755
+  - src: packaging/systemd/ziti-ssh-host.service
+    dst: /usr/lib/systemd/system/ziti-ssh-host.service
+    file_info:
+      mode: 0644
+  - dst: /etc/ziti-ssh-host
+    type: dir
+    file_info:
+      mode: 0700
+
+scripts:
+  postinstall: packaging/scripts/postinstall-ziti-ssh-host.sh

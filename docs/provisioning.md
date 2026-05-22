@@ -6,7 +6,7 @@ For end-user usage see [usage.md](usage.md). For a full flag and config referenc
 
 ---
 
-For installation options — including pre-built binary downloads, Docker-based .deb builds, and local builds — see [building.md](building.md).
+For installation options — including the package repository, Docker-based builds, and local builds — see [building.md](building.md).
 
 ---
 
@@ -129,13 +129,17 @@ The identity name chosen for each host (`web-server-prod` above) is the address 
 
 ### 1. Install the package
 
-Build or copy `dist/ziti-ssh-ca_<version>_amd64.deb` to the controller host, then install it:
-
 ```sh
-dpkg -i ziti-ssh-ca_<version>_amd64.deb
+curl -sSL https://get.netfoundry.io/linux-install.bash | sudo bash -s ziti-ssh-ca
 ```
 
-The postinst script creates `/etc/ziti-ssh-ca/env` (mode 0640) with all variables commented out, and runs `systemctl daemon-reload`.
+Or install from a locally built package:
+
+```sh
+dpkg -i ziti-ssh-ca_<version>-1_<arch>.deb
+```
+
+The postinstall script creates `/etc/ziti-ssh-ca/env` (mode 0640) with all variables commented out, and runs `systemctl daemon-reload`.
 
 ### 2. Locate the Ziti controller intermediate CA private key
 
@@ -257,13 +261,17 @@ Use any existing account — just set `--principal` on the CA to match.
 
 ### 2. Install the package
 
-Build or copy `dist/ziti-ssh-host_<version>_amd64.deb` to the target host, then install it:
-
 ```sh
-dpkg -i ziti-ssh-host_<version>_amd64.deb
+curl -sSL https://get.netfoundry.io/linux-install.bash | sudo bash -s ziti-ssh-host
 ```
 
-The postinst script creates `/etc/ziti-ssh-host/env` (mode 0640) with all variables commented out, and runs `systemctl daemon-reload`.
+Or install from a locally built package:
+
+```sh
+dpkg -i ziti-ssh-host_<version>-1_<arch>.deb
+```
+
+The postinstall script creates `/etc/ziti-ssh-host/env` (mode 0640) with all variables commented out, and runs `systemctl daemon-reload`.
 
 ### 3. Enroll a Ziti identity for the host
 
@@ -427,12 +435,17 @@ Each user needs a Ziti identity enrolled on their machine and the `ziti-ssh` (an
 
 ### 1. Install the client packages
 
-Build or copy `dist/ziti-ssh_<version>_amd64.deb` (and `dist/ziti-scp_<version>_amd64.deb` if needed) to the user's machine, then install:
+```sh
+curl -sSL https://get.netfoundry.io/linux-install.bash | sudo bash -s ziti-ssh
+# Optional file copy tool:
+curl -sSL https://get.netfoundry.io/linux-install.bash | sudo bash -s ziti-scp
+```
+
+Or install from locally built packages:
 
 ```sh
-dpkg -i ziti-ssh_<version>_amd64.deb
-# Optional file copy tool:
-dpkg -i ziti-scp_<version>_amd64.deb
+dpkg -i ziti-ssh_<version>-1_<arch>.deb
+dpkg -i ziti-scp_<version>-1_<arch>.deb
 ```
 
 Both packages depend on `openssh-client`. No systemd unit is installed — `ziti-ssh` and `ziti-scp` are CLI tools.

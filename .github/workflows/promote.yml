@@ -1,0 +1,85 @@
+name: Promote Stable Release
+
+on:
+  workflow_dispatch:
+  release:
+    types: [released]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  enforce_stable_semver:
+    name: Require Stable Release Semver
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+    steps:
+      - name: Parse Release Version
+        id: parse
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" | tee -a $GITHUB_OUTPUT
+          else
+            echo "${GITHUB_REF_NAME} is not a stable semver tag" >&2
+            exit 1
+          fi
+
+  promote_artifactory:
+    name: Promote ${{ matrix.package }}-${{ matrix.arch.deb }}.${{ matrix.format }}
+    needs: enforce_stable_semver
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+    strategy:
+      fail-fast: true
+      matrix:
+        package:
+          - ziti-ssh
+          - ziti-scp
+          - ziti-ssh-ca
+          - ziti-ssh-host
+        arch:
+          - deb: amd64
+            rpm: x86_64
+          - deb: arm64
+            rpm: aarch64
+        format:
+          - deb
+          - rpm
+    env:
+      NF_DEB_TEST_REPO: ${{ vars.NF_DEB_TEST_REPO || 'nfpax-netfoundry-deb-test' }}
+      NF_RPM_TEST_REPO: ${{ vars.NF_RPM_TEST_REPO || 'nfpax-netfoundry-rpm-test' }}
+      NF_DEB_STABLE_REPO: ${{ vars.NF_DEB_STABLE_REPO || 'nfpax-netfoundry-deb-stable' }}
+      NF_RPM_STABLE_REPO: ${{ vars.NF_RPM_STABLE_REPO || 'nfpax-netfoundry-rpm-stable' }}
+      JFROG_CLI_VERSION: ${{ vars.JFROG_CLI_VERSION || '2.78.2' }}
+    steps:
+      - name: Configure jFrog CLI
+        uses: jfrog/setup-jfrog-cli@v4
+        with:
+          version: ${{ env.JFROG_CLI_VERSION }}
+          oidc-provider-name: nf-github-actions-setup-jfrog-cli
+        env:
+          JF_URL: https://netfoundry.jfrog.io
+
+      - name: Promote DEB
+        if: matrix.format == 'deb'
+        run: >
+          jf rt copy
+          --recursive=false
+          --flat=true
+          --fail-no-op=true
+          ${{ env.NF_DEB_TEST_REPO }}/pool/${{ matrix.package }}/${{ matrix.arch.deb }}/${{ matrix.package }}_${{ needs.enforce_stable_semver.outputs.version }}-1_${{ matrix.arch.deb }}.deb
+          ${{ env.NF_DEB_STABLE_REPO }}/pool/${{ matrix.package }}/${{ matrix.arch.deb }}/
+
+      - name: Promote RPM
+        if: matrix.format == 'rpm'
+        run: >
+          jf rt copy
+          --recursive=false
+          --flat=true
+          --fail-no-op=true
+          ${{ env.NF_RPM_TEST_REPO }}/redhat/${{ matrix.arch.rpm }}/${{ matrix.package }}-${{ needs.enforce_stable_semver.outputs.version }}-1.${{ matrix.arch.rpm }}.rpm
+          ${{ env.NF_RPM_STABLE_REPO }}/redhat/${{ matrix.arch.rpm }}/

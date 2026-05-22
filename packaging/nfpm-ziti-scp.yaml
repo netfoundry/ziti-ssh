@@ -1,0 +1,27 @@
+name: "ziti-scp"
+arch: "${NFPM_ARCH}"
+platform: "linux"
+version: "${VERSION}"
+release: "1"
+maintainer: "NetFoundry Inc. <support@netfoundry.io>"
+description: |
+  Ziti SCP file copy tool with certificate-based authentication.
+  A secure file copy tool that operates over an OpenZiti network using
+  the SFTP subsystem. Mirrors scp(1) behaviour but all traffic flows
+  through the Ziti overlay — port 22 is never exposed externally.
+  Shares the same identity, certificate, and config infrastructure as
+  ziti-ssh.
+homepage: "https://github.com/netfoundry/ziti-ssh"
+license: "Apache-2.0"
+
+depends:
+  - openssh-client
+
+contents:
+  - src: "dist/binaries/ziti-scp"
+    dst: /usr/local/bin/ziti-scp
+    file_info:
+      mode: 0755
+
+scripts:
+  postinstall: packaging/scripts/postinstall-ziti-scp.sh

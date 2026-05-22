@@ -1,0 +1,34 @@
+name: "ziti-ssh-ca"
+arch: "${NFPM_ARCH}"
+platform: "linux"
+version: "${VERSION}"
+release: "1"
+maintainer: "NetFoundry Inc. <support@netfoundry.io>"
+description: |
+  Ziti SSH Certificate Authority service.
+  Signs short-lived SSH certificates for callers authenticated via an
+  OpenZiti network. Uses the Ziti controller CA private key so that the
+  same trust root covers both Ziti identity certificates and SSH
+  certificates. Runs co-located with the Ziti controller.
+homepage: "https://github.com/netfoundry/ziti-ssh"
+license: "Apache-2.0"
+
+depends:
+  - systemd
+
+contents:
+  - src: "dist/binaries/ziti-ssh-ca"
+    dst: /usr/local/bin/ziti-ssh-ca
+    file_info:
+      mode: 0755
+  - src: packaging/systemd/ziti-ssh-ca.service
+    dst: /usr/lib/systemd/system/ziti-ssh-ca.service
+    file_info:
+      mode: 0644
+  - dst: /etc/ziti-ssh-ca
+    type: dir
+    file_info:
+      mode: 0755
+
+scripts:
+  postinstall: packaging/scripts/postinstall-ziti-ssh-ca.sh

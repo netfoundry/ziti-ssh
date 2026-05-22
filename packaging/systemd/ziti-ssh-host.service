@@ -1,0 +1,19 @@
+[Unit]
+Description=Ziti SSH Host Proxy
+Documentation=https://github.com/netfoundry/ziti-ssh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+# Runs as root: writes /etc/ssh/ during enrollment and proxies connections
+# to the local sshd. The identity file is stored in /etc/ziti-ssh-host/
+# (mode 0700) and is only readable by root.
+User=root
+EnvironmentFile=-/etc/ziti-ssh-host/env
+ExecStart=/usr/local/bin/ziti-ssh-host run
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
