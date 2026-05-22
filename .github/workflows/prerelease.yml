@@ -51,6 +51,9 @@ jobs:
           for pkg in ziti-ssh ziti-scp ziti-ssh-ca ziti-ssh-host; do
             for arch in amd64 arm64; do
               jf rt upload \
+                --flat=true \
+                --recursive=false \
+                --deb "debian/main/${arch}" \
                 "dist/${pkg}_${VERSION}-1_${arch}.deb" \
                 "${NF_DEB_TEST_REPO}/pool/${pkg}/${arch}/"
             done
@@ -63,6 +66,8 @@ jobs:
           for pkg in ziti-ssh ziti-scp ziti-ssh-ca ziti-ssh-host; do
             for arch in amd64 arm64; do
               jf rt upload \
+                --flat=true \
+                --recursive=false \
                 "dist/${pkg}-${VERSION}-1.${RPM_ARCH[$arch]}.rpm" \
                 "${NF_RPM_TEST_REPO}/redhat/${RPM_ARCH[$arch]}/"
             done
