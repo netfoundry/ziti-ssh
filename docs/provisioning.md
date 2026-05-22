@@ -186,7 +186,7 @@ ZITI_CA_KEY=/var/lib/ziti-controller/pki/intermediate-ca/keys/intermediate-ca.ke
 ZITI_CA_SERVICE=ssh-ca
 ZITI_SSH_MODE=shared
 ZITI_SSH_PRINCIPAL=ziggy
-# ZITI_CERT_TTL=8h   # optional; 8h is the default
+# ZITI_CERT_TTL=5m   # optional; 5m is the default
 ```
 
 `ZITI_SSH_MODE` must match the value set on `ziti-ssh-host run`. See [Modes](operations.md#modes) for a full explanation.

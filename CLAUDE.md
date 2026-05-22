@@ -71,7 +71,7 @@ Any Ziti identity that can dial the `ssh-ca` service is authorized to receive a 
 ### Ziti service config IS the permission scope
 Per-identity Linux permissions (groups, sudoers rules) are stored as a `ziti-ssh-host.v1` config attached to the Ziti service. The service boundary is therefore the permission scope boundary — the same boundary already used for access control. Different services can carry different permission sets, enabling role-tiered deployments where, for example, DB admins and ops teams can both reach a database host but with different Linux permissions.
 
-### Short-lived certificates (8h TTL)
+### Short-lived certificates (5m TTL)
 Certificates expire after 8 hours. No revocation infrastructure needed — compromised or removed identities lose access at expiry without any intervention on SSH hosts.
 
 ### `ziti-ssh` and `ziti-scp` as client tools
@@ -155,7 +155,7 @@ Three modes of operation: a long-running service, a one-shot `enroll` command, a
 - Returns the signed certificate (authorized_keys format)
 - If the request body is empty, returns the CA public key instead (used by hosts during enrollment)
 - Embeds the Ziti identity name as the certificate Key ID (for audit logging)
-- Issues certs with a configurable principal (default: `ziggy`) and 8h validity
+- Issues certs with a configurable principal (default: `ziggy`) and 5m validity
 - Enforces a per-identity token-bucket rate limit (default: 5 req/min, burst 3)
 
 **`enroll` subcommand** — enrolls the CA server's Ziti identity from a one-time JWT file. Writes the identity JSON to `/etc/ziti-ssh-ca/identity.json` (mode 0600) by default; `--out` overrides the path. No CA-specific post-enrollment steps needed.
@@ -260,7 +260,7 @@ All binaries accept configuration via flags and environment variables (flags tak
 | `--service` | `ZITI_CA_SERVICE` | `ssh-ca` | Ziti service name to bind |
 | `--principal` | `ZITI_SSH_PRINCIPAL` | `ziggy` | SSH certificate principal (shared mode only) |
 | `--mode` | `ZITI_SSH_MODE` | `shared` | Principal mode: `shared` or `per-identity` |
-| `--cert-ttl` | `ZITI_CERT_TTL` | `8h` | Certificate validity duration (e.g. `4h`, `12h`, `24h`); must be > 0 |
+| `--cert-ttl` | `ZITI_CERT_TTL` | `5m` | Certificate validity duration (e.g. `4h`, `12h`, `24h`); must be > 0 |
 | `--rate-limit` | `ZITI_RATE_LIMIT` | `5` | Max cert signing requests per minute per identity |
 | `--rate-burst` | `ZITI_RATE_BURST` | `3` | Burst allowance for the per-identity rate limiter |
 | `--ziti-timeout` | `ZITI_TIMEOUT` | `30s` | Timeout for blocking Ziti network operations |
