@@ -405,7 +405,7 @@ ziti-ssh/
 │       ├── ratelimit.go    # Per-identity token-bucket rate limiter
 │       └── ratelimit_test.go
 ├── scripts/
-│   └── build-deb.sh        # Builds all four .deb packages into dist/
+│   └── build-packages.sh   # Builds deb and/or rpm packages into dist/ (FORMAT=deb,rpm ARCHS=amd64,arm64)
 ├── go.mod
 ├── go.sum
 ├── ARCHITECTURE.md         # High-level architecture narrative

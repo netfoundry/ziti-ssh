@@ -14,7 +14,7 @@ The Ziti network enforces who can reach which machines; `sshd` on each machine o
 ## How it works
 
 1. A user's Ziti identity authorizes them to dial the `ssh-ca` service.
-2. They send their SSH public key; the CA signs it and returns a short-lived certificate (default: 8 hours, configurable via `--cert-ttl` / `ZITI_CERT_TTL` on `ziti-ssh-ca`).
+2. They send their SSH public key; the CA signs it and returns a short-lived certificate (default: 5 minutes, configurable via `--cert-ttl` / `ZITI_CERT_TTL` on `ziti-ssh-ca`).
 3. The certificate's `ValidPrincipals` is set based on the configured mode (see [Modes](docs/operations.md#modes)). The Ziti identity name is embedded in the `KeyId` field for audit logging.
 4. The user runs `ziti-ssh <host-identity-name>`. `ziti-ssh` dials the `ssh` Ziti service, specifying the target host's identity name as the terminator address.
 5. `ziti-ssh-host run` on the target machine accepts the connection and proxies it to the local `sshd` on `127.0.0.1:22`.
@@ -25,9 +25,17 @@ The Ziti network enforces who can reach which machines; `sshd` on each machine o
 ## Prerequisites
 
 - An operational OpenZiti network (controller + at least one edge router). See the [OpenZiti quickstart](https://openziti.io/docs/learn/quickstarts/) if you do not have one yet.
-- **On user machines:** `ziti-ssh` installed (from this repo)
-- **On the controller:** `ziti-ssh-ca` installed (from this repo)
-- **On each SSH target host:** `ziti-ssh-host` installed (from this repo) - Ubuntu 22.04 or later (or any distro with OpenSSH 8.2+ and systemd).
+- **On user machines:** `ziti-ssh` installed
+- **On the controller:** `ziti-ssh-ca` installed
+- **On each SSH target host:** `ziti-ssh-host` installed — Ubuntu 22.04 or later (or any distro with OpenSSH 8.2+ and systemd)
+
+Install any component with:
+
+```sh
+curl -sSL https://get.netfoundry.io/linux-install.bash | sudo bash -s <package-name>
+```
+
+See [docs/building.md](docs/building.md) for all installation options including local builds.
 
 ---
 

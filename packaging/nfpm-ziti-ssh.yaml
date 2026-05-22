@@ -1,0 +1,26 @@
+name: "ziti-ssh"
+arch: "${NFPM_ARCH}"
+platform: "linux"
+version: "${VERSION}"
+release: "1"
+maintainer: "NetFoundry Inc. <support@netfoundry.io>"
+description: |
+  Ziti SSH client with certificate-based authentication.
+  A full SSH client that operates over an OpenZiti network. Certificates
+  are obtained from the ziti-ssh-ca service and cached locally. They are
+  refreshed automatically when fewer than 5 minutes of validity remain.
+  Subcommands: connect (default), sign, enroll, list, mfa.
+homepage: "https://github.com/netfoundry/ziti-ssh"
+license: "Apache-2.0"
+
+depends:
+  - openssh-client
+
+contents:
+  - src: "dist/binaries/ziti-ssh"
+    dst: /usr/local/bin/ziti-ssh
+    file_info:
+      mode: 0755
+
+scripts:
+  postinstall: packaging/scripts/postinstall-ziti-ssh.sh

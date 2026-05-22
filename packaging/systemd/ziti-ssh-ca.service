@@ -1,0 +1,16 @@
+[Unit]
+Description=Ziti SSH Certificate Authority
+Documentation=https://github.com/netfoundry/ziti-ssh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=ziti
+EnvironmentFile=/etc/ziti-ssh-ca/env
+ExecStart=/usr/local/bin/ziti-ssh-ca
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
