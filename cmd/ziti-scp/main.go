@@ -86,6 +86,11 @@ type OIDCConfig struct {
 // loadConfig reads the YAML config file at cfgPath. If the file does not exist
 // an empty Config is returned without error.
 func loadConfig(cfgPath string) (*Config, error) {
+	// The config chooses the identity, CA service and key: refuse one that
+	// another user could have written.
+	if err := config.CheckUserFile(cfgPath); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(cfgPath)
 	if os.IsNotExist(err) {
 		return &Config{}, nil
@@ -454,7 +459,7 @@ func runSCP(p scpParams) error {
 		}
 	}
 
-	signer, err := client.NewCertSigner(privKeyPath)
+	signer, err := client.NewCertSignerPrompt(privKeyPath, client.TTYPassphrasePrompt(privKeyPath))
 	if err != nil {
 		return fmt.Errorf("load SSH key: %w", err)
 	}

@@ -83,6 +83,13 @@ import (
 // If the cert file is absent or cannot be parsed the raw signer is returned
 // without error — the caller can still authenticate with the bare key.
 func NewCertSigner(keyPath string) (ssh.Signer, error) {
+	return NewCertSignerPrompt(keyPath, nil)
+}
+
+// NewCertSignerPrompt is NewCertSigner, except that when the key is
+// passphrase-protected and no SSH agent holds it, the passphrase is asked for
+// with prompt (if non-nil) instead of failing.
+func NewCertSignerPrompt(keyPath string, prompt func() ([]byte, error)) (ssh.Signer, error) {
 	keyBytes, err := os.ReadFile(keyPath)
 	if err != nil {
 		return nil, fmt.Errorf("read SSH key %q: %w", keyPath, err)
@@ -96,10 +103,40 @@ func NewCertSigner(keyPath string) (ssh.Signer, error) {
 			return nil, fmt.Errorf("parse SSH key %q: %w", keyPath, parseErr)
 		}
 
-		return newSignerFromAgent(keyPath)
+		agentSigner, agentErr := newSignerFromAgent(keyPath)
+		if agentErr == nil || prompt == nil {
+			return agentSigner, agentErr
+		}
+		slog.Debug("SSH agent unavailable for key; asking for passphrase", "key", keyPath, "err", agentErr)
+		pass, err := prompt()
+		if err != nil {
+			return nil, fmt.Errorf("SSH key %q is passphrase-protected (%v) and the passphrase could not be read: %w", keyPath, agentErr, err)
+		}
+		signer, err = ssh.ParsePrivateKeyWithPassphrase(keyBytes, pass)
+		clear(pass)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt SSH key %q: %w", keyPath, err)
+		}
 	}
 
 	return wrapWithCert(signer, keyPath)
+}
+
+// TTYPassphrasePrompt returns a prompt for NewCertSignerPrompt that asks for
+// the key's passphrase on the controlling terminal (/dev/tty) without echo,
+// so stdin is never consumed.
+func TTYPassphrasePrompt(keyPath string) func() ([]byte, error) {
+	return func() ([]byte, error) {
+		tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+		if err != nil {
+			return nil, fmt.Errorf("no terminal: %w", err)
+		}
+		defer tty.Close()
+		fmt.Fprintf(tty, "Enter passphrase for key '%s': ", keyPath)
+		pass, err := term.ReadPassword(int(tty.Fd()))
+		fmt.Fprintln(tty)
+		return pass, err
+	}
 }
 
 // newSignerFromAgent resolves a signer for keyPath from the SSH agent and,

@@ -126,6 +126,12 @@ See security advisory GHSA-TBD for details.
 **Updated docs:** `docs/operations.md` (account ownership flow diagram, lifecycle, new "Managing account ownership" section, files-written table), `docs/configuration.md` (`users` subcommands, sudoers path), `ARCHITECTURE.md` (`UserManager`, `deleteUser`, §12 account ownership boundary), `CLAUDE.md`.
 
 ### Fixed
+#### Client key and file checks
+
+- When `ziti-ssh` generates a key it no longer passes an empty passphrase: `ssh-keygen` asks for one (Enter for none).
+- A passphrase-protected key that no SSH agent holds is unlocked by asking for the passphrase on the terminal, instead of failing (`client.NewCertSignerPrompt`).
+- `config.yaml` and the Ziti `known_hosts` file are refused if writable by group/others or owned by another user (`config.CheckUserFile`), as OpenSSH does for its client config.
+
 #### MFA codes asked for by every client command
 
 - `ziti-ssh connect/sign/proxy/list` and `ziti-scp` now ask for an MFA TOTP code when the controller requires one; previously only the `mfa` subcommands did, so other commands could not authenticate an MFA-enrolled identity. Codes are read from the terminal (`/dev/tty`) without echo — never from stdin — and authentication stops after three wrong codes or at end of input (the `mfa` prompt previously looped forever on closed stdin). Shared code in `internal/mfa`.

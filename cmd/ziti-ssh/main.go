@@ -87,6 +87,11 @@ type OIDCConfig struct {
 // loadConfig reads the YAML config file at cfgPath. If the file does not exist
 // an empty Config is returned without error.
 func loadConfig(cfgPath string) (*Config, error) {
+	// The config chooses the identity, CA service and key: refuse one that
+	// another user could have written.
+	if err := config.CheckUserFile(cfgPath); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(cfgPath)
 	if os.IsNotExist(err) {
 		return &Config{}, nil
@@ -326,7 +331,9 @@ func resolveKey(keyFile string, interactive bool) (string, error) {
 	}
 	slog.Info("generating SSH key", "path", keyPath)
 	//nolint:gosec // arguments are constant or path-derived; no user-controlled shell injection.
-	cmd := exec.Command("ssh-keygen", "-t", "ed25519", "-f", keyPath, "-N", "")
+	// No -N: ssh-keygen asks for a passphrase (Enter for none).
+	cmd := exec.Command("ssh-keygen", "-t", "ed25519", "-f", keyPath)
+	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -591,7 +598,7 @@ func runConnect(p connectParams) error {
 	}
 
 	// Load signer (private key + cert).
-	signer, err := client.NewCertSigner(privKeyPath)
+	signer, err := client.NewCertSignerPrompt(privKeyPath, client.TTYPassphrasePrompt(privKeyPath))
 	if err != nil {
 		return fmt.Errorf("load SSH key: %w", err)
 	}

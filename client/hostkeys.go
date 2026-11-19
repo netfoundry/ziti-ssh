@@ -28,6 +28,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/netfoundry/ziti-ssh/config"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 )
@@ -83,6 +84,11 @@ type knownHostEntry struct {
 }
 
 func (k KnownHosts) read() ([]knownHostEntry, error) {
+	// Host keys decide which servers are trusted: refuse a file that another
+	// user could have written.
+	if err := config.CheckUserFile(k.Path); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(k.Path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil

@@ -56,9 +56,11 @@ ziti-ssh connect ziggy@web-server-prod
 
 The target is split at the **last** `@`, as with OpenSSH, so a user name that contains `@` works: `ziti-ssh alice@corp.com@web-server-prod` logs in as `alice@corp.com`. If the target name is also a Ziti service name, that service is dialed directly (see the host key table below); `--service <name>` always treats the target as a terminator address on `<name>`.
 
-If a certificate is missing or less than 20% of its lifetime remains (between 30 s and 5 min — 1 minute for the default 5-minute certificate), `ziti-ssh connect` automatically obtains a fresh one from the CA before opening the session. On first use it auto-detects your SSH key in `~/.ssh/` (tries `id_ed25519`, `id_ecdsa`, `id_rsa` in that order). If no key exists it offers to run `ssh-keygen -t ed25519` for you.
+If a certificate is missing or less than 20% of its lifetime remains (between 30 s and 5 min — 1 minute for the default 5-minute certificate), `ziti-ssh connect` automatically obtains a fresh one from the CA before opening the session. On first use it auto-detects your SSH key in `~/.ssh/` (tries `id_ed25519`, `id_ecdsa`, `id_rsa` in that order). If no key exists it offers to run `ssh-keygen -t ed25519` for you; `ssh-keygen` asks for a passphrase (recommended; press Enter for none).
 
-If the SSH private key is passphrase-protected, `ziti-ssh connect` falls back to the SSH agent (`SSH_AUTH_SOCK`). It locates the matching key in the agent and, if a certificate is present on disk, wraps it as an `ssh.CertSigner` so the certificate is offered during authentication. The passphrase is never exposed to this process. If the key is passphrase-protected and `SSH_AUTH_SOCK` is not set (or the key has not been added with `ssh-add`), `ziti-ssh connect` exits with an actionable error.
+If the SSH private key is passphrase-protected, `ziti-ssh connect` falls back to the SSH agent (`SSH_AUTH_SOCK`). It locates the matching key in the agent and, if a certificate is present on disk, wraps it as an `ssh.CertSigner` so the certificate is offered during authentication. With the agent the passphrase is never exposed to this process. If no agent holds the key (`SSH_AUTH_SOCK` unset, or the key not added with `ssh-add`), `ziti-ssh connect` and `ziti-scp` ask for the passphrase on the terminal (`Enter passphrase for key '…':`, not echoed); without a terminal they exit with an error.
+
+`ziti-ssh` and `ziti-scp` refuse to use `config.yaml` or the Ziti `known_hosts` file if it is writable by group or others or owned by another user (as OpenSSH does for its own config): another user could otherwise point you at a different identity, key or host. Fix with `chmod go-w <file>`.
 
 ### Non-interactive command execution
 
