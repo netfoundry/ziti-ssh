@@ -169,9 +169,9 @@ type ProxyHooks struct {
 //
 // hooks is optional. When non-nil and its fields are non-nil, OnConnect is
 // called before proxying and OnDisconnect is called after. The username
-// passed to the hooks is extracted from the connection via SourceIdentifier()
-// (preferred) or GetDialerIdentityName() (fallback); if neither is available
-// the hooks are skipped.
+// passed to the hooks is the router-verified dialer identity
+// (GetDialerIdentityName()); if it is unavailable while hooks are configured,
+// the connection is closed without proxying.
 //
 // wg is optional. When non-nil, each accepted connection increments wg before
 // starting and decrements it when the connection closes. Pass a WaitGroup to
@@ -197,31 +197,38 @@ func Proxy(listener net.Listener, target string, hooks *ProxyHooks, wg *sync.Wai
 	}
 }
 
-// callerName returns the Ziti identity name for the connection.
+// callerName returns the router-verified Ziti identity name of the dialer.
 //
-// The SDK sets CallerIdHeader to the dialer's identity name on every dial and
-// exposes it via SourceIdentifier(). GetDialerIdentityName() reads a separate
-// header injected by the fabric layer that may not be present. We prefer
-// SourceIdentifier() and fall back to GetDialerIdentityName().
+// Only GetDialerIdentityName() is trusted. That header is set by the dialer's
+// edge router (OpenZiti v2.0.0+) from the router's own record of the
+// authenticated identity. SourceIdentifier() (the CallerId header) is written
+// by the dialing SDK and copied through the router unchanged, so a modified
+// client can claim any name; it is used only to log a warning on mismatch.
+//
+// Returns "" when the router did not supply a dialer identity.
 //
 // Defined via structural interfaces so host has no import dependency on the
 // Ziti SDK.
 func callerName(conn net.Conn) string {
+	type dialerNamer interface {
+		GetDialerIdentityName() string
+	}
+	dn, ok := conn.(dialerNamer)
+	if !ok {
+		return ""
+	}
+	name := dn.GetDialerIdentityName()
+
 	type sourceIdentifier interface {
 		SourceIdentifier() string
 	}
 	if si, ok := conn.(sourceIdentifier); ok {
-		if name := si.SourceIdentifier(); name != "" {
-			return name
+		if claimed := si.SourceIdentifier(); claimed != "" && name != "" && claimed != name {
+			slog.Warn("client-supplied caller id does not match router-verified dialer identity; using router-verified identity",
+				"dialer_identity", name, "claimed_caller_id", claimed)
 		}
 	}
-	type dialerNamer interface {
-		GetDialerIdentityName() string
-	}
-	if dn, ok := conn.(dialerNamer); ok {
-		return dn.GetDialerIdentityName()
-	}
-	return ""
+	return name
 }
 
 func proxyConn(src net.Conn, target string, hooks *ProxyHooks) {
@@ -231,6 +238,12 @@ func proxyConn(src net.Conn, target string, hooks *ProxyHooks) {
 	var username string
 	if hooks != nil && (hooks.OnConnect != nil || hooks.OnDisconnect != nil) {
 		username = callerName(src)
+		// Fail closed: with hooks configured (per-identity mode) a connection
+		// must never reach sshd without a router-verified identity.
+		if username == "" {
+			slog.Error("rejected connection: edge router did not supply a dialer identity (OpenZiti v2.0.0+ routers required)")
+			return
+		}
 	}
 
 	// OnConnect lifecycle — must succeed before we proxy anything.

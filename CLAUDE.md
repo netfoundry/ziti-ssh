@@ -65,6 +65,8 @@ The Ziti network proves the caller's identity through mutual TLS. The same Ziti 
 - Authorizes host access (dial policy on the per-host `ssh` service)
 - Is embedded in the cert Key ID for audit trail
 
+The caller's name is read **only** from `GetDialerIdentityName()` (set by the dialer's edge router; requires OpenZiti v2.0.0+). Never use `SourceIdentifier()` (the client-supplied `CallerId` header) for any authorization decision — a modified client can set it to anything. Connections with no dialer identity are rejected.
+
 ### Ziti service policy IS the access control
 Any Ziti identity that can dial the `ssh-ca` service is authorized to receive a cert. Any Ziti identity that can dial the `ssh` service terminator for a given host is authorized to reach that host. Access control is managed entirely through Ziti service policies.
 

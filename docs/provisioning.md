@@ -33,6 +33,8 @@ In simple deployments a single `ssh` service is sufficient. Fleets using per-ide
 
 ## Provisioning the Ziti network
 
+**Version requirement:** the controller and every edge router that clients connect through must run **OpenZiti v2.0.0 or later**. `ziti-ssh-ca` and `ziti-ssh-host` (in `per-identity` mode) identify callers only by the dialer identity that the edge router attaches to each connection, a header that v2.0.0+ routers provide. Connections arriving through older routers are rejected. See [Caller identity verification](operations.md#caller-identity-verification).
+
 The commands in this section assume `ziti edge login` has already been run against your controller. All commands use the `ziti` CLI.
 
 ### 1. Create the two services

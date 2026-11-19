@@ -114,6 +114,35 @@ Each host has its own service (e.g., `ssh-web-01`, `ssh-web-02`) with a fully in
 
 ---
 
+## Caller identity verification
+
+`ziti-ssh-ca` (all modes) and `ziti-ssh-host` (`per-identity` mode) identify each caller by the **dialer identity name that the caller's edge router attaches to the connection**. The router derives it from the identity it authenticated, so the client cannot influence it. The separate client-supplied caller ID header is ignored for all decisions. If it differs from the router-supplied name, a warning is logged:
+
+```
+client-supplied caller id does not match router-verified dialer identity; using router-verified identity
+```
+
+The log line includes `dialer_identity` and `claimed_caller_id` fields. A stock `ziti-ssh` client always sends its own identity name, so a mismatch indicates a modified client and is worth investigating.
+
+### Requirement
+
+Every edge router that clients connect through must run **OpenZiti v2.0.0 or later**. Older routers do not attach the dialer identity.
+
+### Symptom: connections rejected
+
+If the router does not supply a dialer identity, the connection is closed (fail closed) and the service logs:
+
+```
+rejected connection: edge router did not supply a dialer identity (OpenZiti v2.0.0+ routers required)
+```
+
+On `ziti-ssh-ca` the client receives no certificate; on `ziti-ssh-host` in `per-identity` mode no Linux user is created and the connection never reaches sshd. Check, in order:
+
+1. **Router version.** Run `ziti edge list edge-routers -j` (full JSON output) and confirm that `versionInfo.version` is v2.0.0 or later for the router the client is connected through. (The default table output does not include versions.)
+2. **Recently created identity.** The router resolves the dialer identity from its local copy of the controller's data model. Retry after a short wait; if the rejection persists for an established identity, collect the edge router's logs for the time of the connection.
+
+---
+
 ## Inspecting per-identity permissions
 
 The `ziti-ssh-host inspect` subcommand is a diagnostic tool for operators verifying their `ziti-ssh-host.v1` config before deploying or after a change.

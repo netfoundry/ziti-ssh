@@ -374,12 +374,10 @@ func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL t
 func handleConn(conn net.Conn, signer ssh.Signer, caPubBytes []byte, principal, mode string, certTTL time.Duration, limiter *ratelimit.Map) {
 	defer conn.Close()
 
-	// Extract caller identity. The Ziti listener returns edge.Conn values via
-	// AcceptEdge; plain Accept returns a net.Conn wrapper. We type-assert to get
-	// the identity name.
+	// Extract the router-verified caller identity. Fail closed if absent.
 	identity := callerIdentity(conn)
 	if identity == "" {
-		slog.Error("rejected connection: empty Ziti identity")
+		slog.Error("rejected connection: edge router did not supply a dialer identity (OpenZiti v2.0.0+ routers required)")
 		return
 	}
 
@@ -452,29 +450,41 @@ func handleConn(conn net.Conn, signer ssh.Signer, caPubBytes []byte, principal, 
 	log.Info("issued SSH certificate", "principal", effectivePrincipal, "ttl", certTTL)
 }
 
-// callerIdentity extracts the Ziti identity name from a net.Conn.
+// Compile-time assertion: SDK connections must expose the router-verified
+// dialer identity that callerIdentity relies on.
+var _ interface{ GetDialerIdentityName() string } = (zitiEdge.Conn)(nil)
+
+// callerIdentity returns the authenticated Ziti identity name of the dialer.
 //
-// The SDK sets CallerIdHeader to the dialer's identity name on every dial
-// (ziti.go: edgeDialOptions.CallerId = GetCurrentApiSession().GetIdentityName()).
-// This is exposed via SourceIdentifier() on edge.Conn.
+// Only GetDialerIdentityName() is trusted. That header is set by the dialer's
+// edge router (OpenZiti v2.0.0+) from the router's own record of the
+// authenticated identity and cannot be influenced by the client.
 //
-// GetDialerIdentityName() reads a separate header injected by the fabric layer
-// that is not always present — SourceIdentifier() is the reliable source.
+// SourceIdentifier() (the CallerId header) is NOT trusted: it is written by the
+// dialing SDK and copied through the router unchanged, so a modified client can
+// claim any identity name. It is used only to log a warning on mismatch.
 //
-// Returns "" only for plain net.Conn values (e.g. in unit tests).
+// Returns "" when the router did not supply a dialer identity (router older
+// than v2.0.0, or the router could not resolve the identity); callers must
+// reject the connection in that case.
 func callerIdentity(conn net.Conn) string {
-	if ec, ok := conn.(zitiEdge.Conn); ok {
-		if name := ec.SourceIdentifier(); name != "" {
-			return name
-		}
-		return ec.GetDialerIdentityName()
+	type dialerNamer interface {
+		GetDialerIdentityName() string
 	}
-	// Fallback: structural interface for tests/mocks that don't import edge.
+	dn, ok := conn.(dialerNamer)
+	if !ok {
+		return ""
+	}
+	name := dn.GetDialerIdentityName()
+
 	type sourceIdentifier interface {
 		SourceIdentifier() string
 	}
 	if si, ok := conn.(sourceIdentifier); ok {
-		return si.SourceIdentifier()
+		if claimed := si.SourceIdentifier(); claimed != "" && name != "" && claimed != name {
+			slog.Warn("client-supplied caller id does not match router-verified dialer identity; using router-verified identity",
+				"dialer_identity", name, "claimed_caller_id", claimed)
+		}
 	}
-	return ""
+	return name
 }

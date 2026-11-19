@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - 2026-11-19
 
+### Security
+
+See security advisory GHSA-TBD for details.
+
+#### Caller identity taken from the edge router (BREAKING)
+
+`ziti-ssh-ca` and `ziti-ssh-host` now identify each caller only by the dialer identity name that the caller's edge router attaches to the connection (`GetDialerIdentityName()`). The client-supplied caller ID header is no longer used for any decision; if it differs, a warning is logged (`client-supplied caller id does not match router-verified dialer identity`).
+
+- Connections without a router-supplied dialer identity are rejected (`rejected connection: edge router did not supply a dialer identity (OpenZiti v2.0.0+ routers required)`). In `per-identity` mode, `ziti-ssh-host` closes such connections without proxying them to sshd.
+- **Breaking:** the controller and all edge routers must run **OpenZiti v2.0.0 or later**.
+- Integration suite (`suites/ziti-ssh/suite.yml`) now runs against OpenZiti v2.0.8.
+
+**Updated docs:** `ARCHITECTURE.md` §6 (identity flow, with diagram) and §12; `README.md` prerequisites; `docs/provisioning.md` version requirement; `docs/operations.md` new "Caller identity verification" section.
+
 ### Changed
 
 #### Dependency, toolchain, and CI refresh

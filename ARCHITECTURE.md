@@ -54,7 +54,7 @@ Entry points: `cmd/ziti-ssh-ca/main.go` (service and root) and `cmd/ziti-ssh-ca/
 
 Each connection handler (`handleConn`):
 
-1. Type-asserts the `net.Conn` to `edge.Conn` to call `GetDialerIdentityName()` — the Ziti-verified identity name of the caller.
+1. Calls `GetDialerIdentityName()` on the connection — the router-verified identity name of the caller (see [§6](#6-ziti-identity-flow)). Rejects the connection if it is empty.
 2. Reads one newline-terminated line from the connection.
 3. Resolves the effective principal from the configured mode (see [Mode: shared vs per-identity](#mode-shared-vs-per-identity)).
 4. Enforces the per-identity rate limit for cert-signing requests (CA public key requests are not rate-limited).
@@ -257,29 +257,58 @@ The connection is closed by the server after each response. There is no persiste
 
 ## 6. Ziti Identity Flow
 
-The Ziti network provides mutual TLS for all connections. Every Ziti identity has a certificate issued by the Ziti controller. When a client dials a service, the edge router verifies the client's certificate and forwards the verified identity name to the listener side.
+The Ziti network provides mutual TLS for all connections. Every Ziti identity has a certificate issued by the Ziti controller. When a client dials a service, the client's edge router (which authenticated the client) attaches the dialer's identity name to the connection it delivers to the hosting side.
+
+Two identity values arrive with every accepted connection, and only one is trustworthy:
+
+| Accessor | Wire header | Set by | Trusted |
+|---|---|---|---|
+| `GetDialerIdentityName()` | `DialerIdentityName` | The dialer's edge router, from its own record of the authenticated identity (OpenZiti **v2.0.0+**) | **Yes** |
+| `SourceIdentifier()` | `CallerId` | The dialing SDK; copied through the router unchanged | **No** — a modified client can send any value |
+
+```mermaid
+sequenceDiagram
+    participant C as Client (ziti-ssh)
+    participant R as Edge router (v2.0.0+)
+    participant S as ziti-ssh-ca / ziti-ssh-host
+    C->>R: Dial (CallerId = any value the client chooses)
+    Note over R: Resolves the authenticated identity ID<br/>in its router data model
+    R->>S: CallerId (passed through, untrusted)<br/>DialerIdentityName (router-set, trusted)
+    alt DialerIdentityName present
+        S->>S: Use it for principal, Key ID, rate limit, permissions
+        S-->>S: Warn if CallerId differs (possible spoofing attempt)
+    else DialerIdentityName absent
+        S--xC: Close connection (fail closed)
+    end
+```
 
 ### Extraction
 
-In `cmd/ziti-ssh-ca/main.go`, `callerIdentity` performs the extraction:
+In `cmd/ziti-ssh-ca/main.go`, `callerIdentity` performs the extraction (`host.callerName` in `host/host.go` is equivalent):
 
 ```go
 func callerIdentity(conn net.Conn) string {
-    if ec, ok := conn.(zitiEdge.Conn); ok {
-        return ec.GetDialerIdentityName()
-    }
-    // Fallback narrow interface for flexibility
     type dialerNamer interface {
         GetDialerIdentityName() string
     }
-    if dn, ok := conn.(dialerNamer); ok {
-        return dn.GetDialerIdentityName()
+    dn, ok := conn.(dialerNamer)
+    if !ok {
+        return ""
     }
-    return ""
+    name := dn.GetDialerIdentityName()
+    // SourceIdentifier() is compared only to log a mismatch warning.
+    ...
+    return name
 }
 ```
 
-`zitiEdge.Conn` is from `github.com/openziti/sdk-golang/ziti/edge`. The `edge.Listener.Accept()` returns values that implement this interface. If the assertion fails (e.g. in unit tests using a plain `net.Conn`), the function returns `""` and the connection is rejected.
+If the router did not supply a dialer identity — a router older than v2.0.0, or a router that could not resolve the dialing identity — the function returns `""`. `ziti-ssh-ca` then closes the connection, and `ziti-ssh-host` in `per-identity` mode closes it without creating a user or proxying to sshd. In both cases the log line is:
+
+```
+rejected connection: edge router did not supply a dialer identity (OpenZiti v2.0.0+ routers required)
+```
+
+A compile-time assertion in both `cmd/ziti-ssh-ca/main.go` and `cmd/ziti-ssh-host/main.go` ensures `edge.Conn` still provides `GetDialerIdentityName()` after SDK upgrades.
 
 ### Identity as SSH Certificate Key ID
 
@@ -519,6 +548,8 @@ conn, err := zitiCtx.Dial(caService)
 import zitiEdge "github.com/openziti/sdk-golang/ziti/edge"
 
 if ec, ok := conn.(zitiEdge.Conn); ok {
+    // Router-verified (OpenZiti v2.0.0+). Never use ec.SourceIdentifier()
+    // for authorization: it is client-supplied.
     identityName := ec.GetDialerIdentityName()
 }
 ```
@@ -610,12 +641,12 @@ This is possible because `ziti-ssh-ca` runs on the same host as the Ziti control
 
 **CA private key exposure:** The CA private key is loaded once at startup and held in memory as an `ssh.Signer`. It is never written to a log or returned over the wire. The key file must be owned by the service user with mode 0600.
 
-**Identity validation:** `callerIdentity` returns `""` for any connection where the Ziti identity cannot be asserted. `handleConn` rejects such connections immediately before reading any data from them.
+**Identity validation:** `callerIdentity` trusts only the router-set `DialerIdentityName` header (`GetDialerIdentityName()`), never the client-set `CallerId` header (`SourceIdentifier()`). It returns `""` when the router supplied no dialer identity, and `handleConn` rejects such connections before reading any data from them. `ziti-ssh-host` applies the same rule in `per-identity` mode. This requires every edge router to run OpenZiti v2.0.0 or later.
 
-**Principal derivation:** In `shared` mode, `ValidPrincipals` is set from the operator-configured `--principal` flag — a client cannot influence which Linux user they get. In `per-identity` mode, the principal is derived deterministically from the Ziti-verified identity name via `ca.DeriveUsername`. The identity name is attested by the Ziti network's mutual TLS and cannot be spoofed by the client. The derivation function (lowercase, replace non-`[a-z0-9_-]` with `_`, prefix `z` if digit-leading, truncate to 32) is purely defensive — it sanitizes the identity name for use as a POSIX username and is not a security boundary.
+**Principal derivation:** In `shared` mode, `ValidPrincipals` is set from the operator-configured `--principal` flag — a client cannot influence which Linux user they get. In `per-identity` mode, the principal is derived deterministically from the router-verified identity name via `ca.DeriveUsername`. The name comes from the dialer's edge router, which authenticated the client over mTLS, so the client cannot substitute another name. The derivation function (lowercase, replace non-`[a-z0-9_-]` with `_`, prefix `z` if digit-leading, truncate to 32) is purely defensive — it sanitizes the identity name for use as a POSIX username and is not a security boundary.
 
 **Ziti as the authorization boundary:** Any identity that can dial `ssh-ca` receives a certificate. Any identity that can dial `ssh` with a given terminator address reaches that host. Access control is managed entirely in Ziti service policies (dial policies, service policies). This is intentional — the CA is a dumb signing service; the access control lives in Ziti.
 
 **No credentials on hosts:** The only file written to each SSH host is the CA public key (`/etc/ssh/ziti_ca.pub`). This is not a credential. An attacker who reads it gains nothing — it is the CA's public key and is not secret.
 
-**Per-identity permissions trust boundary:** The `ziti-ssh-host.v1` config is fetched from the Ziti controller over the same mTLS-authenticated data plane channel used for service subscription. The hosting identity must have a config policy granting it access to the `ziti-ssh-host.v1` config type — config data is not delivered to arbitrary identities. Permission entries are keyed by exact Ziti identity name; the identity name is attested by Ziti's mTLS and cannot be spoofed by the connecting client. Linux groups referenced in a config entry must already exist on the host — `ziti-ssh-host` does not create groups. A missing group causes `usermod` to fail for that group; the failure is non-fatal (logged, session continues) so a misconfigured group name silently reduces the permissions applied rather than blocking access. Operators should use `ziti-ssh-host inspect` to verify the effective permissions before and after config changes.
+**Per-identity permissions trust boundary:** The `ziti-ssh-host.v1` config is fetched from the Ziti controller over the same mTLS-authenticated data plane channel used for service subscription. The hosting identity must have a config policy granting it access to the `ziti-ssh-host.v1` config type — config data is not delivered to arbitrary identities. Permission entries are keyed by Ziti identity name; the name used for lookup is the router-verified dialer identity (see [§6](#6-ziti-identity-flow)), so the connecting client cannot substitute another identity's entry. Linux groups referenced in a config entry must already exist on the host — `ziti-ssh-host` does not create groups. A missing group causes `usermod` to fail for that group; the failure is non-fatal (logged, session continues) so a misconfigured group name silently reduces the permissions applied rather than blocking access. Operators should use `ziti-ssh-host inspect` to verify the effective permissions before and after config changes.
