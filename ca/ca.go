@@ -19,7 +19,9 @@
 package ca
 
 import (
+	"bytes"
 	"crypto/rand"
+	"crypto/rsa"
 	"fmt"
 	"net"
 	"os"
@@ -220,4 +222,48 @@ func ParseSourceAddress(v string) (string, error) {
 		}
 	}
 	return strings.Join(out, ","), nil
+}
+
+// MinRSABits is the smallest RSA client key the CA will certify.
+const MinRSABits = 3072
+
+// allowedClientKeyTypes are the SSH public key algorithms the CA certifies.
+var allowedClientKeyTypes = map[string]bool{
+	ssh.KeyAlgoED25519:    true,
+	ssh.KeyAlgoSKED25519:  true,
+	ssh.KeyAlgoECDSA256:   true,
+	ssh.KeyAlgoECDSA384:   true,
+	ssh.KeyAlgoECDSA521:   true,
+	ssh.KeyAlgoSKECDSA256: true,
+	ssh.KeyAlgoRSA:        true,
+}
+
+// ValidateClientKey rejects keys the CA must not certify: certificates,
+// DSA and other unsupported algorithms, RSA keys shorter than MinRSABits, and
+// the CA's own public key.
+func ValidateClientKey(key, caKey ssh.PublicKey) error {
+	if _, isCert := key.(*ssh.Certificate); isCert {
+		return fmt.Errorf("a certificate was submitted; send the plain public key")
+	}
+	if !allowedClientKeyTypes[key.Type()] {
+		return fmt.Errorf("key type %s is not supported (use ed25519, ecdsa, or rsa >= %d bits)", key.Type(), MinRSABits)
+	}
+	if key.Type() == ssh.KeyAlgoRSA {
+		cpk, ok := key.(ssh.CryptoPublicKey)
+		if !ok {
+			return fmt.Errorf("cannot inspect RSA key")
+		}
+		rk, ok := cpk.CryptoPublicKey().(*rsa.PublicKey)
+		if !ok || rk.N.BitLen() < MinRSABits {
+			bits := 0
+			if ok {
+				bits = rk.N.BitLen()
+			}
+			return fmt.Errorf("RSA key is %d bits; at least %d required", bits, MinRSABits)
+		}
+	}
+	if caKey != nil && bytes.Equal(key.Marshal(), caKey.Marshal()) {
+		return fmt.Errorf("refusing to certify the CA's own key")
+	}
+	return nil
 }

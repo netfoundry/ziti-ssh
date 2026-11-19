@@ -21,6 +21,11 @@ See security advisory GHSA-TBD for details.
 - An entry exceeding the policy rejects the connection (`rejecting connection: permissions refused by host grant policy`); violations are logged at config load/reload; `ziti-ssh-host inspect` shows the policy and refused entries. Invalid policy settings stop `run` in per-identity mode.
 - **Action:** configs that grant `sudoers_rule` or privileged groups are refused until each host opts the service in. Run `ziti-ssh-host inspect --service <name>` before upgrading.
 
+#### CA key-type allowlist
+
+- `ziti-ssh-ca` only certifies ed25519, ECDSA (P-256/384/521), the `sk-` security-key variants, and RSA keys of at least 3072 bits. Certificates, DSA keys, shorter RSA keys, and the CA's own key are refused with an `error: …` reply (shown by clients as `CA refused the request: …`). Malformed requests now also get an `error:` reply instead of a silent close.
+- **Action:** users with RSA keys shorter than 3072 bits must generate a new key (e.g. `ssh-keygen -t ed25519`).
+
 #### CA connection limits
 
 - `ziti-ssh-ca` caps concurrent connections (`--max-connections` / `ZITI_MAX_CONNECTIONS`, default 64); connections beyond the cap are closed immediately.

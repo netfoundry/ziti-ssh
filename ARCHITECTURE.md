@@ -58,7 +58,7 @@ Each connection handler (`handleConn`):
 2. Resolves the effective principal from the configured mode (see [Mode: shared vs per-identity](#mode-shared-vs-per-identity)).
 3. Sets a 10-second deadline on the connection.
 4. Enforces the per-identity rate limit **before reading anything**, for every request type (CA public key requests included); a limited caller receives `error: rate limit exceeded`.
-5. Reads one newline-terminated line (at most 4 KiB) and dispatches on its content: empty → write CA public key; non-empty → parse as SSH public key, sign, write certificate.
+5. Reads one newline-terminated line (at most 4 KiB) and dispatches on its content (a key that fails `ca.ValidateClientKey` — certificate, DSA, RSA < 3072 bits, unsupported type, or the CA's own key — gets an `error:` reply): empty → write CA public key; non-empty → parse as SSH public key, sign, write certificate.
 6. Logs every outcome with the identity name as a structured field.
 
 The CA signer (`ssh.Signer`) is initialized once and passed to every handler. `ssh.Signer` wraps a Go `crypto.Signer` — the standard library's Ed25519 implementation is safe for concurrent use, so no mutex is required.

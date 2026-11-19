@@ -450,6 +450,12 @@ func handleConn(conn net.Conn, signer ssh.Signer, caPubBytes []byte, principal, 
 	pubKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(line))
 	if err != nil {
 		log.Error("parse client public key", "err", err)
+		writeRefusal(conn, log, "request is not an SSH public key in authorized_keys format")
+		return
+	}
+	if err := ca.ValidateClientKey(pubKey, signer.PublicKey()); err != nil {
+		log.Warn("rejected client key", "type", pubKey.Type(), "err", err)
+		writeRefusal(conn, log, err.Error())
 		return
 	}
 
@@ -539,4 +545,12 @@ func dispatch(conn net.Conn, slots chan struct{}, wg *sync.WaitGroup, handle fun
 		handle(conn)
 	}()
 	return true
+}
+
+// writeRefusal sends an "error: <reason>" line, which clients report as a CA
+// refusal instead of a generic read failure.
+func writeRefusal(conn net.Conn, log *slog.Logger, reason string) {
+	if _, err := conn.Write([]byte("error: " + reason + "\n")); err != nil {
+		log.Error("write refusal", "err", err)
+	}
 }

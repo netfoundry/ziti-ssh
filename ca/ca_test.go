@@ -17,8 +17,11 @@
 package ca_test
 
 import (
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"strings"
 	"testing"
 	"time"
@@ -334,6 +337,46 @@ func TestParseSourceAddress(t *testing.T) {
 	for _, in := range []string{"", "localhost", "127.0.0.1/33", "10.0.0.5/24", "127.0.0.1,,::1", "1.2.3"} {
 		if got, err := ca.ParseSourceAddress(in); err == nil {
 			t.Errorf("ParseSourceAddress(%q) = %q, want error", in, got)
+		}
+	}
+}
+
+func TestValidateClientKey(t *testing.T) {
+	caSigner, caPub := generateTestCA(t)
+	sshPub := func(k interface{}) ssh.PublicKey {
+		p, err := ssh.NewPublicKey(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	edPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	ec, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	rsa3072, _ := rsa.GenerateKey(rand.Reader, 3072)
+	rsa2048, _ := rsa.GenerateKey(rand.Reader, 2048)
+
+	for name, k := range map[string]ssh.PublicKey{
+		"ed25519":  sshPub(edPub),
+		"ecdsa":    sshPub(&ec.PublicKey),
+		"rsa-3072": sshPub(&rsa3072.PublicKey),
+	} {
+		if err := ca.ValidateClientKey(k, caPub); err != nil {
+			t.Errorf("%s rejected: %v", name, err)
+		}
+	}
+
+	cert := &ssh.Certificate{Key: sshPub(edPub), CertType: ssh.UserCert, ValidPrincipals: []string{"ziggy"}, ValidBefore: ssh.CertTimeInfinity}
+	if err := cert.SignCert(rand.Reader, caSigner); err != nil {
+		t.Fatal(err)
+	}
+	for name, k := range map[string]ssh.PublicKey{
+		"rsa-2048":     sshPub(&rsa2048.PublicKey),
+		"certificate":  cert,
+		"CA's own key": caPub,
+	} {
+		if err := ca.ValidateClientKey(k, caPub); err == nil {
+			t.Errorf("%s accepted", name)
 		}
 	}
 }

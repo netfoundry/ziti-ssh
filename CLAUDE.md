@@ -161,6 +161,7 @@ Three modes of operation: a long-running service, a one-shot `enroll` command, a
 - Issues certs with a configurable principal (default: `ziggy`) and 5m validity
 - Enforces a per-identity token-bucket rate limit (default: 5 req/min, burst 3) on every request, checked before the request is read
 - Caps concurrent connections (`--max-connections`, default 64); further connections are closed immediately
+- Only certifies ed25519, ECDSA (P-256/384/521), `sk-` security-key variants, and RSA ≥ 3072 bits (`ca.ValidateClientKey`); refuses certificates, DSA, short RSA and its own key with an `error:` reply
 
 **`enroll` subcommand** — enrolls the CA server's Ziti identity from a one-time JWT file. Writes the identity JSON to `/etc/ziti-ssh-ca/identity.json` (mode 0600) by default; `--out` overrides the path. No CA-specific post-enrollment steps needed.
 
