@@ -57,6 +57,7 @@ The connection is rejected — and the account left untouched — when the accou
 - On first connection from an identity, `useradd -m -s /bin/bash -- <username>` runs and the account is recorded in the ownership registry.
 - On every connection, supplementary groups are set to exactly the resolved list with `usermod -G <groups> -- <username>` (from the `ziti-ssh-host.v1` config entry, or `ZITI_SSH_GROUPS`). Groups must already exist on the host. **If this fails — for example because a group does not exist — the connection is rejected.**
 - If a sudoers rule is resolved (config entry or `ZITI_SUDOERS_RULE`), it is written to `/etc/sudoers.d/ziti-ssh-host-<username>` (validated with `visudo -c` before installation); otherwise any existing file is removed. If the rule cannot be installed, the existing file is removed and the connection is rejected; if an existing file cannot be removed, the connection is rejected.
+- Every managed account is a member of the `ziti-ssh-managed` group (in addition to its configured groups, and also after its privileges are dropped). sshd ignores `authorized_keys` and any `AuthorizedKeysCommand` for this group, so users can only log in with a CA certificate.
 - Concurrent sessions from the same identity are reference-counted — `useradd` is only called once.
 - When the last session from an identity closes, the sudoers file is removed and the account's supplementary groups are cleared. With `ZITI_USER_CLEANUP=true`, the cleanup sequence then runs: `loginctl terminate-user` drains the systemd session, the user's processes (matched by UID) are polled until they exit, escalating to SIGTERM and then SIGKILL, and `userdel -r` removes the account and home directory and its ownership record. Accounts not in the registry with a matching UID are never touched.
 - By default the Linux account is kept after disconnect, together with any background processes the user started. Set `ZITI_TERMINATE_ON_DISCONNECT=true` to end those processes when the last session closes (the account and home directory are kept), or `ZITI_USER_CLEANUP=true` to delete the account when the last session closes.
@@ -480,7 +481,7 @@ See [provisioning.md](provisioning.md) for the full systemd unit file examples f
 |---|---|---|
 | `/etc/ziti-ssh-host/identity.json` | 0600 | Enrolled Ziti identity (private key material) |
 | `/etc/ssh/ziti_ca.pub` | 0644 | CA public key in authorized_keys format |
-| `/etc/ssh/sshd_config.d/ziti-ssh.conf` | 0644 | `TrustedUserCAKeys /etc/ssh/ziti_ca.pub` |
+| `/etc/ssh/sshd_config.d/ziti-ssh.conf` | 0644 | `TrustedUserCAKeys /etc/ssh/ziti_ca.pub`, plus a `Match Group ziti-ssh-managed` block setting `AuthorizedKeysFile none` and `AuthorizedKeysCommand none`. Rewritten by `run` at startup if it differs. |
 
 ### `run` (per-identity mode only)
 

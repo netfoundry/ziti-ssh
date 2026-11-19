@@ -21,6 +21,12 @@ See security advisory GHSA-TBD for details.
 - An entry exceeding the policy rejects the connection (`rejecting connection: permissions refused by host grant policy`); violations are logged at config load/reload; `ziti-ssh-host inspect` shows the policy and refused entries. Invalid policy settings stop `run` in per-identity mode.
 - **Action:** configs that grant `sudoers_rule` or privileged groups are refused until each host opts the service in. Run `ziti-ssh-host inspect --service <name>` before upgrading.
 
+#### Certificate-only login for Ziti-managed accounts
+
+- The sshd drop-in now contains `Match Group ziti-ssh-managed` with `AuthorizedKeysFile none` and `AuthorizedKeysCommand none`, so members of that group can only log in with a CA certificate; a key added to their own `authorized_keys` can no longer outlive their certificate or identity. Other accounts are unaffected.
+- The group is created by the `ziti-ssh-host` package, `enroll` and `run`; `run` rewrites an outdated drop-in at startup and reloads sshd. Per-identity accounts are always kept in the group.
+- **Action (shared mode):** add the shared account to the group — `usermod -aG ziti-ssh-managed <account>`. `run` warns at startup if the group is empty.
+
 #### Agent forwarding off by default (BREAKING)
 
 - `ziti-ssh-ca` grants certificate extensions from `--cert-extensions` / `ZITI_CERT_EXTENSIONS`, default `permit-pty,permit-port-forwarding` — **agent forwarding is no longer granted by default**.

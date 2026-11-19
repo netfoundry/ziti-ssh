@@ -266,13 +266,15 @@ Repeat these steps on every machine you want to make reachable over Ziti.
 
 > **Skip this step if using `per-identity` mode.** In `per-identity` mode, `ziti-ssh-host` creates and removes Linux accounts automatically on each connection. No manual account setup is needed.
 
-In `shared` mode, all SSH sessions authenticate as a single Linux user. Create it if it does not already exist:
+In `shared` mode, all SSH sessions authenticate as a single Linux user. Create it if it does not already exist, and add it to the `ziti-ssh-managed` group so it can only log in with a CA certificate (a key someone adds to its authorized_keys would otherwise keep working after their certificate expires or their identity is revoked):
 
 ```sh
-useradd --create-home --shell /bin/bash ziggy
+groupadd -f --system ziti-ssh-managed       # also created by the ziti-ssh-host package
+useradd --create-home --shell /bin/bash -G ziti-ssh-managed ziggy
+# existing account: usermod -aG ziti-ssh-managed ziggy
 ```
 
-Use any existing account — just set `--principal` on the CA to match.
+Use any existing account — just set `--principal` on the CA to match, and add it to `ziti-ssh-managed`. `ziti-ssh-host run` logs a warning at startup in shared mode if no account is in the group.
 
 ### 2. Install the package
 

@@ -346,3 +346,31 @@ func (m *UserManager) reconcileLegacySudoersIn(dir string) {
 			"path", filepath.Join(dir, u))
 	}
 }
+
+// EnsureManagedGroup creates ManagedGroup as a system group if it does not
+// exist.
+func EnsureManagedGroup() error {
+	if err := exec.Command("getent", "group", "--", ManagedGroup).Run(); err == nil {
+		return nil
+	}
+	cmd := exec.Command("groupadd", "--system", "--", ManagedGroup)
+	cmd.Env = childEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("groupadd %s: %w (output: %s)", ManagedGroup, err, strings.TrimSpace(string(out)))
+	}
+	slog.Info("created group", "group", ManagedGroup)
+	return nil
+}
+
+// ManagedGroupMembers returns the supplementary members of ManagedGroup.
+func ManagedGroupMembers() ([]string, error) {
+	out, err := exec.Command("getent", "group", "--", ManagedGroup).Output()
+	if err != nil {
+		return nil, fmt.Errorf("getent group %s: %w", ManagedGroup, err)
+	}
+	fields := strings.Split(strings.TrimSpace(string(out)), ":")
+	if len(fields) < 4 || fields[3] == "" {
+		return nil, nil
+	}
+	return strings.Split(fields[3], ","), nil
+}

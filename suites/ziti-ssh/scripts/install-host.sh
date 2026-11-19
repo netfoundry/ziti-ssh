@@ -62,6 +62,10 @@ log "Ensuring 'ziggy' user exists"
 if ! id ziggy >/dev/null 2>&1; then
     sudo useradd --create-home --shell /bin/bash ziggy
 fi
+# Restrict the shared account to CA-certificate login (the ziti-ssh-host sshd
+# drop-in disables authorized_keys for members of ziti-ssh-managed).
+sudo groupadd -f --system ziti-ssh-managed
+sudo usermod -aG ziti-ssh-managed ziggy
 
 # ---------------------------------------------------------------------------
 # 3) Install the ziti-ssh-host package staged by the suite runner.

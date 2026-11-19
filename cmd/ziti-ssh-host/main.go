@@ -298,7 +298,12 @@ func runEnroll(jwtPath, identityFile string) error {
 	}
 	caPubBytes := clusterCAsToBytes(clusterCAs)
 
-	// 6. Write sshd configuration.
+	// 6. Write sshd configuration. The drop-in refers to the managed group, so
+	// create it first (an unknown group in "Match Group" simply never matches).
+	if err := host.EnsureManagedGroup(); err != nil {
+		slog.Warn("could not create managed group; Ziti-managed accounts keep authorized_keys login until it exists",
+			"group", host.ManagedGroup, "err", err)
+	}
 	if err := host.WriteSSHConfig(caPubBytes, sshdConfFile, sshdCAPubKeyFile); err != nil {
 		return fmt.Errorf("write sshd config: %w", err)
 	}
@@ -861,6 +866,13 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 		return fmt.Errorf("per-identity mode: %w", err)
 	}
 
+	// Accounts managed through Ziti may only log in with a CA certificate:
+	// make sure the managed group exists and the sshd drop-in (which may
+	// predate this release) disables authorized_keys for its members.
+	if err := ensureSSHDLockdown(mode); err != nil {
+		return err
+	}
+
 	listenOpts := &ziti.ListenOptions{
 		BindUsingEdgeIdentity: true,
 	}
@@ -1273,4 +1285,45 @@ func printPolicyRefusals(service string, pc *host.PermissionsConfig, policy host
 	if refused > 0 {
 		fmt.Println()
 	}
+}
+
+// ensureSSHDLockdown creates host.ManagedGroup and brings the sshd drop-in up
+// to date (reloading sshd if it changed). In per-identity mode a failure to
+// create the group is fatal, because accounts would then keep authorized_keys
+// login; in shared mode it is logged. In shared mode it also warns when no
+// account is in the group, since the administrator must add the shared account.
+func ensureSSHDLockdown(mode string) error {
+	if err := host.EnsureManagedGroup(); err != nil {
+		if mode == "per-identity" {
+			return fmt.Errorf("per-identity mode: %w", err)
+		}
+		slog.Warn("could not create managed group", "group", host.ManagedGroup, "err", err)
+	}
+	if _, err := os.Stat(sshdCAPubKeyFile); err == nil {
+		changed, err := host.EnsureSSHDDropIn(sshdConfFile, sshdCAPubKeyFile)
+		if err != nil {
+			return fmt.Errorf("update sshd drop-in: %w", err)
+		}
+		if changed {
+			slog.Info("updated sshd drop-in", "file", sshdConfFile)
+			if err := host.ReloadSSHD(); err != nil {
+				return fmt.Errorf("reload sshd after updating drop-in: %w", err)
+			}
+		}
+	} else {
+		slog.Warn("CA key file missing; run 'ziti-ssh-host enroll' first", "file", sshdCAPubKeyFile)
+	}
+	if mode != "per-identity" {
+		members, err := host.ManagedGroupMembers()
+		switch {
+		case err != nil:
+			slog.Warn("could not read managed group members", "group", host.ManagedGroup, "err", err)
+		case len(members) == 0:
+			slog.Warn("shared mode: no account is in the managed group, so the shared account's own authorized_keys stays active; "+
+				"add it with: usermod -aG "+host.ManagedGroup+" <shared account>", "group", host.ManagedGroup)
+		default:
+			slog.Info("shared mode: accounts restricted to certificate login", "group", host.ManagedGroup, "members", members)
+		}
+	}
+	return nil
 }

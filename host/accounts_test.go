@@ -818,3 +818,63 @@ func TestCleanupOrphans_TerminateOnDisconnect(t *testing.T) {
 		t.Errorf("want processes of the orphaned account ended and the account kept: %v", ops.calls)
 	}
 }
+
+// ---- M10: managed accounts are restricted to certificate login --------------
+
+func TestSSHDDropIn_DisablesKeyFilesForManagedGroup(t *testing.T) {
+	got := SSHDDropIn("/etc/ssh/ziti_ca.pub")
+	for _, want := range []string{
+		"TrustedUserCAKeys /etc/ssh/ziti_ca.pub\n",
+		"Match Group " + ManagedGroup + "\n",
+		"    AuthorizedKeysFile none\n",
+		"    AuthorizedKeysCommand none\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("drop-in missing %q:\n%s", want, got)
+		}
+	}
+	// TrustedUserCAKeys must come before the Match block (global scope).
+	if strings.Index(got, "TrustedUserCAKeys") > strings.Index(got, "Match Group") {
+		t.Error("TrustedUserCAKeys must precede the Match block")
+	}
+}
+
+func TestEnsureSSHDDropIn_RewritesOnlyWhenDifferent(t *testing.T) {
+	conf := filepath.Join(t.TempDir(), "ziti-ssh.conf")
+	// A drop-in from an earlier release.
+	if err := os.WriteFile(conf, []byte("TrustedUserCAKeys /etc/ssh/ziti_ca.pub\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := EnsureSSHDDropIn(conf, "/etc/ssh/ziti_ca.pub")
+	if err != nil || !changed {
+		t.Fatalf("old drop-in not upgraded: changed=%v err=%v", changed, err)
+	}
+	changed, err = EnsureSSHDDropIn(conf, "/etc/ssh/ziti_ca.pub")
+	if err != nil || changed {
+		t.Fatalf("up-to-date drop-in rewritten: changed=%v err=%v", changed, err)
+	}
+}
+
+func TestEnsureUser_AlwaysInManagedGroup(t *testing.T) {
+	ops := newFakeOps()
+	m := testManager(t, t.TempDir(), ops, false)
+	if err := m.EnsureUser("alice", "alice", IdentityPermissions{Groups: []string{"dev", ManagedGroup}}); err != nil {
+		t.Fatal(err)
+	}
+	if !ops.called("groups:alice:dev," + ManagedGroup) {
+		t.Errorf("managed group not added exactly once: %v", ops.calls)
+	}
+	ops.calls = nil
+	if err := m.EnsureUser("alice", "alice", IdentityPermissions{}); err != nil {
+		t.Fatal(err)
+	}
+	if !ops.called("groups:alice:" + ManagedGroup) {
+		t.Errorf("account with no configured groups not kept in managed group: %v", ops.calls)
+	}
+	ops.calls = nil
+	_ = m.ReleaseUser("alice")
+	_ = m.ReleaseUser("alice")
+	if !ops.called("groups:alice:"+ManagedGroup) || ops.called("groups:alice:dev") {
+		t.Errorf("release must drop configured groups but keep the managed group: %v", ops.calls)
+	}
+}

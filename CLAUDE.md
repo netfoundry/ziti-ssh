@@ -356,13 +356,19 @@ The username before `@` is the Ziti identity name (which is also the derived Lin
 
 ## SSH Host Configuration
 
-Written by `ziti-ssh-host enroll` to `/etc/ssh/sshd_config.d/ziti-ssh.conf`:
+Written by `ziti-ssh-host enroll` to `/etc/ssh/sshd_config.d/ziti-ssh.conf` (and refreshed by `run` at startup if it differs, e.g. after an upgrade — `host.EnsureSSHDDropIn`):
 
 ```
+# Managed by ziti-ssh-host.
 TrustedUserCAKeys /etc/ssh/ziti_ca.pub
+
+# Accounts managed through Ziti may only log in with a CA certificate.
+Match Group ziti-ssh-managed
+    AuthorizedKeysFile none
+    AuthorizedKeysCommand none
 ```
 
-No other changes required. No SSSD, no NSS, no PAM modifications, no custom sshd.
+Members of `ziti-ssh-managed` (`host.ManagedGroup`) can only log in with a CA certificate: a key a user adds to their own authorized_keys cannot outlive their certificate or identity. Per-identity accounts are always kept in the group; in shared mode the administrator adds the shared account (`usermod -aG ziti-ssh-managed ziggy`), and `run` warns at startup if the group is empty. The group is created by the package postinstall, `enroll` and `run`. Verified on Ubuntu 24.04: the `Match` block ends with the included file (`sshd -t` passes; main-config settings stay global). No SSSD, no NSS, no PAM modifications, no custom sshd.
 
 ## PKI Hierarchy
 

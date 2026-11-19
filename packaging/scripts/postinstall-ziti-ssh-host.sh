@@ -54,6 +54,13 @@ ENVEOF
     chmod 640 /etc/ziti-ssh-host/env
 fi
 
+# Accounts in this group may only log in with a CA certificate (the sshd
+# drop-in written by "ziti-ssh-host enroll" disables authorized_keys for them).
+# Add the shared account to it in shared mode: usermod -aG ziti-ssh-managed <user>
+if command -v groupadd >/dev/null 2>&1; then
+    groupadd -f --system ziti-ssh-managed
+fi
+
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload || true
 fi

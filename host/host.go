@@ -288,6 +288,44 @@ func proxyConn(src net.Conn, target string, hooks *ProxyHooks) {
 	<-done
 }
 
+// ManagedGroup is the Linux group whose members' own authorized_keys (and any
+// AuthorizedKeysCommand) sshd ignores, so they can only log in with a CA
+// certificate. ziti-ssh-host adds every per-identity account to it; in shared
+// mode the administrator adds the shared account.
+const ManagedGroup = "ziti-ssh-managed"
+
+// SSHDDropIn returns the sshd_config.d drop-in content: trust the CA keys in
+// keyFile, and disable key files and key commands for ManagedGroup members.
+// A user could otherwise add a key to their own authorized_keys file that
+// keeps working after their certificate expires or their identity is revoked.
+func SSHDDropIn(keyFile string) string {
+	return fmt.Sprintf(`# Managed by ziti-ssh-host.
+TrustedUserCAKeys %s
+
+# Accounts managed through Ziti may only log in with a CA certificate.
+Match Group %s
+    AuthorizedKeysFile none
+    AuthorizedKeysCommand none
+`, keyFile, ManagedGroup)
+}
+
+// EnsureSSHDDropIn rewrites confFile with SSHDDropIn(keyFile) if its content
+// differs (e.g. after an upgrade) and reports whether it changed. The caller
+// must reload sshd when it did.
+func EnsureSSHDDropIn(confFile, keyFile string) (bool, error) {
+	want := SSHDDropIn(keyFile)
+	if cur, err := os.ReadFile(confFile); err == nil && string(cur) == want {
+		return false, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(confFile), 0755); err != nil {
+		return false, fmt.Errorf("create dir for %q: %w", confFile, err)
+	}
+	if err := atomicWriteFile(confFile, []byte(want), 0644); err != nil {
+		return false, fmt.Errorf("write sshd config to %q: %w", confFile, err)
+	}
+	return true, nil
+}
+
 // WriteSSHConfig writes the CA public key to keyFile (mode 0644) and writes
 // a sshd_config.d snippet referencing it to confFile (mode 0644). Parent
 // directories are created as needed.
@@ -310,7 +348,7 @@ func WriteSSHConfig(caPubKey []byte, confFile, keyFile string) error {
 	if err := os.MkdirAll(filepath.Dir(confFile), 0755); err != nil {
 		return fmt.Errorf("create dir for %q: %w", confFile, err)
 	}
-	conf := fmt.Sprintf("TrustedUserCAKeys %s\n", keyFile)
+	conf := SSHDDropIn(keyFile)
 	if err := atomicWriteFile(confFile, []byte(conf), 0644); err != nil {
 		return fmt.Errorf("write sshd config to %q: %w", confFile, err)
 	}
@@ -627,8 +665,9 @@ func (m *UserManager) applyPermissions(zitiIdentity, username string, perms Iden
 			"identity", zitiIdentity, "username", username, "step", what, "err", err)
 		return fmt.Errorf("identity %q: %s for %q: %w", zitiIdentity, what, username, err)
 	}
-	if err := m.ops.SetGroups(username, perms.Groups); err != nil {
-		return reject(fmt.Sprintf("setting supplementary groups %v", perms.Groups), err)
+	groups := withManagedGroup(perms.Groups)
+	if err := m.ops.SetGroups(username, groups); err != nil {
+		return reject(fmt.Sprintf("setting supplementary groups %v", groups), err)
 	}
 	if err := m.ops.RemoveLegacySudoers(username); err != nil {
 		return reject("removing legacy sudoers file", err)
@@ -654,9 +693,21 @@ func (m *UserManager) dropPrivileges(username string) {
 	if err := m.ops.RemoveSudoers(username); err != nil {
 		slog.Error("failed to remove sudoers file", "username", username, "err", err)
 	}
-	if err := m.ops.SetGroups(username, nil); err != nil {
+	if err := m.ops.SetGroups(username, []string{ManagedGroup}); err != nil {
 		slog.Error("failed to clear supplementary groups", "username", username, "err", err)
 	}
+}
+
+// withManagedGroup returns groups plus ManagedGroup (once). Managed accounts
+// always stay in it so sshd never accepts their own authorized_keys.
+func withManagedGroup(groups []string) []string {
+	out := make([]string, 0, len(groups)+1)
+	for _, g := range groups {
+		if g != ManagedGroup {
+			out = append(out, g)
+		}
+	}
+	return append(out, ManagedGroup)
 }
 
 // ensureOwnedAccount verifies or establishes ownership of username for
