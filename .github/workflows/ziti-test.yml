@@ -26,6 +26,10 @@ on:
           - 'false'
           - 'true'
 
+# Least privilege by default; jobs below widen only what they need.
+permissions:
+  contents: read
+
 jobs:
   build-debs:
     name: Build Debian Packages
@@ -51,9 +55,17 @@ jobs:
   integration-test:
     name: Integration Test
     needs: build-debs
-    uses: netfoundry/ziti-test-suite/.github/workflows/ziti-network.yml@main
+    # The reusable workflow and the suite code it checks out are pinned to the
+    # same commit (ziti-test-suite main, 2026-04-24). ziti-test-suite is private:
+    # bump both SHAs together by hand unless Dependabot has been granted access.
+    # id-token: write is the maximum the called workflow requests (AWS OIDC).
+    permissions:
+      contents: read
+      id-token: write
+    uses: netfoundry/ziti-test-suite/.github/workflows/ziti-network.yml@fdba452ba30e016a7cc8bbb051784606efe35c55 # main 2026-04-24
     with:
       topology_file: suites/ziti-ssh/suite.yml
+      ziti_test_suite_ref: fdba452ba30e016a7cc8bbb051784606efe35c55
       artifacts: ziti-ssh-debs
       keep_on_failure: ${{ inputs.keep_on_failure || 'false' }}
     secrets:

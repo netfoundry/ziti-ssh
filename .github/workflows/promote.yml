@@ -9,6 +9,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}
   cancel-in-progress: true
 
+# Least privilege by default; promote_artifactory adds id-token: write.
+permissions:
+  contents: read
+
 jobs:
   enforce_stable_semver:
     name: Require Stable Release Semver
