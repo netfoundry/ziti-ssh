@@ -57,6 +57,7 @@ import (
 
 	"github.com/netfoundry/ziti-ssh/client"
 	"github.com/netfoundry/ziti-ssh/config"
+	"github.com/netfoundry/ziti-ssh/internal/mfa"
 	zitioidc "github.com/netfoundry/ziti-ssh/internal/oidc"
 )
 
@@ -261,6 +262,7 @@ func runSign(p signParams) error {
 	defer zitiCtx.Close()
 
 	registerZtAPIsPersist(zitiCtx, p.identityFile)
+	defer mfa.RegisterTTY(zitiCtx)()
 
 	if err := zitioidc.AddCredentials(zitiCtx, p.oidc); err != nil {
 		return err
@@ -465,6 +467,7 @@ func runSCP(p scpParams) error {
 	defer zitiCtx.Close()
 
 	registerZtAPIsPersist(zitiCtx, p.identityFile)
+	defer mfa.RegisterTTY(zitiCtx)()
 
 	if err := zitioidc.AddCredentials(zitiCtx, p.oidc); err != nil {
 		return err

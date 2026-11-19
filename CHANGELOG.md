@@ -126,6 +126,10 @@ See security advisory GHSA-TBD for details.
 **Updated docs:** `docs/operations.md` (account ownership flow diagram, lifecycle, new "Managing account ownership" section, files-written table), `docs/configuration.md` (`users` subcommands, sudoers path), `ARCHITECTURE.md` (`UserManager`, `deleteUser`, §12 account ownership boundary), `CLAUDE.md`.
 
 ### Fixed
+#### MFA codes asked for by every client command
+
+- `ziti-ssh connect/sign/proxy/list` and `ziti-scp` now ask for an MFA TOTP code when the controller requires one; previously only the `mfa` subcommands did, so other commands could not authenticate an MFA-enrolled identity. Codes are read from the terminal (`/dev/tty`) without echo — never from stdin — and authentication stops after three wrong codes or at end of input (the `mfa` prompt previously looped forever on closed stdin). Shared code in `internal/mfa`.
+
 #### Client target parsing
 
 - `ziti-ssh` and `ziti-scp` split `[user@]target` at the last `@` (as OpenSSH does), so per-identity user names such as `alice@corp.com` work (`ziti-ssh alice@corp.com@web1`). Previously the target became `corp.com@web1`.

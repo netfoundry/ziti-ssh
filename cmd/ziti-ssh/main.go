@@ -31,7 +31,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -51,7 +50,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/openziti/edge-api/rest_model"
 	edgeapis "github.com/openziti/sdk-golang/edge-apis"
 	ziti "github.com/openziti/sdk-golang/ziti"
 	"github.com/openziti/sdk-golang/ziti/enroll"
@@ -62,6 +60,7 @@ import (
 
 	"github.com/netfoundry/ziti-ssh/client"
 	"github.com/netfoundry/ziti-ssh/config"
+	"github.com/netfoundry/ziti-ssh/internal/mfa"
 )
 
 // ---------------------------------------------------------------------------
@@ -422,6 +421,7 @@ func runSign(p signParams) error {
 	}
 
 	registerZtAPIsPersist(zitiCtx, p.identityFile)
+	defer mfa.RegisterTTY(zitiCtx)()
 
 	if err := config.RunWithTimeout(p.zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
 		return err
@@ -608,6 +608,7 @@ func runConnect(p connectParams) error {
 	}
 
 	registerZtAPIsPersist(zitiCtx, p.identityFile)
+	defer mfa.RegisterTTY(zitiCtx)()
 
 	if err := config.RunWithTimeout(p.zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
 		return err
@@ -907,6 +908,10 @@ func runProxy(p proxyParams) error {
 
 	registerZtAPIsPersist(zitiCtx, p.identityFile)
 
+	// MFA codes are read from the terminal, never stdin (here it carries the
+	// SSH stream).
+	defer mfa.RegisterTTY(zitiCtx)()
+
 	if err := config.RunWithTimeout(p.zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
 		return err
 	}
@@ -1027,6 +1032,7 @@ func runList(identityFile string, zitiTimeout time.Duration) error {
 		return fmt.Errorf("init Ziti context from %q: %w", identityFile, err)
 	}
 	defer zitiCtx.Close()
+	defer mfa.RegisterTTY(zitiCtx)()
 
 	if err := config.RunWithTimeout(zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
 		return err
@@ -1063,31 +1069,8 @@ func runList(identityFile string, zitiTimeout time.Duration) error {
 // MFA helpers
 // ---------------------------------------------------------------------------
 
-func readMFACode(allowEmpty bool) string {
-	reader := bufio.NewReader(os.Stdin)
-	for {
-		fmt.Print("MFA TOTP code: ")
-		code, _ := reader.ReadString('\n')
-		code = strings.TrimSpace(code)
-		if code != "" || allowEmpty {
-			return code
-		}
-	}
-}
-
-// mfaTotpListener returns a listener function compatible with
-// ziti.Events().AddMfaTotpCodeListener.
-func mfaTotpListener(_ ziti.Context, _ *rest_model.AuthQueryDetail, response ziti.MfaCodeResponse) {
-	for {
-		fmt.Println("MFA TOTP required to fully authenticate.")
-		code := readMFACode(false)
-		if err := response(code); err != nil {
-			fmt.Println("error verifying MFA TOTP:", err)
-			continue
-		}
-		break
-	}
-}
+// mfaStdin reads MFA codes for the mfa subcommands (hidden on a terminal).
+var mfaStdin = mfa.NewReader(os.Stdin)
 
 func runMFAEnable(identityFile string, showQR bool, zitiTimeout time.Duration) error {
 	zitiCtx, err := ziti.NewContextFromFile(identityFile)
@@ -1097,7 +1080,7 @@ func runMFAEnable(identityFile string, showQR bool, zitiTimeout time.Duration) e
 	defer zitiCtx.Close()
 
 	// Register MFA listener before authenticating in case it fires during auth.
-	zitiCtx.Events().AddMfaTotpCodeListener(mfaTotpListener)
+	zitiCtx.Events().AddMfaTotpCodeListener(mfa.Listener(mfaStdin, os.Stderr))
 
 	if err := config.RunWithTimeout(zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
 		return err
@@ -1128,7 +1111,10 @@ func runMFAEnable(identityFile string, showQR bool, zitiTimeout time.Duration) e
 	}
 	fmt.Println()
 
-	code := readMFACode(false)
+	code, err := mfa.ReadCode(mfaStdin, os.Stderr, false)
+	if err != nil {
+		return err
+	}
 	if err := zitiCtx.VerifyZitiMfa(code); err != nil {
 		return fmt.Errorf("verify MFA code: %w", err)
 	}
@@ -1161,7 +1147,7 @@ func runMFAVerify(identityFile string, zitiTimeout time.Duration) error {
 	}
 	defer zitiCtx.Close()
 
-	zitiCtx.Events().AddMfaTotpCodeListener(mfaTotpListener)
+	zitiCtx.Events().AddMfaTotpCodeListener(mfa.Listener(mfaStdin, os.Stderr))
 
 	if err := config.RunWithTimeout(zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
 		return err
@@ -1186,7 +1172,11 @@ func runMFARemove(identityFile string, zitiTimeout time.Duration) error {
 			fmt.Println("If MFA TOTP is enrolled, enter a valid code or recovery code.")
 			fmt.Println("Otherwise, enter any value to continue.")
 			fmt.Println()
-			code := readMFACode(true)
+			code, err := mfa.ReadCode(mfaStdin, os.Stderr, true)
+			if err != nil {
+				done <- err
+				return
+			}
 			if err := c.RemoveZitiMfa(code); err != nil {
 				done <- fmt.Errorf("remove MFA: %w", err)
 				return

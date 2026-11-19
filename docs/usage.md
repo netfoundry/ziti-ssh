@@ -400,6 +400,8 @@ ziti-ssh mfa verify --identity ~/.config/ziti-ssh/alice.json
 ziti-ssh mfa remove --identity ~/.config/ziti-ssh/alice.json
 ```
 
+Once MFA is enabled, every command that authenticates — `connect`, `sign`, `proxy`, `list` and `ziti-scp` — asks for a code when the controller requires one (`MFA TOTP code:`). The code is read from your terminal (`/dev/tty`) without echo, never from stdin, so piped input and `proxy`'s SSH stream are left alone. Three wrong codes, or no terminal, end authentication. Entering the code counts against `--ziti-timeout` (default 30s). The `mfa` subcommands read codes from stdin (hidden when it is a terminal).
+
 ---
 
 ## Config file usage
