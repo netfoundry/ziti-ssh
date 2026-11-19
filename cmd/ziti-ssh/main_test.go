@@ -55,3 +55,19 @@ func TestResolveKey_NonInteractiveNeverPrompts(t *testing.T) {
 		t.Fatalf("non-interactive resolveKey wrote to stdout (would corrupt the proxied SSH stream): %q", out)
 	}
 }
+
+func TestParseTarget_SplitsAtLastAt(t *testing.T) {
+	cases := map[string][2]string{
+		"bob@web1":            {"bob", "web1"},
+		"alice@corp.com@web1": {"alice@corp.com", "web1"},
+	}
+	for in, want := range cases {
+		u, h, err := parseTarget(in)
+		if err != nil || u != want[0] || h != want[1] {
+			t.Errorf("parseTarget(%q) = %q, %q, %v; want %q, %q", in, u, h, err, want[0], want[1])
+		}
+	}
+	if _, h, err := parseTarget("web1"); err != nil || h != "web1" {
+		t.Errorf("parseTarget(web1) = %q, %v", h, err)
+	}
+}

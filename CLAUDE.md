@@ -142,7 +142,7 @@ Config file at `~/.config/ziti-ssh/config.yaml` (XDG_CONFIG_HOME respected). Fie
 
 ### File Copy Tool (`ziti-scp`)
 
-- Parses `[user@]host:path` remote specs and bare local paths from positional arguments (last arg is destination).
+- Parses `[user@]host:path` remote specs and bare local paths from positional arguments (last arg is destination). Remote only if a `:` has no `/` before it (scp semantics); user split at the last `@` (also `ziti-ssh`'s `parseTarget`). `--service <svc>` forces terminator addressing (as in `ziti-ssh`).
 - Same cert auto-refresh threshold and Ziti dial logic as `ziti-ssh`.
 - Flags: `-r` (recursive), `-p` (preserve timestamps/permissions), `-q` (quiet).
 - `enroll` subcommand for identity enrollment (mirrors `ziti-ssh enroll`).

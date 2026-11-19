@@ -130,12 +130,15 @@ type remoteSpec struct {
 }
 
 // parseArg parses a single scp-style argument. It returns (isRemote, remoteSpec, localPath).
-// A remote specification is any argument containing ":" that is not an absolute or
-// relative path (i.e. does not start with "/" or ".").
+// As with scp(1), an argument is remote ("[user@]host:path") only if it has a
+// ':' with no '/' before it; anything else — including "/a:b", "./a:b" and
+// "dir/a:b" — is a local path. A single-letter host part is treated as a
+// Windows drive letter ("C:\x"), i.e. local.
 func parseArg(arg string) (isRemote bool, remote remoteSpec, localPath string) {
-	// Detect "host:path" — the colon must appear before any "/" to avoid
-	// treating absolute paths like "/foo/bar" as remote specs.
 	colonIdx := strings.Index(arg, ":")
+	if slashIdx := strings.Index(arg, "/"); slashIdx >= 0 && slashIdx < colonIdx {
+		return false, remoteSpec{}, arg
+	}
 	if colonIdx > 0 {
 		hostPart := arg[:colonIdx]
 		// Make sure the host part does not look like a Windows absolute path
@@ -149,10 +152,12 @@ func parseArg(arg string) (isRemote bool, remote remoteSpec, localPath string) {
 	return false, remoteSpec{}, arg
 }
 
-// splitUserHost splits "user@host" into (user, host). If no "@" is present the
-// current OS username is used.
+// splitUserHost splits "user@host" into (user, host) at the last "@" (as
+// OpenSSH does), so user names that contain "@" — Ziti identity names such as
+// "alice@corp.com" — are kept whole. If no "@" is present the current OS
+// username is used.
 func splitUserHost(hostPart string) (u, h string) {
-	if idx := strings.IndexByte(hostPart, '@'); idx >= 0 {
+	if idx := strings.LastIndexByte(hostPart, '@'); idx >= 0 {
 		return hostPart[:idx], hostPart[idx+1:]
 	}
 	cur, err := user.Current()
@@ -367,6 +372,7 @@ type scpParams struct {
 	identityFile string
 	caService    string
 	sshService   string
+	service      string // --service: dial this service with the host as terminator
 	keyFile      string
 	oidc         zitioidc.FlowParams
 	recursive    bool
@@ -472,7 +478,11 @@ func runSCP(p scpParams) error {
 	dialService := p.sshService
 	terminatorAddr := remoteHost
 
-	if _, ok := zitiCtx.GetService(remoteHost); ok {
+	if p.service != "" {
+		// Explicit --service: always address the host as a terminator on it,
+		// even if the host name is also a service name.
+		dialService = p.service
+	} else if _, ok := zitiCtx.GetService(remoteHost); ok {
 		dialService = remoteHost
 		terminatorAddr = ""
 		fmt.Fprintf(os.Stderr, "Dialing service %q directly: any host bound to it may answer.\n", dialService)
@@ -556,8 +566,13 @@ overlay — port 22 is never exposed externally.
 At least one of <src> or <dst> must be a remote specification of the form:
   [user@]host:path
 
-If the remote hostname matches a Ziti service name it is dialled directly.
-Otherwise it is used as a terminator address on --ssh-service (default: "ssh").
+If the remote hostname matches a Ziti service name it is dialled directly
+(any host bound to that service may answer; a notice is printed). Otherwise it
+is used as a terminator address on --ssh-service (default: "ssh"). Use
+--service <name> to always treat the hostname as a terminator address on <name>.
+
+An argument is remote only if it contains ':' with no '/' before it; use
+./name:with:colons for local files whose names contain ':'.
 
 Examples:
 
@@ -640,6 +655,7 @@ of validity remain.`,
 				identityFile: identityFile,
 				caService:    caService,
 				sshService:   sshService,
+				service:      serviceFlag,
 				keyFile:      resolvedKey,
 				oidc:         oidcParams,
 				recursive:    recursiveFlag,
@@ -659,6 +675,7 @@ of validity remain.`,
 
 	root.Flags().StringVar(&caServiceFlag, "ca-service", "", "CA service name (or ZITI_CA_SERVICE, default: ssh-ca)")
 	root.Flags().StringVar(&sshServiceFlag, "ssh-service", "", "SSH service name (or ZITI_SSH_SERVICE, default: ssh)")
+	root.Flags().StringVar(&serviceFlag, "service", "", "Dial this service with the remote host as terminator address, even if the host name is also a service name")
 	root.Flags().StringVar(&keyFlag, "key", "", "SSH private key path (default: auto-detect from ~/.ssh/)")
 	root.Flags().StringVar(&oidcIssuerFlag, "oidc-issuer", "", "OIDC issuer URL; triggers browser-based OIDC auth before connecting (or set oidc.issuer in config)")
 	root.Flags().BoolVarP(&recursiveFlag, "recursive", "r", false, "Recursively copy entire directories")
@@ -713,6 +730,7 @@ Example:
 var (
 	caServiceFlag  string
 	sshServiceFlag string
+	serviceFlag    string
 	keyFlag        string
 	oidcIssuerFlag string
 	recursiveFlag  bool

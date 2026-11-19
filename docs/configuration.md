@@ -21,7 +21,7 @@ All binaries resolve each setting in the same order: CLI flag > environment vari
 |---|---|---|---|
 | `--ca-service` | `ZITI_CA_SERVICE` | `ssh-ca` | CA service name |
 | `--ssh-service` | `ZITI_SSH_SERVICE` | `ssh` | SSH service name |
-| `--service` | — | — | SSH service name to dial (alias for `--ssh-service`) |
+| `--service` | — | — | Dial this service with the target as terminator address, even if the target is also a service name (otherwise like `--ssh-service`) |
 | `--key` | — | auto-detect | SSH private key path |
 | `--oidc-issuer` | — | — | OIDC issuer URL; triggers browser-based OIDC auth (overrides `oidc.issuer` in config) |
 | `-N` / `--no-shell` | — | false | Do not open a shell; only run port forwards. Requires at least one `-L`, `-R`, or `-D`. |
@@ -37,7 +37,7 @@ All binaries resolve each setting in the same order: CLI flag > environment vari
 |---|---|---|---|
 | `--ca-service` | `ZITI_CA_SERVICE` | `ssh-ca` | CA service name (for cert auto-refresh) |
 | `--ssh-service` | `ZITI_SSH_SERVICE` | `ssh` | SSH service name |
-| `--service` | — | — | SSH service name to dial (alias for `--ssh-service`) |
+| `--service` | — | — | Dial this service with the target as terminator address, even if the target is also a service name (otherwise like `--ssh-service`) |
 | `--key` | — | auto-detect | SSH private key path (used for cert refresh check) |
 | `--oidc-issuer` | — | — | OIDC issuer URL; triggers browser-based OIDC auth before dialling |
 
@@ -190,6 +190,7 @@ See [Managing account ownership](operations.md#managing-account-ownership) for w
 |---|---|---|---|
 | `--ca-service` | `ZITI_CA_SERVICE` | `ssh-ca` | CA service name |
 | `--ssh-service` | `ZITI_SSH_SERVICE` | `ssh` | SSH service name |
+| `--service` | — | — | Dial this service with the remote host as terminator address, even if the host name is also a service name |
 | `--key` | — | auto-detect | SSH private key path |
 | `-r` / `--recursive` | — | false | Recursively copy entire directories |
 | `-p` / `--preserve` | — | false | Preserve file timestamps and permissions (on download, never world-writable) |

@@ -398,10 +398,12 @@ func runSign(p signParams) error {
 // connect subcommand logic
 // ---------------------------------------------------------------------------
 
-// parseTarget splits "[user@]target" into (user, target). If no "@" is
-// present the current OS user is returned as the default username.
+// parseTarget splits "[user@]target" into (user, target) at the last "@" (as
+// OpenSSH does), so user names that contain "@" — Ziti identity names such as
+// "alice@corp.com" in per-identity mode — are kept whole. If no "@" is present
+// the current OS user is returned as the default username.
 func parseTarget(arg string) (username, target string, err error) {
-	if idx := strings.IndexByte(arg, '@'); idx >= 0 {
+	if idx := strings.LastIndexByte(arg, '@'); idx >= 0 {
 		return arg[:idx], arg[idx+1:], nil
 	}
 	cur, err := user.Current()

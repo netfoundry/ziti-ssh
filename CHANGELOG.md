@@ -126,6 +126,12 @@ See security advisory GHSA-TBD for details.
 **Updated docs:** `docs/operations.md` (account ownership flow diagram, lifecycle, new "Managing account ownership" section, files-written table), `docs/configuration.md` (`users` subcommands, sudoers path), `ARCHITECTURE.md` (`UserManager`, `deleteUser`, §12 account ownership boundary), `CLAUDE.md`.
 
 ### Fixed
+#### Client target parsing
+
+- `ziti-ssh` and `ziti-scp` split `[user@]target` at the last `@` (as OpenSSH does), so per-identity user names such as `alice@corp.com` work (`ziti-ssh alice@corp.com@web1`). Previously the target became `corp.com@web1`.
+- `ziti-scp` treats an argument as remote only if it contains `:` with no `/` before it, matching `scp`. Previously `/data/a:b`, `./a:b` and `dir/a:b` were taken as remote host specifications.
+- `ziti-scp --service <name>` (as in `ziti-ssh`) treats the remote host as a terminator address on `<name>` even when the host name is also a service name.
+
 
 #### `ziti-ssh-host` did not reload a running sshd on socket-activated systems
 
