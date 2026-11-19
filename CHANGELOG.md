@@ -43,6 +43,7 @@ See security advisory GHSA-TBD for details.
 
 - `ReloadSSHD` now reloads `ssh.service` whenever it is active and sends SIGHUP to top-level sshd listeners (PPID 1) unless `ssh.socket` uses `Accept=yes` (where per-connection sshd processes also have PPID 1). The decision is unit-tested (`planSSHDReload`).
 - Integration suite: `install-ca.sh` no longer reports `ziti-ssh-ca` as running when its first start fails because the `ssh-ca` service has not been created yet; systemd restarts it until the service exists.
+- Integration suite: `install-host.sh` no longer fails provisioning when `ziti-ssh-host` first exits with `service 'ssh' not found` (the service is created only after all edge routers are online); systemd restarts it until the service exists. Any other startup failure is still fatal.
 
 ### Changed
 

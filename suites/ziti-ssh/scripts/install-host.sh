@@ -158,13 +158,27 @@ WantedBy=multi-user.target
 UNITEOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now ziti-ssh-host
+sudo systemctl enable --now ziti-ssh-host || true
 
 # With Type=notify, systemd waits for READY=1 before reporting active, so
 # is-active here confirms the daemon fully initialised and opened its listener.
+#
+# One startup failure is expected: the "ssh" Ziti service is created by the
+# suite's network resources, which are applied only after ALL edge routers are
+# online. If this ER finishes first, ziti-ssh-host exits with
+# "service 'ssh' not found" and systemd restarts it (Restart=on-failure,
+# RestartSec=5) until the service exists. Any other failure is fatal.
 if ! sudo systemctl is-active --quiet ziti-ssh-host; then
+    # Capture before matching: piping journalctl into "grep -q" can SIGPIPE
+    # journalctl and fail the pipeline under "set -o pipefail".
+    JOURNAL=$(sudo journalctl -u ziti-ssh-host --no-pager -n 50 || true)
+    if grep -q "service 'ssh' not found" <<< "${JOURNAL}"; then
+        log "install-host.sh complete — ziti-ssh-host enabled as ${IDENTITY_NAME};" \
+            "waiting for the 'ssh' service to be created (systemd will restart it)"
+        exit 0
+    fi
     log "ziti-ssh-host failed to start — recent journal output:"
-    sudo journalctl -u ziti-ssh-host --no-pager -n 50 >&2
+    printf '%s\n' "${JOURNAL}" >&2
     exit 1
 fi
 
