@@ -54,7 +54,7 @@ ziti-ssh connect ziggy@web-server-prod
 
 `web-server-prod` is the Ziti identity name of the target host. `ziti-ssh` resolves this as a Ziti service terminator address on the `ssh` service — no DNS, no IP address required.
 
-If a certificate is missing or will expire within 5 minutes, `ziti-ssh connect` automatically obtains a fresh one from the CA before opening the session. On first use it auto-detects your SSH key in `~/.ssh/` (tries `id_ed25519`, `id_ecdsa`, `id_rsa` in that order). If no key exists it offers to run `ssh-keygen -t ed25519` for you.
+If a certificate is missing or less than 20% of its lifetime remains (between 30 s and 5 min — 1 minute for the default 5-minute certificate), `ziti-ssh connect` automatically obtains a fresh one from the CA before opening the session. On first use it auto-detects your SSH key in `~/.ssh/` (tries `id_ed25519`, `id_ecdsa`, `id_rsa` in that order). If no key exists it offers to run `ssh-keygen -t ed25519` for you.
 
 If the SSH private key is passphrase-protected, `ziti-ssh connect` falls back to the SSH agent (`SSH_AUTH_SOCK`). It locates the matching key in the agent and, if a certificate is present on disk, wraps it as an `ssh.CertSigner` so the certificate is offered during authentication. The passphrase is never exposed to this process. If the key is passphrase-protected and `SSH_AUTH_SOCK` is not set (or the key has not been added with `ssh-add`), `ziti-ssh connect` exits with an actionable error.
 
@@ -238,7 +238,7 @@ Host prod-*.internal
 
 ### Identity and certificate
 
-`ziti-ssh proxy` uses the same `--identity` flag, `ZITI_IDENTITY` environment variable, and `~/.config/ziti-ssh/config.yaml` as the `connect` subcommand. It auto-refreshes the SSH certificate if it is missing or will expire within 5 minutes — so the `ssh` process that reads `ProxyCommand` output will find a valid cert in `~/.ssh/<key>-cert.pub`.
+`ziti-ssh proxy` uses the same `--identity` flag, `ZITI_IDENTITY` environment variable, and `~/.config/ziti-ssh/config.yaml` as the `connect` subcommand. It auto-refreshes the SSH certificate if it is missing or less than 20% of its lifetime remains (between 30 s and 5 min — 1 minute for the default 5-minute certificate) — so the `ssh` process that reads `ProxyCommand` output will find a valid cert in `~/.ssh/<key>-cert.pub`.
 
 The user@ part in `ProxyCommand ziti-ssh proxy %h` is accepted for syntax compatibility but is not used by `ziti-ssh proxy` — the connection happens at the TCP level below SSH authentication.
 
@@ -283,7 +283,7 @@ The certificate is written to `~/.ssh/<key>-cert.pub` and its details are printe
                 permit-pty
 ```
 
-The certificate expires after the TTL configured on the CA (default: 8 hours). `ziti-ssh connect` auto-renews when fewer than 5 minutes of validity remain.
+The certificate expires after the TTL configured on the CA (default: 5 minutes). `ziti-ssh connect` auto-renews when less than 20% of its lifetime remains (between 30 s and 5 min — 1 minute for the default 5-minute certificate). If the CA refuses a request (for example `CA refused the request: rate limit exceeded`), the existing certificate file is left untouched.
 
 ---
 
@@ -329,7 +329,7 @@ ziti-scp -r ziggy@web-server-prod:/remote/dir /local/dir/
 | `--ssh-service` | — | `ssh` | SSH service name |
 | `--config` | — | `~/.config/ziti-ssh/config.yaml` | Config file path |
 
-If the certificate is missing or will expire within 5 minutes, `ziti-scp` automatically obtains a fresh certificate from the CA before connecting — the same auto-refresh behaviour as `ziti-ssh connect`.
+If the certificate is missing or less than 20% of its lifetime remains (between 30 s and 5 min — 1 minute for the default 5-minute certificate), `ziti-scp` automatically obtains a fresh certificate from the CA before connecting — the same auto-refresh behaviour as `ziti-ssh connect`.
 
 ### Enroll a Ziti identity
 

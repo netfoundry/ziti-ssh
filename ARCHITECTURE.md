@@ -134,7 +134,7 @@ The client binary. It provides five subcommands (and a root shorthand for `conne
 **`connect [user@]<target>`** (also the root default when a target argument is given):
 
 1. Resolve the SSH private key (auto-detect from `~/.ssh/` or use `--key`).
-2. Call `client.CertNeedsRefresh(certPath)` — if the cert is missing or will expire within 5 minutes, run the sign flow automatically before opening the session.
+2. Call `client.CertNeedsRefresh(certPath)` — if the cert is missing or less than 20% of its lifetime remains (between 30 s and 5 min — 1 minute for the default 5-minute certificate), run the sign flow automatically before opening the session.
 3. Call `client.NewCertSigner(privKeyPath)` to load the private key and, if a `<key>-cert.pub` file is present, wrap it in an `ssh.CertSigner`. If the key is passphrase-protected, fall back to the SSH agent (`SSH_AUTH_SOCK`).
 4. Authenticate to Ziti and dial the `ssh` service, specifying the target identity name as the terminator address via `ziti.DialOptions{Identity: terminatorAddr}`. If the target matches a known Ziti service name directly, it is dialled without a terminator.
 5. Call `client.RunSession(conn, username, host, signer, forwardAgent)` to run an interactive PTY session over the Ziti connection. Pass `forwardAgent=true` when `-A` is set to forward the local SSH agent.
@@ -388,7 +388,7 @@ The key written to `ziti_ca.pub` is the **controller's intermediate CA public ke
 - Which Ziti identity the user holds.
 - Whether the user's Ziti identity is still valid.
 
-Both of these are enforced by the Ziti network before the connection ever reaches `sshd`. The certificate TTL (default 8 hours, configurable via `--cert-ttl` / `ZITI_CERT_TTL` on `ziti-ssh-ca`) provides a backstop: a revoked or expired Ziti identity loses access once any outstanding certificate expires, without any changes on SSH hosts.
+Both of these are enforced by the Ziti network before the connection ever reaches `sshd`. The certificate TTL (default 5 minutes, configurable via `--cert-ttl` / `ZITI_CERT_TTL` on `ziti-ssh-ca`) provides a backstop: a revoked or expired Ziti identity loses access once any outstanding certificate expires, without any changes on SSH hosts.
 
 ---
 
@@ -412,7 +412,7 @@ Certificates are issued on demand and are ephemeral. There is no certificate sto
 
 ### TTL and Revocation
 
-The TTL defaults to 8 hours and is configurable via `--cert-ttl` (flag) or `ZITI_CERT_TTL` (environment variable) on `ziti-ssh-ca`. Any positive `time.Duration` string is accepted (e.g. `4h`, `12h`, `24h`). There is no revocation mechanism. Access control is handled upstream:
+The TTL defaults to 5 minutes and is configurable via `--cert-ttl` (flag) or `ZITI_CERT_TTL` (environment variable) on `ziti-ssh-ca`. Any positive `time.Duration` string is accepted (e.g. `4h`, `12h`, `24h`). There is no revocation mechanism. Access control is handled upstream:
 
 - **While TTL is active:** A user whose Ziti identity is revoked at the controller can no longer dial the `ssh` service — they cannot open new SSH sessions. Any existing SSH session (TCP connection already established) continues until it closes naturally.
 - **After TTL expires:** The certificate is no longer accepted by `sshd`. The user must obtain a new certificate, which requires a live Ziti identity.

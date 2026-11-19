@@ -18,7 +18,7 @@ Four cooperating binaries:
 
 2. **`ziti-ssh-host`** — a host daemon that enrolls the host into a Ziti network, configures sshd to trust the CA, and proxies Ziti connections to the local sshd. In `per-identity` mode, creates ephemeral Linux users and applies per-identity permissions (groups, sudoers rules) sourced from a `ziti-ssh-host.v1` config attached to the Ziti service. A single instance can bind to multiple Ziti services simultaneously, each with independent permissions.
 
-3. **`ziti-ssh`** — a full SSH client over OpenZiti. Subcommands: `connect` (default), `sign`, `enroll`, `list`, `mfa`. Obtains and caches SSH certificates from the CA; auto-refreshes when fewer than 5 minutes of validity remain.
+3. **`ziti-ssh`** — a full SSH client over OpenZiti. Subcommands: `connect` (default), `sign`, `enroll`, `list`, `mfa`. Obtains and caches SSH certificates from the CA; auto-refreshes when less than 20% of its lifetime remains (between 30 s and 5 min — 1 minute for the default 5-minute certificate); validates the CA reply (rejects `error:` replies and certs for another key) before writing it.
 
 4. **`ziti-scp`** — a file copy tool over OpenZiti. Uses the SFTP subsystem over the same Ziti overlay. Mirrors `scp(1)` behaviour: upload, download, recursive directory copy, preserve mode. Shares the same identity, certificate, config infrastructure, and cert auto-refresh logic as `ziti-ssh`.
 
@@ -79,7 +79,7 @@ Certificates expire after 5 minutes by default (`--cert-ttl`). No revocation inf
 ### `ziti-ssh` and `ziti-scp` as client tools
 `ziti-ssh` is the interactive client. It handles Ziti dialing, SSH certificate management, and interactive SSH sessions. The `sign` subcommand fetches certs from the CA; the `connect` subcommand (default) auto-refreshes the cert if needed and then opens an SSH session. The `enroll`, `list`, and `mfa` subcommands cover the full Ziti identity lifecycle on user machines.
 
-`ziti-scp` is the file copy companion. It uses the same identity, cert, and config infrastructure as `ziti-ssh` but opens an SFTP subsystem session instead of an interactive shell. The same cert auto-refresh logic applies (5-minute threshold), and the same Ziti service resolution (direct service name vs. terminator address on `--ssh-service`) is used.
+`ziti-scp` is the file copy companion. It uses the same identity, cert, and config infrastructure as `ziti-ssh` but opens an SFTP subsystem session instead of an interactive shell. The same cert auto-refresh logic applies (`client.CertNeedsRefresh`), and the same Ziti service resolution (direct service name vs. terminator address on `--ssh-service`) is used.
 
 ### Addressable terminators for host routing
 Each `ziti-ssh-host` instance listens on a Ziti service with its identity name as the terminator address. `ziti-ssh` dials the service specifying the target identity name — no hostname resolution, no config file required.
@@ -91,7 +91,7 @@ Each `ziti-ssh-host` instance listens on a Ziti service with its identity name a
 Seven subcommands:
 
 **`connect [user@]<target>`** (also the default when a bare argument is given):
-- Auto-refreshes the SSH cert if missing or expiring within 5 min.
+- Auto-refreshes the SSH cert if missing or less than 20% of its lifetime remains (between 30 s and 5 min — 1 minute for the default 5-minute certificate).
 - Resolves whether the target is a direct Ziti service name or a terminator address on `--ssh-service`.
 - Uses `ziti.DialOptions{Identity: terminatorAddr}` when dialling via a terminator.
 - Wraps the private key and cert into an `ssh.CertSigner` via `client.NewCertSigner`. Falls back to `SSH_AUTH_SOCK` if the private key is passphrase-protected.
@@ -105,7 +105,7 @@ Seven subcommands:
 - When any forward is present: all forwards + (optionally) the shell session run concurrently under a shared `context.Context`; SIGINT/SIGTERM cancels the context and tears everything down.
 
 **`proxy [user@]<target>`**:
-- Auto-refreshes the SSH cert (same 5-minute threshold as `connect`).
+- Auto-refreshes the SSH cert (same threshold as `connect`).
 - Dials the Ziti service raw — no SSH handshake performed by `ziti-ssh`.
 - Bridges `os.Stdin` ↔ conn and conn → `os.Stdout` via `io.Copy` in two goroutines; returns when either direction closes.
 - Intended as a `ProxyCommand` in `~/.ssh/config` so that standard tools (`ssh`, `git`, `rsync`, VS Code Remote) work through the Ziti overlay without modification.
@@ -126,7 +126,8 @@ Config file at `~/.config/ziti-ssh/config.yaml` (XDG_CONFIG_HOME respected). Fie
 ### SSH Session / SFTP Library (`client/ssh.go`, `client/sftp.go`)
 
 - `NewCertSigner(keyPath string) (ssh.Signer, error)` — loads key and cert; returns `ssh.CertSigner` if cert present.
-- `CertNeedsRefresh(certPath string) bool` — true if cert absent or expires within 5 min.
+- `CertNeedsRefresh(certPath string) bool` — true if cert absent or less than 20% of its lifetime remains (between 30 s and 5 min — 1 minute for the default 5-minute certificate).
+- `ReadCAResponse(r) (string, error)` / `ValidateSignedCert(line, pubKeyLine) ([]byte, error)` (`client/certs.go`) — bounded read of the CA reply; returns `*CARejectedError` for `error: …` replies and rejects anything but a user cert for the caller's key, so a bad reply never overwrites a valid cert.
 - `NewSSHClient(conn net.Conn, user, host string, signer ssh.Signer) (*ssh.Client, error)` — performs the SSH handshake and returns a raw `*ssh.Client` for forwarding use cases.
 - `RunSession(conn net.Conn, user, host string, signer ssh.Signer, forwardAgent bool) error` — PTY SSH session over an existing `net.Conn`; when `forwardAgent` is true, calls `ForwardAgent` before `session.Shell()`.
 - `ForwardAgent(sshClient *ssh.Client, session *ssh.Session) error` — connects to `SSH_AUTH_SOCK`, calls `agent.ForwardToAgent` on the client and `agent.RequestAgentForwarding` on the session; returns an error (non-fatal by convention) if `SSH_AUTH_SOCK` is unset or agent is unreachable.
@@ -139,7 +140,7 @@ Config file at `~/.config/ziti-ssh/config.yaml` (XDG_CONFIG_HOME respected). Fie
 ### File Copy Tool (`ziti-scp`)
 
 - Parses `[user@]host:path` remote specs and bare local paths from positional arguments (last arg is destination).
-- Same cert auto-refresh (5-minute threshold) and Ziti dial logic as `ziti-ssh`.
+- Same cert auto-refresh threshold and Ziti dial logic as `ziti-ssh`.
 - Flags: `-r` (recursive), `-p` (preserve timestamps/permissions), `-q` (quiet).
 - `enroll` subcommand for identity enrollment (mirrors `ziti-ssh enroll`).
 - Shared config file: `~/.config/ziti-ssh/config.yaml`.

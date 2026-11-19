@@ -38,7 +38,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -282,18 +281,19 @@ func runSign(p signParams) error {
 		return fmt.Errorf("send public key to CA: %w", err)
 	}
 
-	reader := bufio.NewReader(conn)
-	certLine, err := reader.ReadString('\n')
+	certLine, err := client.ReadCAResponse(conn)
 	if err != nil {
-		return fmt.Errorf("read certificate from CA: %w", err)
+		return err
 	}
-	certLine = strings.TrimSpace(certLine)
-	if certLine == "" {
-		return fmt.Errorf("CA returned no certificate")
+	// Validate before writing so a CA error reply or a certificate for the
+	// wrong key never overwrites an existing valid certificate.
+	certBytes, err := client.ValidateSignedCert(certLine, pubKeyLine)
+	if err != nil {
+		return err
 	}
 
 	certPath := deriveCertPath(privKeyPath)
-	if err := config.AtomicWriteFile(certPath, []byte(certLine+"\n"), 0644); err != nil {
+	if err := config.AtomicWriteFile(certPath, certBytes, 0644); err != nil {
 		return fmt.Errorf("write certificate to %q: %w", certPath, err)
 	}
 

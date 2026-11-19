@@ -319,7 +319,7 @@ When the connection closes, `ziti-ssh-host` sees EOF on the proxied `net.Conn`, 
 
 ### Outstanding SSH certificates
 
-Revoking Ziti access does not invalidate the user's SSH certificate — it may still have up to 8 hours of validity remaining. However, the certificate is useless without a live Ziti connection to reach any SSH host, so this is not a practical concern in normal operation. The certificate cannot be used to connect directly to port 22 because that port is firewalled; it can only be used through the Ziti overlay.
+Revoking Ziti access does not invalidate the user's SSH certificate — it may still have up to the CA's certificate TTL of validity remaining (default 5 minutes, `--cert-ttl`). However, the certificate is useless without a live Ziti connection to reach any SSH host, so this is not a practical concern in normal operation. The certificate cannot be used to connect directly to port 22 because that port is firewalled; it can only be used through the Ziti overlay.
 
 If the CA itself needs to be rotated (for example, after a credential compromise), see [CA key rotation](#ca-key-rotation) below.
 

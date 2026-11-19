@@ -45,6 +45,14 @@ See security advisory GHSA-TBD for details.
 - Integration suite: `install-ca.sh` no longer reports `ziti-ssh-ca` as running when its first start fails because the `ssh-ca` service has not been created yet; systemd restarts it until the service exists.
 - Integration suite: `install-host.sh` no longer fails provisioning when `ziti-ssh-host` first exits with `service 'ssh' not found` (the service is created only after all edge routers are online); systemd restarts it until the service exists. Any other startup failure is still fatal.
 
+#### Clients re-signed a certificate on every invocation and saved CA error replies as certificates
+
+`ziti-ssh` and `ziti-scp` refreshed a certificate when fewer than 5 minutes of validity remained — which, with the CA's default 5-minute TTL, was always true. Every invocation requested a new certificate, so a fourth call within a few seconds exceeded the CA's default rate limit (5/min, burst 3). The CA's `error: rate limit exceeded` reply was then written to `<key>-cert.pub` as if it were a certificate, overwriting a valid one, and the login failed with `unable to authenticate`.
+
+- A certificate is now refreshed when less than 20% of its lifetime remains, between 30 seconds and 5 minutes (1 minute for a 5-minute certificate; unchanged for certificates of 25 minutes or longer).
+- The CA reply is read with a 16 KiB limit and validated before it is written: an `error: …` reply is reported as `CA refused the request: <reason>`, and anything other than a user certificate for the caller's own public key is rejected. The existing certificate file is left untouched on failure.
+- Docs no longer state an 8-hour default TTL (`ARCHITECTURE.md`, `docs/usage.md`, `docs/operations.md`).
+
 ### Changed
 
 #### Dependency, toolchain, and CI refresh
