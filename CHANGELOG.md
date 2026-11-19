@@ -15,6 +15,12 @@ See security advisory GHSA-TBD for details.
 - New flag `--cert-source-address` / `ZITI_CERT_SOURCE_ADDRESS` (comma-separated IPs or CIDRs, or `none` to omit the option). Invalid values stop the CA at startup.
 - If something other than the local `ziti-ssh-host` delivers connections to sshd, set this accordingly.
 
+#### Optional termination of a user's processes on disconnect
+
+- New `ziti-ssh-host` setting `ZITI_TERMINATE_ON_DISCONNECT` (default `false`, per-identity mode with `ZITI_USER_CLEANUP=false`). When `true`, all of an account's processes are ended when its last session closes — lingering disabled, `loginctl terminate-user`, then SIGTERM/SIGKILL to the account's UID — while the account and home directory are kept. Also applied at startup to accounts that still had sessions open when the daemon stopped.
+- With both settings at their defaults, background processes survive disconnect and identity revocation; the daemon now logs a warning at startup in that configuration.
+- `docs/operations.md` revocation section now tabulates the behaviour of each combination.
+
 #### Per-identity permissions are applied fail-closed (behaviour change)
 
 - If `ziti-ssh-host` cannot set an account's supplementary groups, remove a legacy sudoers file, or write/remove its sudoers file, the connection is now **rejected** instead of continuing with the account's previous groups and sudoers rule. If a new sudoers rule cannot be installed, the existing file is removed first. Log line: `rejecting connection: could not apply permissions`.

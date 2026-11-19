@@ -130,6 +130,7 @@ The `run` subcommand also accepts:
 | — | `ZITI_SSH_GROUPS` | — | Comma-separated Linux groups set as the user's supplementary groups (via `usermod -G`, replacing existing membership) for users not matched by a `ziti-ssh-host.v1` config entry. Global fallback; per-identity mode only. Groups must already exist on the host; if setting them fails, the connection is rejected. |
 | — | `ZITI_SUDOERS_RULE` | — | If set, a sudoers rule `<username> <value>` is written to `/etc/sudoers.d/ziti-ssh-host-<username>` on connect. Global fallback applied to users not matched by a `ziti-ssh-host.v1` config entry; per-identity mode only. |
 | — | `ZITI_USER_CLEANUP` | `false` | Set to `true` to delete the Linux account after the last session closes via `userdel -r` (per-identity mode only) |
+| — | `ZITI_TERMINATE_ON_DISCONNECT` | `false` | Set to `true` to end all of the account's processes when the last session closes, keeping the account and home directory (per-identity mode with `ZITI_USER_CLEANUP=false`; no effect when cleanup is on, which already ends them). Without it, background processes (`nohup`, `tmux`, systemd user services) survive disconnect and revocation. |
 
 `enroll` also requires `--jwt <path>` (no environment variable equivalent).
 

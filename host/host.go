@@ -475,6 +475,38 @@ type UserManager struct {
 	registry            *OwnerRegistry
 	ops                 accountOps
 	cleanupOnDisconnect bool // if false, keep the account on ReleaseUser
+
+	// terminateOnDisconnect ends all of a kept account's processes when its
+	// last session closes (see SetTerminateOnDisconnect).
+	terminateOnDisconnect bool
+}
+
+// SetTerminateOnDisconnect controls whether, with cleanup disabled, all
+// processes of an account are ended when its last session closes (and for
+// accounts that still had sessions open after a crash). The account and its
+// home directory are kept. Without it, background processes started by a
+// user (nohup, tmux, systemd user services) survive disconnect — and
+// revocation of the user's Ziti identity. Call before accepting connections.
+func (m *UserManager) SetTerminateOnDisconnect(on bool) {
+	m.mu.Lock()
+	m.terminateOnDisconnect = on
+	m.mu.Unlock()
+}
+
+// keepAccountOnLastRelease drops an owned account's privileges and, if
+// configured, ends its processes. Used when cleanup (deletion) is disabled.
+func (m *UserManager) keepAccountOnLastRelease(username string, uid int) {
+	m.dropPrivileges(username)
+	m.mu.Lock()
+	terminate := m.terminateOnDisconnect
+	m.mu.Unlock()
+	if !terminate {
+		return
+	}
+	slog.Info("ending all processes of user (ZITI_TERMINATE_ON_DISCONNECT)", "username", username, "uid", uid)
+	if err := m.ops.TerminateProcesses(username, uid); err != nil {
+		slog.Error("failed to terminate user processes", "username", username, "uid", uid, "err", err)
+	}
 }
 
 // NewUserManager returns a UserManager that persists active sessions to
@@ -728,7 +760,7 @@ func (m *UserManager) ReleaseUser(username string) error {
 
 	if !m.cleanupOnDisconnect {
 		slog.Info("last session closed, cleanup disabled — keeping Linux user without supplementary groups or sudoers", "username", username)
-		m.dropPrivileges(username)
+		m.keepAccountOnLastRelease(username, uid)
 		if err := m.syncStateFile(); err != nil {
 			slog.Error("failed to update state file", "username", username, "err", err)
 		}
@@ -811,8 +843,8 @@ func (m *UserManager) CleanupOrphans() error {
 			// Accounts are intentionally persistent. Remove any sudoers file
 			// left by a crash, but keep the account.
 			slog.Info("cleanup disabled; keeping account after restart", "username", username)
-			if _, ok := m.verifiedOwnedUID(username); ok {
-				m.dropPrivileges(username)
+			if uid, ok := m.verifiedOwnedUID(username); ok {
+				m.keepAccountOnLastRelease(username, uid)
 			}
 			continue
 		}

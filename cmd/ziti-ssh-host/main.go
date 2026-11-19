@@ -855,6 +855,7 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 	globalSudoersRule := os.Getenv("ZITI_SUDOERS_RULE")
 	globalGroups := parseGlobalGroups()
 	cleanupOnDisconnect := os.Getenv("ZITI_USER_CLEANUP") == "true"
+	terminateOnDisconnect := os.Getenv("ZITI_TERMINATE_ON_DISCONNECT") == "true"
 
 	listenOpts := &ziti.ListenOptions{
 		BindUsingEdgeIdentity: true,
@@ -931,6 +932,16 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 		mgr, err = host.NewUserManager(userManagerStateFile, cleanupOnDisconnect)
 		if err != nil {
 			return fmt.Errorf("per-identity mode: %w", err)
+		}
+		mgr.SetTerminateOnDisconnect(terminateOnDisconnect)
+		switch {
+		case cleanupOnDisconnect:
+			slog.Info("per-identity: accounts deleted (and their processes ended) when the last session closes")
+		case terminateOnDisconnect:
+			slog.Info("per-identity: accounts kept; their processes are ended when the last session closes")
+		default:
+			slog.Warn("per-identity: accounts and their background processes are kept after the last session closes; " +
+				"set ZITI_TERMINATE_ON_DISCONNECT=true or ZITI_USER_CLEANUP=true so revoked identities lose running processes")
 		}
 
 		slog.Info("running orphan user cleanup")

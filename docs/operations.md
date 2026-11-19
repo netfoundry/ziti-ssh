@@ -59,7 +59,7 @@ The connection is rejected — and the account left untouched — when the accou
 - If a sudoers rule is resolved (config entry or `ZITI_SUDOERS_RULE`), it is written to `/etc/sudoers.d/ziti-ssh-host-<username>` (validated with `visudo -c` before installation); otherwise any existing file is removed. If the rule cannot be installed, the existing file is removed and the connection is rejected; if an existing file cannot be removed, the connection is rejected.
 - Concurrent sessions from the same identity are reference-counted — `useradd` is only called once.
 - When the last session from an identity closes, the sudoers file is removed and the account's supplementary groups are cleared. With `ZITI_USER_CLEANUP=true`, the cleanup sequence then runs: `loginctl terminate-user` drains the systemd session, the user's processes (matched by UID) are polled until they exit, escalating to SIGTERM and then SIGKILL, and `userdel -r` removes the account and home directory and its ownership record. Accounts not in the registry with a matching UID are never touched.
-- By default the Linux account is kept after disconnect. Set `ZITI_USER_CLEANUP=true` to delete the account when the last session closes.
+- By default the Linux account is kept after disconnect, together with any background processes the user started. Set `ZITI_TERMINATE_ON_DISCONNECT=true` to end those processes when the last session closes (the account and home directory are kept), or `ZITI_USER_CLEANUP=true` to delete the account when the last session closes.
 - Usernames with active sessions are persisted to `/var/lib/ziti-ssh-host/managed-users`. On startup, `CleanupOrphans` reads this file: with `ZITI_USER_CLEANUP=true` it deletes each listed account that is still registered (they had sessions open when the process was last killed); otherwise it removes their leftover sudoers files, clears their supplementary groups, and keeps the accounts.
 
 **Connecting in per-identity mode:**
@@ -320,10 +320,15 @@ ziti edge update identity alice@corp.com --role-attributes 'ssh-staging-clients'
 
 Revoking an identity does not end SSH sessions that are already open; they continue until they disconnect. When the last session for the identity closes, `ziti-ssh-host` sees EOF on the proxied `net.Conn`, decrements the session ref-count, and removes the identity's sudoers file.
 
-What happens to the account itself depends on `ZITI_USER_CLEANUP`:
+In every mode the account's supplementary groups are cleared at that point. What happens next depends on `ZITI_USER_CLEANUP` and `ZITI_TERMINATE_ON_DISCONNECT`:
 
-- **`false` (default):** the account, its home directory, and any processes it left running (for example under `nohup`, `tmux`, or a systemd user service with lingering enabled) are **kept**. Its supplementary groups are not cleared until the next connection resolves new permissions. To fully revoke access on a host, an administrator must terminate the user's processes and remove or lock the account (e.g. `loginctl terminate-user <username>` then `userdel -r <username>`).
-- **`true`:** `loginctl terminate-user` drains the systemd session, remaining processes are sent SIGTERM and then SIGKILL, and `userdel -r` removes the account and home directory.
+| `ZITI_USER_CLEANUP` | `ZITI_TERMINATE_ON_DISCONNECT` | Account and home | Background processes (`nohup`, `tmux`, systemd user services) |
+|---|---|---|---|
+| `false` (default) | `false` (default) | Kept | **Kept running** — a revoked identity's processes continue. The daemon logs a startup warning in this configuration. |
+| `false` | `true` | Kept | Ended: lingering disabled, `loginctl terminate-user`, then SIGTERM and SIGKILL to the account's UID |
+| `true` | any | Deleted (`userdel -r`) | Ended (same sequence, before deletion) |
+
+The host cannot distinguish a revocation from an ordinary disconnect — it only sees the last session close — so for revocation to also stop running processes, enable `ZITI_TERMINATE_ON_DISCONNECT=true` or `ZITI_USER_CLEANUP=true`. Users then lose background jobs whenever their last session closes. Otherwise an administrator must end them manually on each host (`loginctl terminate-user <username>`, and `userdel -r <username>` to remove the account).
 
 ### Outstanding SSH certificates
 

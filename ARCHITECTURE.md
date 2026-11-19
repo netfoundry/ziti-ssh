@@ -208,13 +208,15 @@ Safe on a nil receiver — returns the global fallbacks when no config is attach
 - `ZITI_SUDOERS_RULE` — sudoers rule fragment applied to any identity not matched by a `ziti-ssh-host.v1` config entry.
 - `ZITI_SSH_GROUPS` — comma-separated Linux group names applied to any identity not matched by a config entry.
 - `ZITI_USER_CLEANUP` — set to `true` to delete Linux accounts after the last session closes (default: `false`).
+- `ZITI_TERMINATE_ON_DISCONNECT` — set to `true` to end a kept account's processes when its last session closes (default: `false`).
 
 **`host.deleteUser(username, uid)`** — the internal cleanup sequence, called only for registered accounts with a verified UID (it also refuses any UID below 1000):
 
 1. Remove `/etc/sudoers.d/ziti-ssh-host-<username>` if present.
-2. Run `loginctl terminate-user -- <username>` to drain the systemd user session (errors are logged but ignored — the session may already be gone).
-3. Poll with `pgrep -u <uid>` until no processes remain (5 s), then `pkill -TERM -u <uid>` (10 s), then `pkill -KILL -u <uid>` (5 s).
-4. Run `userdel -r -- <username>` to remove the account and home directory.
+2. `terminateUserProcesses`: run `loginctl disable-linger -- <username>` and `loginctl terminate-user -- <username>` (errors logged but ignored — the session may already be gone), then poll with `pgrep -u <uid>` until no processes remain (5 s), then `pkill -TERM -u <uid>` (10 s), then `pkill -KILL -u <uid>` (5 s).
+3. Run `userdel -r -- <username>` to remove the account and home directory.
+
+With `ZITI_TERMINATE_ON_DISCONNECT=true` and cleanup off, `ReleaseUser` (and `CleanupOrphans` after a crash) calls `terminateUserProcesses` via `accountOps.TerminateProcesses` after dropping privileges, without deleting the account.
 
 **`host.ProxyHooks`** wires `UserManager` into the proxy loop:
 

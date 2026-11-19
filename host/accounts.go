@@ -77,6 +77,9 @@ type accountOps interface {
 	// RemoveLegacySudoers removes a pre-rename /etc/sudoers.d/<username> file,
 	// but only if its content is in the format ziti-ssh-host wrote.
 	RemoveLegacySudoers(username string) error
+	// TerminateProcesses ends every process owned by the account (disabling
+	// lingering first) but keeps the account. uid must be the verified UID.
+	TerminateProcesses(username string, uid int) error
 	// DeleteUser terminates the account's processes and removes it with its
 	// home directory. uid must be the verified UID of the account.
 	DeleteUser(username string, uid int) error
@@ -161,6 +164,10 @@ func removeLegacySudoersFile(path, username string) error {
 	return nil
 }
 
+func (osAccountOps) TerminateProcesses(username string, uid int) error {
+	return terminateUserProcesses(username, uid)
+}
+
 func (osAccountOps) DeleteUser(username string, uid int) error {
 	return deleteUser(username, uid)
 }
@@ -187,16 +194,21 @@ func userProcessesGone(uid int, timeout time.Duration) bool {
 	return false
 }
 
-// deleteUser drains the user's systemd session, waits for all owned processes
-// to exit (escalating to SIGTERM then SIGKILL), then removes the user and home
-// directory with userdel -r. Callers must have verified ownership and that
-// uid >= MinManagedUID; deleteUser re-checks the UID floor as a last guard.
-func deleteUser(username string, uid int) error {
+// terminateUserProcesses ends every process owned by uid: it disables
+// lingering (so systemd user services are not restarted), asks loginctl to
+// terminate the user's sessions, waits up to 5 s, then escalates to SIGTERM
+// (10 s) and SIGKILL (5 s). Processes are matched by the verified UID, never
+// by name. The UID floor is re-checked as a last guard.
+func terminateUserProcesses(username string, uid int) error {
 	if uid < MinManagedUID {
-		return fmt.Errorf("refusing to delete %q: uid %d is below %d", username, uid, MinManagedUID)
+		return fmt.Errorf("refusing to terminate processes of %q: uid %d is below %d", username, uid, MinManagedUID)
 	}
-	if err := removeSudoers(username); err != nil {
-		slog.Error("failed to remove sudoers file during deleteUser", "username", username, "err", err)
+
+	linger := exec.Command("loginctl", "disable-linger", "--", username)
+	linger.Env = childEnv()
+	if out, err := linger.CombinedOutput(); err != nil {
+		slog.Info("loginctl disable-linger returned non-zero (ignored)",
+			"username", username, "err", err, "output", strings.TrimSpace(string(out)))
 	}
 
 	loginctl := exec.Command("loginctl", "terminate-user", "--", username)
@@ -207,26 +219,45 @@ func deleteUser(username string, uid int) error {
 	}
 
 	uidStr := strconv.Itoa(uid)
+	if userProcessesGone(uid, 5*time.Second) {
+		return nil
+	}
+	slog.Info("user processes still running after loginctl; sending SIGTERM", "username", username, "uid", uid)
+	pkillTerm := exec.Command("pkill", "-TERM", "-u", uidStr)
+	pkillTerm.Env = childEnv()
+	if out, err := pkillTerm.CombinedOutput(); err != nil {
+		slog.Info("pkill -TERM returned non-zero (ignored)",
+			"username", username, "err", err, "output", strings.TrimSpace(string(out)))
+	}
+	if userProcessesGone(uid, 10*time.Second) {
+		return nil
+	}
+	slog.Warn("user processes still running after SIGTERM; sending SIGKILL", "username", username, "uid", uid)
+	pkillKill := exec.Command("pkill", "-KILL", "-u", uidStr)
+	pkillKill.Env = childEnv()
+	if out, err := pkillKill.CombinedOutput(); err != nil {
+		slog.Info("pkill -KILL returned non-zero (ignored)",
+			"username", username, "err", err, "output", strings.TrimSpace(string(out)))
+	}
 	if !userProcessesGone(uid, 5*time.Second) {
-		slog.Info("user processes still running after loginctl; sending SIGTERM", "username", username, "uid", uid)
-		pkillTerm := exec.Command("pkill", "-TERM", "-u", uidStr)
-		pkillTerm.Env = childEnv()
-		if out, err := pkillTerm.CombinedOutput(); err != nil {
-			slog.Info("pkill -TERM returned non-zero (ignored)",
-				"username", username, "err", err, "output", strings.TrimSpace(string(out)))
-		}
-		if !userProcessesGone(uid, 10*time.Second) {
-			slog.Warn("user processes still running after SIGTERM; sending SIGKILL", "username", username, "uid", uid)
-			pkillKill := exec.Command("pkill", "-KILL", "-u", uidStr)
-			pkillKill.Env = childEnv()
-			if out, err := pkillKill.CombinedOutput(); err != nil {
-				slog.Info("pkill -KILL returned non-zero (ignored)",
-					"username", username, "err", err, "output", strings.TrimSpace(string(out)))
-			}
-			if !userProcessesGone(uid, 5*time.Second) {
-				slog.Warn("user processes still running after SIGKILL; proceeding with userdel", "username", username)
-			}
-		}
+		return fmt.Errorf("processes of %q (uid %d) still running after SIGKILL", username, uid)
+	}
+	return nil
+}
+
+// deleteUser removes the sudoers file, terminates the user's processes (see
+// terminateUserProcesses), then removes the user and home directory with
+// userdel -r. Callers must have verified ownership and that
+// uid >= MinManagedUID; the floor is re-checked as a last guard.
+func deleteUser(username string, uid int) error {
+	if uid < MinManagedUID {
+		return fmt.Errorf("refusing to delete %q: uid %d is below %d", username, uid, MinManagedUID)
+	}
+	if err := removeSudoers(username); err != nil {
+		slog.Error("failed to remove sudoers file during deleteUser", "username", username, "err", err)
+	}
+	if err := terminateUserProcesses(username, uid); err != nil {
+		slog.Warn("proceeding with userdel", "username", username, "err", err)
 	}
 
 	cmd := exec.Command("userdel", "-r", "--", username)

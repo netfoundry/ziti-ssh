@@ -98,6 +98,10 @@ func (f *fakeOps) RemoveLegacySudoers(u string) error {
 	f.record("rmlegacy:" + u)
 	return f.failure("rmlegacy")
 }
+func (f *fakeOps) TerminateProcesses(u string, uid int) error {
+	f.record("terminate:" + u)
+	return nil
+}
 func (f *fakeOps) DeleteUser(u string, uid int) error {
 	f.record("delete:" + u)
 	f.mu.Lock()
@@ -705,5 +709,112 @@ func TestCleanupOrphans_ClearsGroupsWhenKeepingAccounts(t *testing.T) {
 	}
 	if !ops.called("groups:alice:") || !ops.called("rmsudoers:alice") {
 		t.Errorf("orphan privileges not dropped after restart: %v", ops.calls)
+	}
+}
+
+// ---- H12: opt-in termination of a kept account's processes ----------------
+
+func TestReleaseUser_TerminateOnDisconnect(t *testing.T) {
+	t.Run("on: privileges dropped, then processes ended, account kept", func(t *testing.T) {
+		ops := newFakeOps()
+		m := testManager(t, t.TempDir(), ops, false)
+		m.SetTerminateOnDisconnect(true)
+		if err := m.EnsureUser("alice", "alice", adminPerms); err != nil {
+			t.Fatal(err)
+		}
+		ops.calls = nil
+		if err := m.ReleaseUser("alice"); err != nil {
+			t.Fatal(err)
+		}
+		idx := func(prefix string) int {
+			for i, c := range ops.calls {
+				if strings.HasPrefix(c, prefix) {
+					return i
+				}
+			}
+			return -1
+		}
+		term, groups, sudo := idx("terminate:alice"), idx("groups:alice:"), idx("rmsudoers:alice")
+		if term < 0 {
+			t.Fatalf("processes not terminated: %v", ops.calls)
+		}
+		if groups < 0 || sudo < 0 || groups > term || sudo > term {
+			t.Errorf("privileges must be dropped before termination: %v", ops.calls)
+		}
+		if ops.called("delete:") {
+			t.Errorf("account deleted although cleanup is off: %v", ops.calls)
+		}
+	})
+
+	t.Run("off (default): processes left running", func(t *testing.T) {
+		ops := newFakeOps()
+		m := testManager(t, t.TempDir(), ops, false)
+		if err := m.EnsureUser("alice", "alice", IdentityPermissions{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.ReleaseUser("alice"); err != nil {
+			t.Fatal(err)
+		}
+		if ops.called("terminate:") {
+			t.Errorf("processes terminated with the setting off: %v", ops.calls)
+		}
+	})
+
+	t.Run("not while other sessions remain", func(t *testing.T) {
+		ops := newFakeOps()
+		m := testManager(t, t.TempDir(), ops, false)
+		m.SetTerminateOnDisconnect(true)
+		for i := 0; i < 2; i++ {
+			if err := m.EnsureUser("alice", "alice", IdentityPermissions{}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := m.ReleaseUser("alice"); err != nil {
+			t.Fatal(err)
+		}
+		if ops.called("terminate:") {
+			t.Errorf("processes terminated while a session is still open: %v", ops.calls)
+		}
+	})
+
+	t.Run("never for unregistered or replaced accounts", func(t *testing.T) {
+		ops := newFakeOps()
+		m := testManager(t, t.TempDir(), ops, false)
+		m.SetTerminateOnDisconnect(true)
+		if err := m.EnsureUser("alice", "alice", IdentityPermissions{}); err != nil {
+			t.Fatal(err)
+		}
+		ops.users["alice"] = 1500 // replaced outside ziti-ssh-host
+		if err := m.EnsureUser("bob", "bob", IdentityPermissions{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.registry.Remove("bob"); err != nil { // no longer registered
+			t.Fatal(err)
+		}
+		ops.calls = nil
+		_ = m.ReleaseUser("alice")
+		_ = m.ReleaseUser("bob")
+		if ops.called("terminate:") {
+			t.Errorf("terminated processes of an account not verifiably owned: %v", ops.calls)
+		}
+	})
+}
+
+func TestCleanupOrphans_TerminateOnDisconnect(t *testing.T) {
+	dir := t.TempDir()
+	ops := newFakeOps()
+	m := testManager(t, dir, ops, false)
+	if err := m.EnsureUser("alice", "alice", IdentityPermissions{}); err != nil {
+		t.Fatal(err)
+	}
+	// Crash, then restart with the setting on.
+	m2 := testManager(t, dir, ops, false)
+	m2.SetTerminateOnDisconnect(true)
+	ops.calls = nil
+	if err := m2.CleanupOrphans(); err != nil {
+		t.Fatal(err)
+	}
+	if !ops.called("terminate:alice") || ops.called("delete:") {
+		t.Errorf("want processes of the orphaned account ended and the account kept: %v", ops.calls)
 	}
 }

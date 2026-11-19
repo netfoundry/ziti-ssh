@@ -35,6 +35,12 @@ if [ ! -f /etc/ziti-ssh-host/env ]; then
 # false (default): persistent users — account remains after disconnect.
 # true: ephemeral users — account removed when last session closes.
 #ZITI_USER_CLEANUP=false
+
+# TERMINATE_ON_DISCONNECT — with USER_CLEANUP=false, end all of the user's
+# processes (nohup, tmux, systemd user services) when the last session closes,
+# keeping the account and home directory. Needed for revoked identities to lose
+# running processes. No effect when USER_CLEANUP=true (deletion already ends them).
+#ZITI_TERMINATE_ON_DISCONNECT=false
 ENVEOF
     chmod 640 /etc/ziti-ssh-host/env
 fi

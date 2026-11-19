@@ -302,6 +302,7 @@ Persistent flags (accepted by all subcommands):
 | — | `ZITI_SUDOERS_RULE` | — | Global fallback sudoers rule (per-identity mode only) |
 | — | `ZITI_SSH_GROUPS` | — | Global fallback Linux groups, comma-separated (per-identity mode only) |
 | — | `ZITI_USER_CLEANUP` | `false` | Set to `true` to delete Linux accounts after the last session closes |
+| — | `ZITI_TERMINATE_ON_DISCONNECT` | `false` | With cleanup off: set to `true` to end all of the account's processes (lingering disabled, `loginctl terminate-user`, SIGTERM/SIGKILL by UID) when the last session closes, keeping the account. Needed for revoked identities to lose background processes. |
 
 **Important:** `--mode` must be set consistently on both `ziti-ssh-ca` and `ziti-ssh-host run`. If the CA issues certs with per-identity principals but the host is in shared mode (or vice versa), SSH authentication will fail.
 
@@ -331,7 +332,7 @@ Example: `Alice` → `alice`, `dba-Alice` → `dba-alice`, `123bot` → `z123bot
 - A reference count tracks concurrent sessions for the same identity.
 - When the last session closes, the sudoers file is removed and supplementary groups are cleared; with `ZITI_USER_CLEANUP=true` the cleanup sequence then runs: `loginctl terminate-user`, process poll by UID with SIGTERM/SIGKILL escalation, `userdel -r`, and the registry record is removed.
 - The set of usernames with active sessions is persisted to `/var/lib/ziti-ssh-host/managed-users` (one username per line). On startup, `CleanupOrphans` reads this file and, in cleanup mode, deletes listed accounts that are still registered (they had active sessions when the process was killed).
-- By default the Linux account is kept after disconnect. Set `ZITI_USER_CLEANUP=true` to delete the account when the last session closes (useful when ephemeral-only accounts are required). The sudoers file is still removed on disconnect.
+- By default the Linux account — and any background processes the user left running — is kept after disconnect (the daemon logs a startup warning). Set `ZITI_TERMINATE_ON_DISCONNECT=true` to end the account's processes at last disconnect while keeping the account (`UserManager.SetTerminateOnDisconnect`, `accountOps.TerminateProcesses`), or `ZITI_USER_CLEANUP=true` to delete the account (useful when ephemeral-only accounts are required). The sudoers file is removed and groups are cleared on disconnect in all cases.
 
 **Connecting in per-identity mode:**
 ```sh
