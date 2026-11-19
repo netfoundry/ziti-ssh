@@ -54,10 +54,10 @@ jobs:
       NF_RPM_TEST_REPO: ${{ vars.NF_RPM_TEST_REPO || 'nfpax-netfoundry-rpm-test' }}
       NF_DEB_STABLE_REPO: ${{ vars.NF_DEB_STABLE_REPO || 'nfpax-netfoundry-deb-stable' }}
       NF_RPM_STABLE_REPO: ${{ vars.NF_RPM_STABLE_REPO || 'nfpax-netfoundry-rpm-stable' }}
-      JFROG_CLI_VERSION: ${{ vars.JFROG_CLI_VERSION || '2.78.2' }}
+      JFROG_CLI_VERSION: ${{ vars.JFROG_CLI_VERSION || '2.133.0' }}
     steps:
       - name: Configure jFrog CLI
-        uses: jfrog/setup-jfrog-cli@v4
+        uses: jfrog/setup-jfrog-cli@4c2f06da03095113100534a16d58d8a252680949 # v5.3.5
         with:
           version: ${{ env.JFROG_CLI_VERSION }}
           oidc-provider-name: nf-github-actions-setup-jfrog-cli

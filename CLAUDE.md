@@ -72,12 +72,12 @@ Any Ziti identity that can dial the `ssh-ca` service is authorized to receive a 
 Per-identity Linux permissions (groups, sudoers rules) are stored as a `ziti-ssh-host.v1` config attached to the Ziti service. The service boundary is therefore the permission scope boundary — the same boundary already used for access control. Different services can carry different permission sets, enabling role-tiered deployments where, for example, DB admins and ops teams can both reach a database host but with different Linux permissions.
 
 ### Short-lived certificates (5m TTL)
-Certificates expire after 8 hours. No revocation infrastructure needed — compromised or removed identities lose access at expiry without any intervention on SSH hosts.
+Certificates expire after 5 minutes by default (`--cert-ttl`). No revocation infrastructure needed — compromised or removed identities lose access at expiry without any intervention on SSH hosts.
 
 ### `ziti-ssh` and `ziti-scp` as client tools
 `ziti-ssh` is the interactive client. It handles Ziti dialing, SSH certificate management, and interactive SSH sessions. The `sign` subcommand fetches certs from the CA; the `connect` subcommand (default) auto-refreshes the cert if needed and then opens an SSH session. The `enroll`, `list`, and `mfa` subcommands cover the full Ziti identity lifecycle on user machines.
 
-`ziti-scp` is the file copy companion. It uses the same identity, cert, and config infrastructure as `ziti-ssh` but opens an SFTP subsystem session instead of an interactive shell. The same cert auto-refresh logic applies (30-minute threshold), and the same Ziti service resolution (direct service name vs. terminator address on `--ssh-service`) is used.
+`ziti-scp` is the file copy companion. It uses the same identity, cert, and config infrastructure as `ziti-ssh` but opens an SFTP subsystem session instead of an interactive shell. The same cert auto-refresh logic applies (5-minute threshold), and the same Ziti service resolution (direct service name vs. terminator address on `--ssh-service`) is used.
 
 ### Addressable terminators for host routing
 Each `ziti-ssh-host` instance listens on a Ziti service with its identity name as the terminator address. `ziti-ssh` dials the service specifying the target identity name — no hostname resolution, no config file required.
@@ -185,7 +185,7 @@ Three subcommands:
 3. Accepts one or more `--ssh-service` values (flag may be repeated; `ZITI_SSH_SERVICE` accepts comma-separated list; defaults to `ssh`)
 4. For each service: opens a separate Ziti listener, loads and parses the `ziti-ssh-host.v1` config, builds independent `ProxyHooks` carrying that service's permission map
 5. Proxies incoming connections to `127.0.0.1:22`
-6. In `per-identity` mode: on connect, creates an ephemeral Linux user and applies the resolved permissions (groups via `usermod -aG`, sudoers rule via `/etc/sudoers.d/<username>`); on disconnect, decrements the session ref-count and deletes the user when the last session closes
+6. In `per-identity` mode: on connect, creates an ephemeral Linux user and applies the resolved permissions (groups via `usermod -G`, sudoers rule via `/etc/sudoers.d/<username>`); on disconnect, decrements the session ref-count and deletes the user when the last session closes
 7. Subscribes to service-changed events and reloads each service's `ziti-ssh-host.v1` config atomically when it changes — no restart needed
 
 **`inspect [--service <name>]...`:**
@@ -242,7 +242,7 @@ No HTTP, no framing beyond the newline.
 |---|---|
 | Principal | Configurable (default: `ziggy`); derived from identity name in `per-identity` mode |
 | Key ID | `ziti:<identity-name>` |
-| Validity | 8 hours from signing time (configurable via `--cert-ttl`) |
+| Validity | 5 minutes from signing time by default (configurable via `--cert-ttl`) |
 | Extensions | `permit-pty`, `permit-port-forwarding`, `permit-agent-forwarding` |
 
 The Key ID appears in `/var/log/auth.log` on every SSH host, providing a per-identity audit trail even though all users share the same account in `shared` mode.
@@ -316,7 +316,7 @@ Example: `Alice` → `alice`, `dba-Alice` → `dba-alice`, `123bot` → `z123bot
 
 **Ephemeral user lifecycle:**
 - `ziti-ssh-host run` creates the user with `useradd -m -s /bin/bash <username>` on the first connection from that identity.
-- Permissions are resolved (config entry → global fallback) and applied: `usermod -aG <groups>` for group membership, `/etc/sudoers.d/<username>` for sudoers (validated with `visudo -c` before installation). Group failures are non-fatal and logged.
+- Permissions are resolved (config entry → global fallback) and applied: `usermod -G <groups>` (replaces supplementary groups) for group membership, `/etc/sudoers.d/<username>` for sudoers (validated with `visudo -c` before installation). Group failures are non-fatal and logged.
 - A reference count tracks concurrent sessions for the same identity.
 - When the last session closes, the cleanup sequence runs: `loginctl terminate-user`, process poll (up to 5 s), `userdel -r`. The sudoers file is removed unconditionally at this point; group membership is removed implicitly by account deletion.
 - The set of active managed usernames is persisted to `/var/lib/ziti-ssh-host/managed-users` (one username per line). On startup, `CleanupOrphans` reads this file and deletes any users still listed there (they had active sessions when the process was killed). This prevents accumulation of stale accounts after crashes.

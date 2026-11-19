@@ -26,26 +26,23 @@ on:
           - 'false'
           - 'true'
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   build-debs:
     name: Build Debian Packages
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Build .deb packages
-        run: VERSION=0.0.0 ./scripts/build-deb.sh
+        run: VERSION=0.0.0 FORMAT=deb ARCHS=amd64 ./scripts/build-packages.sh
 
       - name: Upload packages
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ziti-ssh-debs
           path: dist/*.deb

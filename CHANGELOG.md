@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased] - 2026-11-19
+
+### Changed
+
+#### Dependency, toolchain, and CI refresh
+
+- `github.com/openziti/sdk-golang` moved from v1.9.0 to **v1.8.4**. v1.9.0 was retracted upstream ("published from main before the module moved to `github.com/openziti/sdk-golang/v2`; the supported v1 line is 1.8.x").
+- Direct dependencies updated: `edge-api` v0.36.1, `go-openapi/runtime` v0.33.5, `go-openapi/strfmt` v0.27.4, `pkg/sftp` v1.13.12, `zitadel/oidc/v3` v3.52.0, `go.yaml.in/yaml/v3` v3.0.6, `x/crypto` v0.59.0, `x/term` v0.48.0, `x/time` v0.16.0.
+- `go.mod` now declares `go 1.26.0` (required by sdk-golang) and `toolchain go1.26.11`. `actions/setup-go` v6+ honours the `toolchain` directive, so release binaries are built with a patched standard library; previously `setup-go@v5` installed exactly the `go` directive version (1.25.0).
+- CI vulnerability scan (`govulncheck-action`) now uses `go-version-file: go.mod` instead of the action's default `stable`, so it scans the toolchain that actually builds releases.
+- GitHub Actions updated and pinned to commit SHAs: `checkout` v7.0.1, `setup-go` v7.1.0, `upload-artifact` v7.0.2, `govulncheck-action` v1.1.0, `setup-jfrog-cli` v5.3.5, `action-gh-release` v3.0.4. `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` removed (all actions now run on Node 24 natively).
+- `ci.yml` declares `permissions: contents: read`.
+- Default tool versions: nfpm 2.49.0 (prerelease download now verified against the release `checksums.txt`; `build-packages.sh` fallback pinned instead of `@latest`), jfrog-cli 2.133.0.
+- `ziti-test.yml` builds packages with `build-packages.sh` (same nfpm path as releases) instead of `build-deb.sh`; `suites/ziti-ssh/suite.yml` paths updated to the nfpm filenames (`<pkg>_0.0.0-1_amd64.deb`).
+- `scripts/Dockerfile.packages` base image moved to `golang:1.26-bookworm`.
+- Added `.github/dependabot.yml` (weekly `gomod` and `github-actions` updates, minor/patch grouped).
+
+---
+
 ## [Unreleased] - 2026-04-14
 
 ### Added

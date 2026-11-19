@@ -37,8 +37,9 @@ if ! command -v go >/dev/null 2>&1; then
     exit 1
 fi
 if ! command -v nfpm >/dev/null 2>&1; then
-    log "nfpm not found — installing via go install..."
-    go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+    NFPM_VERSION="${NFPM_VERSION:-2.49.0}"
+    log "nfpm not found — installing v${NFPM_VERSION} via go install..."
+    go install "github.com/goreleaser/nfpm/v2/cmd/nfpm@v${NFPM_VERSION}"
     export PATH="${PATH}:$(go env GOPATH)/bin"
 fi
 
