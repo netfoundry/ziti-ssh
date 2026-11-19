@@ -665,19 +665,32 @@ func nonEmptyLines(s string) []string {
 type serviceState struct {
 	mu     sync.RWMutex
 	config *host.PermissionsConfig // nil if no ziti-ssh-host.v1 config is attached
+	// loadErr is set when the service's config could not be loaded or parsed.
+	// Per-identity connections on the service are then rejected (fail closed)
+	// rather than falling back to the global defaults or a stale config.
+	loadErr error
 }
 
-func (s *serviceState) get() *host.PermissionsConfig {
+// current returns the config, or an error if the last load failed.
+func (s *serviceState) current() (*host.PermissionsConfig, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.config
+	return s.config, s.loadErr
 }
 
-func (s *serviceState) set(pc *host.PermissionsConfig) {
+// update records the result of loading the service's config: on success the
+// new config (nil = none attached) replaces the old one; on failure the
+// service is marked unavailable and the old config is discarded.
+func (s *serviceState) update(pc *host.PermissionsConfig, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.config = pc
+	if err != nil {
+		s.config, s.loadErr = nil, err
+		return
+	}
+	s.config, s.loadErr = pc, nil
 }
+
 
 // loadPermissionsConfig fetches and parses the ziti-ssh-host.v1 config from
 // serviceName via zitiCtx. Returns nil when no such config is attached.
@@ -907,12 +920,12 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 		if mode == "per-identity" {
 			pc, err := loadPermissionsConfig(zitiCtx, svcName)
 			if err != nil {
-				slog.Warn("could not load permissions config, using global fallbacks only",
+				slog.Error("could not load permissions config; per-identity connections on this service will be rejected until it loads",
 					"service", svcName, "err", err)
 			}
 			slog.Info("host grant policy", "service", svcName, "policy", grantPolicy.Describe(svcName))
 			warnPolicyViolations(svcName, pc, grantPolicy)
-			state.set(pc)
+			state.update(pc, err)
 		}
 
 		entries = append(entries, serviceEntry{
@@ -990,11 +1003,13 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 			slog.Info("service-changed event received, reloading permissions config", "service", svcName)
 			pc, err := loadPermissionsConfig(zitiCtx, svcName)
 			if err != nil {
-				slog.Error("failed to reload permissions config", "service", svcName, "err", err)
+				slog.Error("failed to reload permissions config; per-identity connections on this service will be rejected until it loads",
+					"service", svcName, "err", err)
+				st.update(nil, err)
 				return
 			}
 			warnPolicyViolations(svcName, pc, grantPolicy)
-			st.set(pc)
+			st.update(pc, nil)
 			slog.Info("permissions config reloaded", "service", svcName)
 		})
 		defer removeListener()
@@ -1013,7 +1028,13 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 					if username == "" {
 						return fmt.Errorf("derived empty username from identity %q", zitiIdentity)
 					}
-					perms, fromConfig := st.get().ResolveWithSource(zitiIdentity, globalGroups, globalSudoersRule)
+					pc, loadErr := st.current()
+					if loadErr != nil {
+						slog.Error("rejecting connection: permissions config for this service could not be loaded",
+							"service", svcName, "identity", zitiIdentity, "err", loadErr)
+						return fmt.Errorf("service %q: permissions config unavailable: %w", svcName, loadErr)
+					}
+					perms, fromConfig := pc.ResolveWithSource(zitiIdentity, globalGroups, globalSudoersRule)
 					// The host owner's per-service limit on what the
 					// controller-side config may grant (fail closed).
 					if err := grantPolicy.Enforce(svcName, perms, fromConfig); err != nil {

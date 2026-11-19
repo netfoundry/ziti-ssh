@@ -155,6 +155,7 @@ Each host has its own service (e.g., `ssh-web-01`, `ssh-web-02`) with a fully in
 - **First-connection-wins for concurrent cross-service sessions.** If the same identity connects through two services simultaneously, the Linux account is created once with the permissions from the first connection. The second service's config is not applied retroactively.
 - **Any matched config entry suppresses global fallbacks entirely.** An identity matched by an exact key, a glob pattern, or the `"*"` catch-all receives only what that entry specifies — globals are not merged in.
 - **No config attached is not an error.** `ziti-ssh-host` logs a debug message and uses global fallbacks.
+- **A config that cannot be loaded fails closed.** If a service's `ziti-ssh-host.v1` config cannot be fetched or parsed (for example an invalid `sudoers_rule` or a username collision anywhere in it), per-identity connections on that service are **rejected** (`rejecting connection: permissions config for this service could not be loaded`) until a valid config loads. A failed live reload also discards the previously loaded config rather than keeping it. Fix the config and the next service-changed event reloads it.
 - **`shared` mode is unaffected.** The `ziti-ssh-host.v1` config is consulted only in `per-identity` mode.
 
 ---

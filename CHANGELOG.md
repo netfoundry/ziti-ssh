@@ -33,6 +33,10 @@ See security advisory GHSA-TBD for details.
 - `ziti-ssh connect -A` is refused unless `--forward-agent-unverified` is also given: clients cannot yet verify which host answered on a terminator address (an OpenZiti limitation), and a forwarded agent can be used by that host while connected.
 - **Action:** to keep agent forwarding, add `permit-agent-forwarding` to `ZITI_CERT_EXTENSIONS` on the CA and use `-A --forward-agent-unverified`.
 
+#### Permission configs that fail to load now fail closed
+
+- If a service's `ziti-ssh-host.v1` config cannot be fetched or parsed at startup, per-identity connections on that service are rejected instead of falling back to the global defaults. A failed live reload marks the service unavailable instead of keeping the previous config. A config that is simply not attached still uses the global fallbacks.
+
 #### `ziti-scp` download hardening
 
 - Refuses to write through an existing local symlink at a download destination.

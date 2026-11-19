@@ -191,7 +191,7 @@ Four subcommands:
 4. For each service: opens a separate Ziti listener, loads and parses the `ziti-ssh-host.v1` config, builds independent `ProxyHooks` carrying that service's permission map
 5. Proxies incoming connections to `127.0.0.1:22`
 6. In `per-identity` mode: on connect, creates an ephemeral Linux user and applies the resolved permissions (groups via `usermod -G`, sudoers rule via `/etc/sudoers.d/ziti-ssh-host-<username>`); only accounts in the ownership registry are ever touched; on disconnect, decrements the session ref-count and deletes the user when the last session closes
-7. Subscribes to service-changed events and reloads each service's `ziti-ssh-host.v1` config atomically when it changes — no restart needed
+7. Subscribes to service-changed events and reloads each service's `ziti-ssh-host.v1` config atomically when it changes — no restart needed; if a config cannot be loaded or parsed (at startup or on reload), per-identity connections on that service are rejected until a valid config loads (`serviceState.update/current`)
 
 **`inspect [--service <name>]...`:**
 - Authenticates with the host identity; no listeners opened
