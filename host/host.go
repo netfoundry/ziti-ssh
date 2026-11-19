@@ -359,19 +359,44 @@ func atomicWriteFile(dest string, data []byte, mode os.FileMode) error {
 	return nil
 }
 
-// ReloadSSHD signals sshd to reload its configuration.
+// sshdState describes how sshd is running under systemd.
+type sshdState struct {
+	ServiceActive bool // ssh.service is active (a long-running sshd daemon)
+	SocketActive  bool // ssh.socket is active
+	SocketPerConn bool // ssh.socket has Accept=yes (one sshd per connection)
+}
+
+// sshdReloadPlan is what ReloadSSHD does for a given sshdState.
+type sshdReloadPlan struct {
+	ReloadService bool // run "systemctl reload ssh"
+	HUPOrphans    bool // SIGHUP top-level sshd processes (PPID 1)
+}
+
+// planSSHDReload decides how to make sshd pick up a changed configuration.
 //
-// Ubuntu 24.04 defaults to socket-activated sshd (ssh.socket + ssh@.service):
-// each incoming connection spawns a fresh sshd that re-reads sshd_config at
-// fork, so no daemon reload is required — the next connection automatically
-// picks up TrustedUserCAKeys. When the traditional long-running ssh.service is
-// active instead, SIGHUP is delivered via "systemctl reload ssh".
-//
-// In both cases pkill broadcasts SIGHUP to any top-level sshd listener
-// processes (PPID=1) that may be co-listening via SO_REUSEPORT alongside the
-// managed instance. This covers orphaned sshd parents left by service restarts
-// during provisioning. Per-connection children call signal(SIGHUP, SIG_IGN)
-// after privilege separation (OpenSSH 8.x+) and are unaffected.
+//   - A running ssh.service is a long-lived daemon that only re-reads its
+//     configuration on SIGHUP, so it is always reloaded — including on Ubuntu
+//     22.10+ where ssh.socket (Accept=no) starts ssh.service on the first
+//     connection and that daemon then serves all later connections.
+//   - Top-level sshd listeners (PPID 1) left over from earlier service
+//     restarts can co-listen on port 22 via SO_REUSEPORT with a stale config;
+//     they are sent SIGHUP too. Their per-connection children have the
+//     listener as parent, not PID 1, so live sessions are unaffected.
+//   - The exception is ssh.socket with Accept=yes, where every connection's
+//     sshd has PPID 1: signalling them would disconnect live sessions, and no
+//     signal is needed because each instance reads the configuration at start.
+//   - When neither ssh.service is running nor an Accept=yes socket is in use,
+//     the next sshd started reads the new configuration; there is nothing to
+//     reload.
+func planSSHDReload(st sshdState) sshdReloadPlan {
+	return sshdReloadPlan{
+		ReloadService: st.ServiceActive,
+		HUPOrphans:    !(st.SocketActive && st.SocketPerConn),
+	}
+}
+
+// ReloadSSHD validates the sshd configuration and makes running sshd
+// processes pick it up (see planSSHDReload).
 func ReloadSSHD() error {
 	// Validate configuration before reloading. sshd -t reads the full config
 	// tree (including sshd_config.d drop-ins) and checks that referenced files
@@ -381,29 +406,34 @@ func ReloadSSHD() error {
 		return fmt.Errorf("sshd config validation failed (not reloading): %w\n%s", err, strings.TrimSpace(string(out)))
 	}
 
-	// Detect socket-activated sshd (Ubuntu 24.04 default). Under socket
-	// activation, ssh.service is typically masked and "systemctl reload ssh"
-	// would fail — but no reload is needed because each sshd instance reads
-	// its config at fork time.
-	socketActive := exec.Command("systemctl", "is-active", "--quiet", "ssh.socket").Run() == nil
-	if socketActive {
-		slog.Info("sshd is socket-activated; new connections will pick up TrustedUserCAKeys automatically")
-	} else {
-		cmd := exec.Command("systemctl", "reload", "ssh")
+	st := sshdState{
+		ServiceActive: exec.Command("systemctl", "is-active", "--quiet", "ssh.service").Run() == nil,
+		SocketActive:  exec.Command("systemctl", "is-active", "--quiet", "ssh.socket").Run() == nil,
+	}
+	if st.SocketActive {
+		out, err := exec.Command("systemctl", "show", "ssh.socket", "-p", "Accept", "--value").Output()
+		// If the mode cannot be determined, assume per-connection (Accept=yes)
+		// so live sessions are never signalled.
+		st.SocketPerConn = err != nil || strings.TrimSpace(string(out)) != "no"
+	}
+	plan := planSSHDReload(st)
+	slog.Info("reloading sshd", "service_active", st.ServiceActive, "socket_active", st.SocketActive,
+		"socket_per_connection", st.SocketPerConn, "reload_service", plan.ReloadService, "hup_orphans", plan.HUPOrphans)
+
+	if plan.ReloadService {
+		cmd := exec.Command("systemctl", "reload", "ssh.service")
 		cmd.Env = childEnv()
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("systemctl reload ssh: %w (output: %s)", err, out)
+			return fmt.Errorf("systemctl reload ssh.service: %w (output: %s)", err, out)
 		}
 	}
-
-	// Under ssh.service (non-socket), also signal any top-level sshd listener
-	// that may have been spawned outside systemd. Skip this under socket
-	// activation: per-connection sshd children have PPID 1 there too, and
-	// sending SIGHUP to an active connection sshd disconnects the session.
-	if !socketActive {
+	if plan.HUPOrphans {
 		if err := exec.Command("pkill", "-HUP", "-P", "1", "-x", "sshd").Run(); err != nil {
 			slog.Debug("pkill sshd: no additional listener processes to signal", "err", err)
 		}
+	}
+	if !plan.ReloadService && !plan.HUPOrphans {
+		slog.Info("sshd is socket-activated per connection; new connections will read the updated configuration")
 	}
 
 	slog.Info("sshd reloaded")

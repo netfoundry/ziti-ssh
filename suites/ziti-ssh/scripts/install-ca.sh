@@ -166,6 +166,15 @@ WantedBy=multi-user.target
 UNITEOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now ziti-ssh-ca
 
-log "install-ca.sh complete — ziti-ssh-ca is running on ctrl-0"
+# The ssh-ca Ziti service is created by the suite's network resources, which
+# are applied only after all edge routers are online — i.e. after this script
+# runs. Until then ziti-ssh-ca exits ("service 'ssh-ca' not found") and
+# systemd restarts it (Restart=on-failure, RestartSec=5), so a failed first
+# start here is expected and not fatal.
+if sudo systemctl enable --now ziti-ssh-ca; then
+    log "install-ca.sh complete — ziti-ssh-ca is running on ctrl-0"
+else
+    log "install-ca.sh complete — ziti-ssh-ca enabled on ctrl-0 but not yet running;" \
+        "systemd will restart it until the ssh-ca service exists"
+fi

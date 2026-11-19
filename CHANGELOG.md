@@ -35,6 +35,15 @@ See security advisory GHSA-TBD for details.
 
 **Updated docs:** `docs/operations.md` (account ownership flow diagram, lifecycle, new "Managing account ownership" section, files-written table), `docs/configuration.md` (`users` subcommands, sudoers path), `ARCHITECTURE.md` (`UserManager`, `deleteUser`, §12 account ownership boundary), `CLAUDE.md`.
 
+### Fixed
+
+#### `ziti-ssh-host` did not reload a running sshd on socket-activated systems
+
+`host.ReloadSSHD` (used by `enroll` and by `run` when the CA key set changes) treated an active `ssh.socket` as "each connection starts a fresh sshd" and skipped both `systemctl reload ssh` and the SIGHUP to leftover sshd listeners. On Ubuntu 22.10+ `ssh.socket` uses `Accept=no`: the first connection starts a long-running `ssh.service`, which then serves all connections with the configuration it started with. On any host where sshd was already running when `enroll` wrote `TrustedUserCAKeys` — for example after an administrator had logged in — certificate logins failed until sshd was restarted.
+
+- `ReloadSSHD` now reloads `ssh.service` whenever it is active and sends SIGHUP to top-level sshd listeners (PPID 1) unless `ssh.socket` uses `Accept=yes` (where per-connection sshd processes also have PPID 1). The decision is unit-tested (`planSSHDReload`).
+- Integration suite: `install-ca.sh` no longer reports `ziti-ssh-ca` as running when its first start fails because the `ssh-ca` service has not been created yet; systemd restarts it until the service exists.
+
 ### Changed
 
 #### Dependency, toolchain, and CI refresh
