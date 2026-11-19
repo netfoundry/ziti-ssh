@@ -126,6 +126,11 @@ See security advisory GHSA-TBD for details.
 **Updated docs:** `docs/operations.md` (account ownership flow diagram, lifecycle, new "Managing account ownership" section, files-written table), `docs/configuration.md` (`users` subcommands, sudoers path), `ARCHITECTURE.md` (`UserManager`, `deleteUser`, §12 account ownership boundary), `CLAUDE.md`.
 
 ### Fixed
+#### Host connection limit and cross-service permission conflicts
+
+- `ziti-ssh-host run --max-connections` / `ZITI_MAX_CONNECTIONS` (default 128) caps concurrent connections per service; further connections are closed immediately and logged at most every 10 s. Previously accepts were unbounded.
+- Per-identity mode: a Linux account has one set of groups and one sudoers file. While an identity has sessions open through one service, a connection through a different service that resolves to different permissions is now **rejected** instead of replacing the permissions of the open sessions (the previous docs incorrectly said the first connection's permissions were kept). The same service always applies the current config; a different service with identical permissions is allowed.
+
 #### Controller URL lists validated
 
 - Controller URL lists pushed by the controller are filtered before use: entries must be `https` with a host and no user info, query or fragment; others are logged and dropped, and duplicates removed. This applies before `ziti-ssh-host` fetches CA keys and before any binary saves the list to its identity file.

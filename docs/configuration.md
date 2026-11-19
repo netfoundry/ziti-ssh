@@ -141,6 +141,7 @@ The `run` subcommand also accepts:
 | Flag | Environment variable | Default | Description |
 |---|---|---|---|
 | `--mode` | `ZITI_SSH_MODE` | `shared` | Principal mode: `shared` or `per-identity` |
+| `--max-connections` | `ZITI_MAX_CONNECTIONS` | `128` | Maximum concurrent connections per service; further connections are closed immediately (logged at most every 10 s) |
 | — | `ZITI_SSH_GROUPS` | — | Comma-separated Linux groups set as the user's supplementary groups (via `usermod -G`, replacing existing membership) for users not matched by a `ziti-ssh-host.v1` config entry. Global fallback; per-identity mode only. Groups must already exist on the host; if setting them fails, the connection is rejected. |
 | — | `ZITI_SUDOERS_RULE` | — | If set, a sudoers rule `<username> <value>` is written to `/etc/sudoers.d/ziti-ssh-host-<username>` on connect. Global fallback applied to users not matched by a `ziti-ssh-host.v1` config entry; per-identity mode only. |
 | — | `ZITI_USER_CLEANUP` | `false` | Set to `true` to delete the Linux account after the last session closes via `userdel -r` (per-identity mode only) |

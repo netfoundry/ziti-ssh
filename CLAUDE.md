@@ -319,6 +319,7 @@ Persistent flags (accepted by all subcommands):
 |---|---|---|---|
 | `--ssh-service` | `ZITI_SSH_SERVICE` | `ssh` | Ziti service(s) to proxy; flag may be repeated, env var accepts comma-separated list |
 | `--mode` | `ZITI_SSH_MODE` | `shared` | Principal mode: `shared` or `per-identity` |
+| `--max-connections` | `ZITI_MAX_CONNECTIONS` | `128` | Max concurrent connections per service (`host.ProxyLimited`); excess closed immediately |
 | — | `ZITI_SUDOERS_RULE` | — | Global fallback sudoers rule (per-identity mode only) |
 | — | `ZITI_SSH_GROUPS` | — | Global fallback Linux groups, comma-separated (per-identity mode only) |
 | — | `ZITI_USER_CLEANUP` | `false` | Set to `true` to delete Linux accounts after the last session closes |
@@ -352,7 +353,7 @@ Example: `Alice` → `alice`, `dba-Alice` → `dba-alice`, `123bot` → `z123bot
 **Ephemeral user lifecycle:**
 - `ziti-ssh-host run` creates the user with `useradd -m -s /bin/bash -- <username>` on the first connection from that identity and records it in the ownership registry.
 - Permissions are resolved (config entry → global fallback) and applied on every connect: `usermod -G <groups>` (replaces supplementary groups) for group membership, `/etc/sudoers.d/ziti-ssh-host-<username>` for sudoers (validated with `visudo -c` before installation). If setting the groups, writing or removing the sudoers file, or removing a legacy sudoers file fails, the connection is **rejected** (fail closed); if a new sudoers rule cannot be installed, any existing sudoers file is removed first so an older rule cannot stay in force. The session is counted only after permissions are applied.
-- A reference count tracks concurrent sessions for the same identity.
+- A reference count tracks concurrent sessions for the same identity. One account means one permission set: while it has sessions open through one service, a connection through a different service with different resolved permissions is rejected (`UserManager.EnsureUserForService`, `ErrPermissionConflict`); same service always applies the current config.
 - When the last session closes, the sudoers file is removed and supplementary groups are cleared; with `ZITI_USER_CLEANUP=true` the cleanup sequence then runs: `loginctl terminate-user`, process poll by UID with SIGTERM/SIGKILL escalation, `userdel -r`, and the registry record is removed.
 - The set of usernames with active sessions is persisted to `/var/lib/ziti-ssh-host/managed-users` (one username per line). On startup, `CleanupOrphans` reads this file and, in cleanup mode, deletes listed accounts that are still registered (they had active sessions when the process was killed).
 - By default the Linux account — and any background processes the user left running — is kept after disconnect (the daemon logs a startup warning). Set `ZITI_TERMINATE_ON_DISCONNECT=true` to end the account's processes at last disconnect while keeping the account (`UserManager.SetTerminateOnDisconnect`, `accountOps.TerminateProcesses`), or `ZITI_USER_CLEANUP=true` to delete the account (useful when ephemeral-only accounts are required). The sudoers file is removed and groups are cleared on disconnect in all cases.

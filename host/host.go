@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -237,6 +238,23 @@ type ProxyHooks struct {
 // enable graceful drain: after Proxy returns, call wg.Wait() (with a timeout
 // of your choice) to block until all in-flight connections have finished.
 func Proxy(listener net.Listener, target string, hooks *ProxyHooks, wg *sync.WaitGroup) {
+	ProxyLimited(listener, target, hooks, wg, 0)
+}
+
+// DefaultMaxConnections is the default per-service cap on concurrent proxied
+// connections (ziti-ssh-host run --max-connections / ZITI_MAX_CONNECTIONS).
+const DefaultMaxConnections = 128
+
+// ProxyLimited is Proxy with at most maxConns connections in flight
+// (0 = unlimited). A connection accepted while the limit is reached is closed
+// immediately, before any hook runs; refusals are logged at most every 10 s.
+func ProxyLimited(listener net.Listener, target string, hooks *ProxyHooks, wg *sync.WaitGroup, maxConns int) {
+	var slots chan struct{}
+	if maxConns > 0 {
+		slots = make(chan struct{}, maxConns)
+	}
+	var lastWarn time.Time
+	refused := 0
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -244,12 +262,29 @@ func Proxy(listener net.Listener, target string, hooks *ProxyHooks, wg *sync.Wai
 			slog.Info("proxy listener closed", "err", err)
 			return
 		}
+		if slots != nil {
+			select {
+			case slots <- struct{}{}:
+			default:
+				_ = conn.Close()
+				refused++
+				if time.Since(lastWarn) >= 10*time.Second {
+					slog.Warn("connection limit reached; closing new connections",
+						"max_connections", maxConns, "refused_since_last_warning", refused)
+					lastWarn, refused = time.Now(), 0
+				}
+				continue
+			}
+		}
 		if wg != nil {
 			wg.Add(1)
 		}
 		go func(c net.Conn) {
 			if wg != nil {
 				defer wg.Done()
+			}
+			if slots != nil {
+				defer func() { <-slots }()
 			}
 			proxyConn(c, target, hooks)
 		}(conn)
@@ -566,6 +601,11 @@ func childEnv() []string {
 type UserManager struct {
 	mu                  sync.Mutex
 	sessions            map[string]int         // username → active session count
+	// activeService / activePerms record which service, and which resolved
+	// permissions, the account's open sessions were admitted with (M2: one
+	// Linux account per identity, so permissions are per account).
+	activeService map[string]string
+	activePerms   map[string]IdentityPermissions
 	userLocks           map[string]*sync.Mutex // username → per-user lock for slow OS ops
 	stateFile           string
 	registry            *OwnerRegistry
@@ -625,6 +665,8 @@ func NewUserManager(stateFile string, cleanupOnDisconnect bool) (*UserManager, e
 func newUserManager(stateFile string, reg *OwnerRegistry, ops accountOps, cleanupOnDisconnect bool) *UserManager {
 	return &UserManager{
 		sessions:            make(map[string]int),
+		activeService:       make(map[string]string),
+		activePerms:         make(map[string]IdentityPermissions),
 		userLocks:           make(map[string]*sync.Mutex),
 		stateFile:           stateFile,
 		registry:            reg,
@@ -656,6 +698,23 @@ func (m *UserManager) Registry() *OwnerRegistry { return m.registry }
 // session is counted (only after ownership is verified) and the username
 // recorded in the state file.
 func (m *UserManager) EnsureUser(zitiIdentity, username string, perms IdentityPermissions) error {
+	return m.EnsureUserForService(zitiIdentity, username, "", perms)
+}
+
+// ErrPermissionConflict is returned (wrapped) by EnsureUserForService when an
+// account already has sessions open through another service with different
+// permissions.
+var ErrPermissionConflict = errors.New("account has open sessions through another service with different permissions")
+
+// EnsureUserForService is EnsureUser for a connection that arrived on service.
+// A Linux account has one set of groups and one sudoers file, shared by all
+// of its sessions; so while the account has open sessions admitted through
+// one service, a connection through a different service that resolves to
+// different permissions is rejected (ErrPermissionConflict) instead of
+// silently changing the permissions of the sessions already open. A
+// connection through the same service always applies the current
+// permissions, so config changes take effect. service "" skips the check.
+func (m *UserManager) EnsureUserForService(zitiIdentity, username, service string, perms IdentityPermissions) error {
 	if err := ValidateManagedUsername(username); err != nil {
 		return fmt.Errorf("identity %q: %w", zitiIdentity, err)
 	}
@@ -676,6 +735,10 @@ func (m *UserManager) EnsureUser(zitiIdentity, username string, perms IdentityPe
 	ul.Lock()
 	defer ul.Unlock()
 
+	if err := m.checkPermissionConflict(username, service, perms); err != nil {
+		return fmt.Errorf("identity %q on service %q: %w", zitiIdentity, service, err)
+	}
+
 	if err := m.ensureOwnedAccount(zitiIdentity, username); err != nil {
 		return err
 	}
@@ -694,6 +757,10 @@ func (m *UserManager) EnsureUser(zitiIdentity, username string, perms IdentityPe
 	m.mu.Lock()
 	m.sessions[username]++
 	isFirst := m.sessions[username] == 1
+	if service != "" {
+		m.activeService[username] = service
+		m.activePerms[username] = perms
+	}
 	m.mu.Unlock()
 
 	if isFirst {
@@ -702,6 +769,40 @@ func (m *UserManager) EnsureUser(zitiIdentity, username string, perms IdentityPe
 		}
 	}
 	return nil
+}
+
+// checkPermissionConflict implements the cross-service rule of
+// EnsureUserForService. Must be called with the per-user lock.
+func (m *UserManager) checkPermissionConflict(username, service string, perms IdentityPermissions) error {
+	if service == "" {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.sessions[username] == 0 {
+		return nil
+	}
+	prev, ok := m.activeService[username]
+	if !ok || prev == service || samePermissions(m.activePerms[username], perms) {
+		return nil
+	}
+	slog.Error("rejecting connection: account has open sessions through another service with different permissions",
+		"username", username, "service", service, "active_service", prev, "sessions", m.sessions[username])
+	return fmt.Errorf("%w (%q); close those sessions first", ErrPermissionConflict, prev)
+}
+
+// samePermissions reports whether a and b grant the same groups (in any
+// order, duplicates ignored) and the same sudoers rule.
+func samePermissions(a, b IdentityPermissions) bool {
+	if a.SudoersRule != b.SudoersRule {
+		return false
+	}
+	set := func(g []string) []string {
+		out := slices.Clone(g)
+		slices.Sort(out)
+		return slices.Compact(out)
+	}
+	return slices.Equal(set(a.Groups), set(b.Groups))
 }
 
 // applyPermissions sets the account's supplementary groups to exactly
@@ -843,6 +944,8 @@ func (m *UserManager) ReleaseUser(username string) error {
 		return nil
 	}
 	delete(m.sessions, username)
+	delete(m.activeService, username)
+	delete(m.activePerms, username)
 	ul := m.userLocks[username]
 	m.mu.Unlock()
 

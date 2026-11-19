@@ -42,6 +42,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -117,7 +118,7 @@ func main() {
 	_ = enrollCmd.MarkFlagRequired("jwt")
 
 	// --------------------------------------------------------------------- run
-	var modeFlag string
+	var modeFlag, maxConnsFlag string
 	runCmd := &cobra.Command{
 		Use:   "run",
 		Short: "Listen on the Ziti ssh service and proxy to local sshd",
@@ -136,10 +137,16 @@ func main() {
 			if zitiTimeout <= 0 {
 				return fmt.Errorf("--ziti-timeout (or ZITI_TIMEOUT) must be greater than zero, got %q", zitiTimeoutStr)
 			}
-			return runProxy(identityFile, sshServices, mode, zitiTimeout)
+			maxConnsStr := config.EnvOrFlag(maxConnsFlag, "ZITI_MAX_CONNECTIONS", strconv.Itoa(host.DefaultMaxConnections))
+			maxConns, err := strconv.Atoi(maxConnsStr)
+			if err != nil || maxConns < 1 {
+				return fmt.Errorf("--max-connections (or ZITI_MAX_CONNECTIONS) must be a positive integer, got %q", maxConnsStr)
+			}
+			return runProxy(identityFile, sshServices, mode, zitiTimeout, maxConns)
 		},
 	}
 	runCmd.Flags().StringVar(&modeFlag, "mode", "", "Principal mode: \"shared\" (default) or \"per-identity\" (or set ZITI_SSH_MODE)")
+	runCmd.Flags().StringVar(&maxConnsFlag, "max-connections", "", fmt.Sprintf("Maximum concurrent connections per service; further connections are closed immediately (or ZITI_MAX_CONNECTIONS, default: %d)", host.DefaultMaxConnections))
 
 	// ----------------------------------------------------------------- inspect
 	var inspectServicesFlag []string
@@ -814,7 +821,7 @@ func loadPermissionsConfig(zitiCtx ziti.Context, serviceName string) (*host.Perm
 // startup, and ProxyHooks are wired to create/delete Linux users as sessions
 // open and close. Each service gets its own ProxyHooks that resolve permissions
 // from that service's ziti-ssh-host.v1 config.
-func runProxy(identityFile string, sshServices []string, mode string, zitiTimeout time.Duration) error {
+func runProxy(identityFile string, sshServices []string, mode string, zitiTimeout time.Duration, maxConns int) error {
 	// Load the Ziti config to build the CA pool used when refreshing trusted
 	// CA keys after a controller cluster membership change.
 	cfg, err := ziti.NewConfigFromFile(identityFile)
@@ -1098,7 +1105,7 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 						"username", username,
 						"groups", perms.Groups,
 						"has_sudoers", perms.SudoersRule != "")
-					return mgr.EnsureUser(zitiIdentity, username, perms)
+					return mgr.EnsureUserForService(zitiIdentity, username, svcName, perms)
 				},
 				OnDisconnect: func(zitiIdentity string) {
 					username := ca.DeriveUsername(zitiIdentity)
@@ -1120,7 +1127,7 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			host.Proxy(e.listener, defaultSSHTarget, hooks, &connWg)
+			host.ProxyLimited(e.listener, defaultSSHTarget, hooks, &connWg, maxConns)
 		}()
 	}
 

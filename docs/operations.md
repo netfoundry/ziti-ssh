@@ -134,7 +134,7 @@ ziti-ssh-host run --ssh-service ssh-ops --ssh-service ssh-db
 
 Ops identities are granted dial access to `ssh-ops` in Ziti service policy; DBA identities are granted dial access to `ssh-db`. An identity granted access to both gets whichever permission set corresponds to the service it dialled.
 
-> **Note:** If the same Ziti identity connects through two different services to the same host at the same time, the Linux user is created once on the first connection and the permissions from that first connection are used for the lifetime of the account. The second service's config is not applied retroactively. This is a known limitation and is logged at info level.
+> **Note:** A Linux account has one set of groups and one sudoers file shared by all its sessions. So while an identity has sessions open through one service, a connection through a **different** service that resolves to **different** permissions is **rejected** (`rejecting connection: account has open sessions through another service with different permissions`); close the open sessions first. A second service with the same permissions is allowed, and a new connection through the same service always applies the current config.
 
 ### Deployment patterns
 
@@ -152,7 +152,7 @@ Each host has its own service (e.g., `ssh-web-01`, `ssh-web-02`) with a fully in
 ### Constraints
 
 - **Groups must exist on the host.** `ziti-ssh-host` does not create Linux groups. If a config entry references a group that does not exist, `usermod -G` fails and **the connection is rejected** (`rejecting connection: could not apply permissions`). The identity cannot log in to that host until the config is fixed or the group is created. Check with `ziti-ssh-host inspect` after every config change.
-- **First-connection-wins for concurrent cross-service sessions.** If the same identity connects through two services simultaneously, the Linux account is created once with the permissions from the first connection. The second service's config is not applied retroactively.
+- **No concurrent sessions with different permissions through different services.** A Linux account has one set of groups and one sudoers file shared by all its sessions. So while an identity has sessions open through one service, a connection through a **different** service that resolves to **different** permissions is **rejected** (`rejecting connection: account has open sessions through another service with different permissions`); close the open sessions first. A second service with the same permissions is allowed, and a new connection through the same service always applies the current config.
 - **Any matched config entry suppresses global fallbacks entirely.** An identity matched by an exact key, a glob pattern, or the `"*"` catch-all receives only what that entry specifies — globals are not merged in.
 - **No config attached is not an error.** `ziti-ssh-host` logs a debug message and uses global fallbacks.
 - **A config that cannot be loaded fails closed.** If a service's `ziti-ssh-host.v1` config cannot be fetched or parsed (for example an invalid `sudoers_rule` or a username collision anywhere in it), per-identity connections on that service are **rejected** (`rejecting connection: permissions config for this service could not be loaded`) until a valid config loads. A failed live reload also discards the previously loaded config rather than keeping it. Fix the config and the next service-changed event reloads it.
@@ -206,6 +206,8 @@ For accounts that are **not** registered, a file of that shape is never removed 
 | `refusing to manage pre-existing account` | Account exists but is not registered. Claim it if it belongs to that identity; otherwise rename or remove the Ziti identity. |
 | `username "<u>" (derived from "<id>") is already in use by Ziti identity` | Two identities derive the same username. Rename one of the identities. |
 | `does not match registered uid` | Account was replaced outside `ziti-ssh-host`. |
+| `account has open sessions through another service with different permissions` | The identity is logged in through another service whose config grants different groups/sudoers. Close those sessions, or give both services the same entry for the identity. |
+| `connection limit reached; closing new connections` | The service already has `--max-connections` (`ZITI_MAX_CONNECTIONS`, default 128) connections open; further ones are closed immediately. Logged at most every 10 s with a count. |
 | `is reserved and will not be managed` / `must not start with '-'` | The identity's derived username is not allowed. Rename the identity. |
 | `rejected connection: invalid per-identity principal` (`ziti-ssh-ca`) | The CA refused to sign for a reserved derived principal (`root`, system accounts, `ubuntu`, `admin`, `ziti`) or one starting with `-`. Rename the identity. |
 

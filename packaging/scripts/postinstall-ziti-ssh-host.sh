@@ -42,6 +42,10 @@ if [ ! -f /etc/ziti-ssh-host/env ]; then
 # running processes. No effect when USER_CLEANUP=true (deletion already ends them).
 #ZITI_TERMINATE_ON_DISCONNECT=false
 
+# Maximum concurrent connections per service (default 128); further
+# connections are closed immediately.
+#ZITI_MAX_CONNECTIONS=128
+
 # Host grant policy — what each service's ziti-ssh-host.v1 config may grant here.
 # ALLOW_SUDOERS: services whose config may set sudoers_rule (comma list, or *).
 #ZITI_ALLOW_SUDOERS=ssh-ops
