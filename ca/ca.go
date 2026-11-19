@@ -129,17 +129,37 @@ func DeriveUsername(identity string) string {
 	return result
 }
 
+// reservedUsernames are Linux account names that must never be issued as a
+// per-identity certificate principal by ziti-ssh-ca, nor managed by
+// ziti-ssh-host: root, common Debian/Ubuntu system accounts, the default
+// cloud-image user, and generic administrator names. ziti-ssh-host's ownership
+// registry is the primary control; this list is defence in depth on both sides.
+var reservedUsernames = map[string]bool{
+	"root": true, "daemon": true, "bin": true, "sys": true, "sync": true,
+	"games": true, "man": true, "lp": true, "mail": true, "news": true,
+	"uucp": true, "proxy": true, "www-data": true, "backup": true, "list": true,
+	"irc": true, "gnats": true, "nobody": true, "systemd-network": true,
+	"systemd-resolve": true, "systemd-timesync": true, "messagebus": true,
+	"syslog": true, "sshd": true, "ubuntu": true, "admin": true, "ziti": true,
+}
+
+// IsReservedUsername reports whether username is on the reserved list.
+func IsReservedUsername(username string) bool {
+	return reservedUsernames[username]
+}
+
 // ValidatePerIdentityPrincipal rejects derived per-identity principals that
-// must never appear in a certificate: empty, "root", or starting with '-'
-// (which command-line tools would parse as an option). This is defence in
-// depth for a Ziti identity that happens to be named "root"; ziti-ssh-host
-// separately refuses to manage any account it did not create.
+// must never appear in a certificate: empty, reserved names (see
+// IsReservedUsername, including "root"), or names starting with '-' (which
+// command-line tools would parse as an option). A certificate for a reserved
+// name would be accepted by sshd on any host trusting the CA where that
+// account exists, independent of ziti-ssh-host's own checks.
 func ValidatePerIdentityPrincipal(principal string) error {
 	switch {
 	case principal == "":
 		return fmt.Errorf("derived principal is empty")
-	case principal == "root":
-		return fmt.Errorf("derived principal %q is not allowed", principal)
+	case IsReservedUsername(principal):
+		return fmt.Errorf("derived principal %q is a reserved account name", principal)
 	case strings.HasPrefix(principal, "-"):
 		return fmt.Errorf("derived principal %q must not start with '-'", principal)
 	}

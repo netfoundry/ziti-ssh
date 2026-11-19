@@ -510,6 +510,10 @@ func TestValidateSudoersRule(t *testing.T) {
 		{"Host_Alias ALL = *", "Host_Alias keyword"},
 		{"User_Alias ADMINS = root", "User_Alias keyword"},
 		{"Runas_Alias ROOT = root", "Runas_Alias keyword"},
+		{", ALL ALL=(ALL) NOPASSWD: ALL", "leading comma extends the user list"},
+		{"  ,ALL ALL=(ALL) NOPASSWD: ALL", "leading comma after whitespace"},
+		{"ALL=(ALL) NOPASSWD: /bin/ls\x00", "NUL byte"},
+		{"NOPASSWD: ALL", "missing '=' (not a user specification)"},
 	}
 	for _, tc := range invalid {
 		if err := host.ValidateSudoersRule(tc.rule); err == nil {

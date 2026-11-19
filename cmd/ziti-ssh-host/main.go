@@ -938,6 +938,7 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 			// Log but do not abort — a cleanup failure is not fatal to startup.
 			slog.Error("orphan cleanup failed", "err", err)
 		}
+		mgr.ReconcileLegacySudoers()
 	}
 
 	// Subscribe to service-changed events so we can hot-reload permissions.

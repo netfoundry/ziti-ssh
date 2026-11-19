@@ -524,16 +524,15 @@ func (m *UserManager) Registry() *OwnerRegistry { return m.registry }
 //
 // On success, supplementary groups are set to exactly perms.Groups and the
 // sudoers file is written (or removed if perms.SudoersRule is empty). The
-// session is counted and the username recorded in the state file.
+// session is counted (only after ownership is verified) and the username
+// recorded in the state file.
 func (m *UserManager) EnsureUser(zitiIdentity, username string, perms IdentityPermissions) error {
 	if err := ValidateManagedUsername(username); err != nil {
 		return fmt.Errorf("identity %q: %w", zitiIdentity, err)
 	}
 
-	// Phase 1 (global lock, fast): session bookkeeping and per-user lock.
+	// Phase 1 (global lock, fast): obtain the per-user lock.
 	m.mu.Lock()
-	m.sessions[username]++
-	isFirst := m.sessions[username] == 1
 	ul, ok := m.userLocks[username]
 	if !ok {
 		ul = &sync.Mutex{}
@@ -542,13 +541,24 @@ func (m *UserManager) EnsureUser(zitiIdentity, username string, perms IdentityPe
 	m.mu.Unlock()
 
 	// Phase 2 (per-user lock): ownership verification and OS operations.
+	// ReleaseUser takes the same lock before tearing anything down, so the
+	// account cannot be deleted between the ownership check and the session
+	// being counted.
 	ul.Lock()
 	defer ul.Unlock()
 
 	if err := m.ensureOwnedAccount(zitiIdentity, username); err != nil {
-		m.rollbackSession(username)
 		return err
 	}
+
+	// Count the session only once ownership is verified. Counting earlier
+	// would let a rejected (e.g. colliding) identity's in-flight attempt make
+	// the owner's final ReleaseUser believe a session is still open and skip
+	// teardown.
+	m.mu.Lock()
+	m.sessions[username]++
+	isFirst := m.sessions[username] == 1
+	m.mu.Unlock()
 
 	if err := m.ops.SetGroups(username, perms.Groups); err != nil {
 		// Non-fatal: a missing group reduces permissions rather than blocking.
@@ -635,16 +645,6 @@ func (m *UserManager) ensureOwnedAccount(zitiIdentity, username string) error {
 		return fmt.Errorf("ownership registry: %w", err)
 	}
 	return nil
-}
-
-// rollbackSession undoes the session increment from EnsureUser phase 1.
-func (m *UserManager) rollbackSession(username string) {
-	m.mu.Lock()
-	m.sessions[username]--
-	if m.sessions[username] <= 0 {
-		delete(m.sessions, username)
-	}
-	m.mu.Unlock()
 }
 
 // ReleaseUser decrements the session count for username. When the count
@@ -822,9 +822,22 @@ func ValidateSudoersRule(rule string) error {
 	if strings.ContainsAny(rule, "\n\r") {
 		return fmt.Errorf("sudoers_rule must not contain newlines")
 	}
+	if strings.ContainsRune(rule, 0) {
+		return fmt.Errorf("sudoers_rule must not contain NUL bytes")
+	}
 	trimmed := strings.TrimSpace(rule)
 	if strings.HasPrefix(trimmed, "#") {
 		return fmt.Errorf("sudoers_rule must not start with '#'")
+	}
+	// The file line is "<username> <rule>". A rule starting with ',' would
+	// extend the User_List, e.g. ", ALL ALL=(ALL) NOPASSWD: ALL" grants root
+	// to every user on the host.
+	if strings.HasPrefix(trimmed, ",") {
+		return fmt.Errorf("sudoers_rule must not start with ',' (it would add users to the rule)")
+	}
+	// Every user specification has the form "Host_List = Cmnd_Spec_List".
+	if trimmed != "" && !strings.Contains(trimmed, "=") {
+		return fmt.Errorf("sudoers_rule must have the form \"<hosts>=<commands>\", e.g. \"ALL=(ALL) NOPASSWD: /usr/bin/systemctl status *\"")
 	}
 	for _, kw := range []string{"@include", "Defaults", "Cmnd_Alias", "Host_Alias", "User_Alias", "Runas_Alias"} {
 		if strings.HasPrefix(trimmed, kw) {

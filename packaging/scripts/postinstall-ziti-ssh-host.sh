@@ -26,7 +26,8 @@ if [ ! -f /etc/ziti-ssh-host/env ]; then
 
 # SUDOERS — optional sudo rule granted to per-identity users on connect.
 # Only applies when ZITI_SSH_MODE=per-identity.
-# Leave unset for no sudo access. The rule is written to /etc/sudoers.d/<username>.
+# Leave unset for no sudo access. The rule is written to
+# /etc/sudoers.d/ziti-ssh-host-<username>.
 # Example (full passwordless sudo):
 #ZITI_SUDOERS_RULE=ALL=(ALL) NOPASSWD:ALL
 

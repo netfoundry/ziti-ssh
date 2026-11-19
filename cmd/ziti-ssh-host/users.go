@@ -53,6 +53,7 @@ func newUsersCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer printLegacySudoers(entries)
 			if len(names) == 0 {
 				fmt.Printf("No accounts registered in %s\n", reg.Path())
 				return nil
@@ -114,4 +115,30 @@ from --identity, and the account must have a UID of at least 1000.`,
 
 	usersCmd.AddCommand(listCmd, claimCmd)
 	return usersCmd
+}
+
+// printLegacySudoers lists legacy-format files in /etc/sudoers.d for accounts
+// that are not in the registry. They may be administrator files, or files
+// written by a release before the registry that still grant sudo.
+func printLegacySudoers(registered map[string]host.OwnerRecord) {
+	names, err := host.LegacySudoersCandidates()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: scanning /etc/sudoers.d: %v\n", err)
+		return
+	}
+	var unmanaged []string
+	for _, n := range names {
+		if _, ok := registered[n]; !ok {
+			unmanaged = append(unmanaged, n)
+		}
+	}
+	if len(unmanaged) == 0 {
+		return
+	}
+	fmt.Println()
+	fmt.Println("Legacy-format sudoers files for accounts not in the registry (review each;")
+	fmt.Println("remove it if an earlier ziti-ssh-host wrote it, or claim the account):")
+	for _, n := range unmanaged {
+		fmt.Printf("  /etc/sudoers.d/%s\n", n)
+	}
 }

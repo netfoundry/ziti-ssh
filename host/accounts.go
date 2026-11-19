@@ -22,25 +22,17 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/netfoundry/ziti-ssh/ca"
 )
 
 // MinManagedUID is the lowest UID ziti-ssh-host will ever create, modify, or
 // delete. Accounts below it (root and system accounts) are never touched.
 const MinManagedUID = 1000
-
-// reservedUsernames are never managed, even if absent from /etc/passwd. This
-// is defence in depth: the ownership registry is the primary control.
-var reservedUsernames = map[string]bool{
-	"root": true, "daemon": true, "bin": true, "sys": true, "sync": true,
-	"games": true, "man": true, "lp": true, "mail": true, "news": true,
-	"uucp": true, "proxy": true, "www-data": true, "backup": true, "list": true,
-	"irc": true, "gnats": true, "nobody": true, "systemd-network": true,
-	"systemd-resolve": true, "systemd-timesync": true, "messagebus": true,
-	"syslog": true, "sshd": true, "ubuntu": true, "admin": true, "ziti": true,
-}
 
 // ValidateManagedUsername rejects usernames ziti-ssh-host must never manage:
 // empty names, names starting with '-' (would be parsed as command options),
@@ -57,7 +49,7 @@ func ValidateManagedUsername(username string) error {
 			return fmt.Errorf("username %q contains invalid character %q", username, r)
 		}
 	}
-	if reservedUsernames[username] {
+	if ca.IsReservedUsername(username) {
 		return fmt.Errorf("username %q is reserved and will not be managed", username)
 	}
 	return nil
@@ -249,4 +241,77 @@ func deleteUser(username string, uid int) error {
 	}
 	slog.Info("deleted Linux user", "username", username)
 	return nil
+}
+
+// legacySudoersDir is where releases before the ownership registry wrote
+// sudoers files, named after the bare username.
+const legacySudoersDir = "/etc/sudoers.d"
+
+// findLegacySudoersFiles returns the usernames of files in dir that have the
+// exact shape older ziti-ssh-host releases wrote: a regular file named after a
+// valid, non-reserved username containing a single "<username> <rule>" line.
+// Administrators often write files of the same shape, so a match is only a
+// candidate, not proof of ownership.
+func findLegacySudoersFiles(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read %q: %w", dir, err)
+	}
+	var out []string
+	for _, e := range entries {
+		name := e.Name()
+		if !e.Type().IsRegular() || strings.HasPrefix(name, "ziti-ssh-host-") || ValidateManagedUsername(name) != nil {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		content := string(data)
+		if strings.HasPrefix(content, name+" ") && strings.Count(content, "\n") <= 1 {
+			out = append(out, name)
+		}
+	}
+	return out, nil
+}
+
+// LegacySudoersCandidates lists usernames with a legacy-format file in
+// /etc/sudoers.d (see findLegacySudoersFiles).
+func LegacySudoersCandidates() ([]string, error) {
+	return findLegacySudoersFiles(legacySudoersDir)
+}
+
+// ReconcileLegacySudoers handles sudoers files left by releases before the
+// ownership registry. For accounts in the registry with a verified UID the
+// legacy file is removed (it is known to be ziti-ssh-host's). For any other
+// candidate a warning is logged and the file is left in place: it may belong
+// to an administrator, but if it was written by an old ziti-ssh-host it still
+// grants sudo to an account that is no longer managed. Run at startup.
+func (m *UserManager) ReconcileLegacySudoers() {
+	m.reconcileLegacySudoersIn(legacySudoersDir)
+}
+
+func (m *UserManager) reconcileLegacySudoersIn(dir string) {
+	names, err := findLegacySudoersFiles(dir)
+	if err != nil {
+		slog.Error("scanning for legacy sudoers files failed", "err", err)
+		return
+	}
+	for _, u := range names {
+		if _, registered, _ := m.registry.Get(u); registered {
+			if _, owned := m.verifiedOwnedUID(u); !owned {
+				continue // verifiedOwnedUID logged why
+			}
+			if err := m.ops.RemoveLegacySudoers(u); err != nil {
+				slog.Error("failed to remove legacy sudoers file", "username", u, "err", err)
+			}
+			continue
+		}
+		slog.Warn("legacy-format sudoers file for an account ziti-ssh-host does not manage; review it: "+
+			"if an earlier ziti-ssh-host release wrote it, remove it or run \"ziti-ssh-host users claim\"",
+			"path", filepath.Join(dir, u))
+	}
 }

@@ -279,7 +279,7 @@ func TestPublicKeyBytes(t *testing.T) {
 }
 
 func TestValidatePerIdentityPrincipal(t *testing.T) {
-	for _, p := range []string{"", "root", "-ou0"} {
+	for _, p := range []string{"", "root", "-ou0", "ubuntu", "admin", "sshd", "ziti"} {
 		if err := ca.ValidatePerIdentityPrincipal(p); err == nil {
 			t.Errorf("ValidatePerIdentityPrincipal(%q) = nil, want error", p)
 		}

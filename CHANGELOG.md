@@ -28,7 +28,7 @@ See security advisory GHSA-TBD for details.
 - Sudoers files moved to `/etc/sudoers.d/ziti-ssh-host-<username>`; a legacy `/etc/sudoers.d/<username>` is removed only if it contains the single line `ziti-ssh-host` wrote.
 - The session count is re-checked before account cleanup when a session is released.
 - With cleanup disabled, sudoers files left by sessions open during a crash are removed on restart.
-- `ziti-ssh-ca` refuses to sign a per-identity certificate whose derived principal is `root` or starts with `-`.
+- `ziti-ssh-ca` refuses to sign a per-identity certificate whose derived principal is a reserved account name (the same list the host refuses) or starts with `-`.
 - New `ziti-ssh-host users list` and `ziti-ssh-host users claim --username <u> --identity <id>` (root).
 
 **Upgrade action required (per-identity hosts with persistent accounts):** accounts created by earlier releases are not in the registry, so their identities are rejected (`refusing to manage pre-existing account`) until claimed with `sudo ziti-ssh-host users claim --username <u> --identity <id>`. This mainly affects hosts with `ZITI_USER_CLEANUP=false` (the default), where accounts persist. With cleanup enabled, accounts are normally deleted at disconnect; an account whose session was still open during the upgrade is left in place (not deleted, since it is unregistered) and must be claimed or removed with `userdel -r` by an administrator.
@@ -52,6 +52,13 @@ See security advisory GHSA-TBD for details.
 - A certificate is now refreshed when less than 20% of its lifetime remains, between 30 seconds and 5 minutes (1 minute for a 5-minute certificate; unchanged for certificates of 25 minutes or longer).
 - The CA reply is read with a 16 KiB limit and validated before it is written: an `error: …` reply is reported as `CA refused the request: <reason>`, and anything other than a user certificate for the caller's own public key is rejected. The existing certificate file is left untouched on failure.
 - Docs no longer state an 8-hour default TTL (`ARCHITECTURE.md`, `docs/usage.md`, `docs/operations.md`).
+
+#### Per-identity hardening follow-ups
+
+- `ziti-ssh-host`: a connection rejected by the ownership check (e.g. two identities deriving the same username) is no longer counted as a session while it is being checked; previously it could make the owner's final disconnect skip sudoers removal and account cleanup.
+- `ziti-ssh-host`: `sudoers_rule` (and `ZITI_SUDOERS_RULE`) values starting with `,` — which would add users to the rule, e.g. `, ALL ALL=(ALL) NOPASSWD: ALL` — are rejected, as are values containing NUL bytes or lacking `=`.
+- `ziti-ssh-host run`: at startup, legacy `/etc/sudoers.d/<username>` files are removed for registered accounts; legacy-format files for unregistered accounts are reported (log warning and `ziti-ssh-host users list`) but never removed automatically.
+- `docs/operations.md`: revocation section corrected — with `ZITI_USER_CLEANUP=false` (default) the account and its processes are kept after the last session closes.
 
 ### Changed
 

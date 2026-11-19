@@ -348,6 +348,69 @@ func TestReleaseUser_NewSessionDuringReleaseKeepsAccount(t *testing.T) {
 	}
 }
 
+func TestReleaseUser_RejectedCollisionDoesNotBlockTeardown(t *testing.T) {
+	ops := newFakeOps()
+	m := testManager(t, t.TempDir(), ops, true)
+	// "alice.corp" owns alice_corp; "alice_corp" derives the same username.
+	if err := m.EnsureUser("alice.corp", "alice_corp", IdentityPermissions{}); err != nil {
+		t.Fatal(err)
+	}
+	ops.mu.Lock()
+	ops.calls = nil
+	ops.mu.Unlock()
+
+	ul := m.userLocks["alice_corp"]
+	ul.Lock()
+
+	// The colliding identity connects while the owner's last session ends.
+	collider := make(chan error, 1)
+	go func() { collider <- m.EnsureUser("alice_corp", "alice_corp", IdentityPermissions{}) }()
+	time.Sleep(50 * time.Millisecond) // let it reach the per-user lock
+
+	release := make(chan error, 1)
+	go func() { release <- m.ReleaseUser("alice_corp") }()
+
+	// The owner's release must see zero sessions: the rejected attempt must
+	// not have been counted.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		m.mu.Lock()
+		_, present := m.sessions["alice_corp"]
+		m.mu.Unlock()
+		if !present {
+			break
+		}
+		if time.Now().After(deadline) {
+			ul.Unlock()
+			<-collider
+			<-release
+			t.Fatal("owner's release saw an open session counted for a not-yet-verified connection")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	ul.Unlock()
+
+	// Either order is correct once the lock is released: if the collider runs
+	// first it is rejected (owned by alice.corp); if the release runs first the
+	// owner's account and record are deleted, and the collider then gets a
+	// fresh account of its own. In both cases the owner's teardown happens.
+	collErr := <-collider
+	if err := <-release; err != nil {
+		t.Fatal(err)
+	}
+	if !ops.called("delete:alice_corp") {
+		t.Errorf("owner's account was not torn down: %v", ops.calls)
+	}
+	if collErr == nil {
+		rec, ok, _ := m.registry.Get("alice_corp")
+		if !ok || rec.Identity != "alice_corp" {
+			t.Errorf("collider accepted without a fresh account of its own: %+v", rec)
+		}
+	} else if !strings.Contains(collErr.Error(), "already in use") {
+		t.Errorf("unexpected collider error: %v", collErr)
+	}
+}
+
 func TestCleanupOrphans_SkipsUnownedAccounts(t *testing.T) {
 	dir := t.TempDir()
 	ops := newFakeOps()
@@ -486,5 +549,44 @@ func TestRemoveLegacySudoersFile(t *testing.T) {
 func TestSudoersPath_Prefixed(t *testing.T) {
 	if got := SudoersPath("admins"); got != "/etc/sudoers.d/ziti-ssh-host-admins" {
 		t.Errorf("SudoersPath = %q", got)
+	}
+}
+
+func TestLegacySudoers_FindAndReconcile(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0440); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("alice", "alice ALL=(ALL) NOPASSWD: ALL\n")                   // owned below → removed
+	write("bob", "bob ALL=(ALL) ALL\n")                                 // not registered → warn only
+	write("carol", "carol ALL=(ALL) ALL\nDefaults:carol !requiretty\n") // multi-line → not a candidate
+	write("README", "dave ALL=(ALL) ALL\n")                             // invalid username → ignored
+	write("root", "root ALL=(ALL) ALL\n")                               // reserved → ignored
+	write("ziti-ssh-host-erin", "erin ALL=(ALL) ALL\n")                 // current format → ignored
+
+	got, err := findLegacySudoersFiles(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "alice,bob" {
+		t.Fatalf("candidates = %v, want [alice bob]", got)
+	}
+
+	ops := newFakeOps()
+	m := testManager(t, t.TempDir(), ops, false)
+	if err := m.EnsureUser("alice", "alice", IdentityPermissions{}); err != nil {
+		t.Fatal(err)
+	}
+	ops.users["bob"] = 1000 // exists, never registered
+	ops.calls = nil
+
+	m.reconcileLegacySudoersIn(dir)
+	if !ops.called("rmlegacy:alice") {
+		t.Error("legacy file for registered account not removed")
+	}
+	if ops.called("rmlegacy:bob") {
+		t.Error("legacy-format file for unregistered account was removed")
 	}
 }

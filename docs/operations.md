@@ -51,7 +51,7 @@ flowchart TD
     H -- yes --> G
 ```
 
-The connection is rejected — and the account left untouched — when the account already exists but was not created by `ziti-ssh-host` (for example `ubuntu` or an administrator account), when it is registered to a different Ziti identity (two identities deriving the same username), when it was deleted and recreated with a different UID, or when its UID is below 1000. Reserved names (`root`, common system accounts, `ubuntu`, `admin`, `ziti`) are always refused. Separately, `ziti-ssh-ca` refuses to sign a per-identity certificate whose derived principal is `root` or starts with `-`.
+The connection is rejected — and the account left untouched — when the account already exists but was not created by `ziti-ssh-host` (for example `ubuntu` or an administrator account), when it is registered to a different Ziti identity (two identities deriving the same username), when it was deleted and recreated with a different UID, or when its UID is below 1000. Reserved names (`root`, common system accounts, `ubuntu`, `admin`, `ziti`) are always refused. `ziti-ssh-ca` refuses to sign a per-identity certificate for the same reserved names or for a principal starting with `-`.
 
 **Ephemeral user lifecycle:**
 - On first connection from an identity, `useradd -m -s /bin/bash -- <username>` runs and the account is recorded in the ownership registry.
@@ -167,7 +167,9 @@ Claims take effect on the next connection; no restart is needed. Only claim acco
 
 ### Legacy sudoers files
 
-Earlier releases wrote sudoers rules to `/etc/sudoers.d/<username>`; they are now written to `/etc/sudoers.d/ziti-ssh-host-<username>`. On the next connection of a registered account, the old file is removed if — and only if — it contains the single `<username> <rule>` line that `ziti-ssh-host` wrote. Any other file at that path is left in place and a warning is logged.
+Earlier releases wrote sudoers rules to `/etc/sudoers.d/<username>`; they are now written to `/etc/sudoers.d/ziti-ssh-host-<username>`. For a **registered** account, the old file is removed at daemon startup and on the account's next connection if — and only if — it contains the single `<username> <rule>` line that `ziti-ssh-host` wrote.
+
+For accounts that are **not** registered, a file of that shape is never removed automatically, because administrators often write their own sudoers files the same way. Instead, `ziti-ssh-host run` logs a warning at startup (`legacy-format sudoers file for an account ziti-ssh-host does not manage`) and `ziti-ssh-host users list` lists the files. Review each one: if an earlier `ziti-ssh-host` release wrote it, either delete it or claim the account (`users claim`) so it is migrated. Until then, such a file still grants sudo to that account.
 
 ### Rejection log lines
 
@@ -177,7 +179,7 @@ Earlier releases wrote sudoers rules to `/etc/sudoers.d/<username>`; they are no
 | `username "<u>" (derived from "<id>") is already in use by Ziti identity` | Two identities derive the same username. Rename one of the identities. |
 | `does not match registered uid` | Account was replaced outside `ziti-ssh-host`. |
 | `is reserved and will not be managed` / `must not start with '-'` | The identity's derived username is not allowed. Rename the identity. |
-| `rejected connection: invalid per-identity principal` (`ziti-ssh-ca`) | The CA refused to sign for a derived principal of `root` or one starting with `-`. |
+| `rejected connection: invalid per-identity principal` (`ziti-ssh-ca`) | The CA refused to sign for a reserved derived principal (`root`, system accounts, `ubuntu`, `admin`, `ziti`) or one starting with `-`. Rename the identity. |
 
 ---
 
@@ -315,7 +317,12 @@ ziti edge update identity alice@corp.com --role-attributes 'ssh-staging-clients'
 
 ### What happens on the host (per-identity mode)
 
-When the connection closes, `ziti-ssh-host` sees EOF on the proxied `net.Conn`, decrements the session ref-count for the identity, and runs the normal cleanup sequence when the last session ends: the sudoers file is removed, `loginctl terminate-user` drains the systemd session, and `userdel -r` removes the account and home directory. No special handling is required — revocation flows through the same path as a normal disconnect.
+Revoking an identity does not end SSH sessions that are already open; they continue until they disconnect. When the last session for the identity closes, `ziti-ssh-host` sees EOF on the proxied `net.Conn`, decrements the session ref-count, and removes the identity's sudoers file.
+
+What happens to the account itself depends on `ZITI_USER_CLEANUP`:
+
+- **`false` (default):** the account, its home directory, and any processes it left running (for example under `nohup`, `tmux`, or a systemd user service with lingering enabled) are **kept**. Its supplementary groups are not cleared until the next connection resolves new permissions. To fully revoke access on a host, an administrator must terminate the user's processes and remove or lock the account (e.g. `loginctl terminate-user <username>` then `userdel -r <username>`).
+- **`true`:** `loginctl terminate-user` drains the systemd session, remaining processes are sent SIGTERM and then SIGKILL, and `userdel -r` removes the account and home directory.
 
 ### Outstanding SSH certificates
 
