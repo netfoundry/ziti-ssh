@@ -27,6 +27,10 @@ See security advisory GHSA-TBD for details.
 - `ziti-ssh connect -A` is refused unless `--forward-agent-unverified` is also given: clients cannot yet verify which host answered on a terminator address (an OpenZiti limitation), and a forwarded agent can be used by that host while connected.
 - **Action:** to keep agent forwarding, add `permit-agent-forwarding` to `ZITI_CERT_EXTENSIONS` on the CA and use `-A --forward-agent-unverified`.
 
+#### `ziti-ssh proxy` never prompts
+
+- In `ProxyCommand` mode, `ziti-ssh proxy` no longer offers to generate an SSH key when none is found (the prompt was written into the SSH data stream on stdout); it exits with an error asking for a key or `--key`.
+
 #### CA key-type allowlist
 
 - `ziti-ssh-ca` only certifies ed25519, ECDSA (P-256/384/521), the `sk-` security-key variants, and RSA keys of at least 3072 bits. Certificates, DSA keys, shorter RSA keys, and the CA's own key are refused with an `error: …` reply (shown by clients as `CA refused the request: …`). Malformed requests now also get an `error:` reply instead of a silent close.

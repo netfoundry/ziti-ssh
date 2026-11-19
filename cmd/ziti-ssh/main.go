@@ -208,7 +208,12 @@ var candidateKeys = []string{"id_ed25519", "id_ecdsa", "id_rsa"}
 // resolveKey returns the absolute path to the SSH private key to use.
 // If keyFile is non-empty it is used directly. Otherwise ~/.ssh/ is searched
 // in candidateKeys order. If no key exists the user is prompted to generate one.
-func resolveKey(keyFile string) (string, error) {
+// resolveKey returns the SSH private key to use: keyFile if given, otherwise
+// the first of candidateKeys found in the user's SSH directory. If none exists
+// and interactive is true, it offers to generate one; when interactive is
+// false (proxy mode, where stdin/stdout carry the SSH stream) it returns an
+// error instead of prompting.
+func resolveKey(keyFile string, interactive bool) (string, error) {
 	if keyFile != "" {
 		if _, err := os.Stat(keyFile); err != nil {
 			return "", fmt.Errorf("key file %q not found: %w", keyFile, err)
@@ -228,6 +233,10 @@ func resolveKey(keyFile string) (string, error) {
 			slog.Debug("auto-detected SSH key", "path", path)
 			return path, nil
 		}
+	}
+
+	if !interactive {
+		return "", fmt.Errorf("no SSH key found; create one first (ssh-keygen -t ed25519) or pass --key")
 	}
 
 	// No key found — offer to generate one.
@@ -313,7 +322,7 @@ func registerZtAPIsPersist(zitiCtx ziti.Context, identityFile string) {
 // runSign obtains a signed SSH certificate from the CA and writes it to disk.
 // It is used both by the `sign` subcommand and by runConnect for auto-sign.
 func runSign(p signParams) error {
-	privKeyPath, err := resolveKey(p.keyFile)
+	privKeyPath, err := resolveKey(p.keyFile, true)
 	if err != nil {
 		return err
 	}
@@ -464,7 +473,7 @@ func runConnect(p connectParams) error {
 
 	// Resolve SSH key path before touching the network so we can check cert
 	// freshness without authenticating twice.
-	privKeyPath, err := resolveKey(p.keyFile)
+	privKeyPath, err := resolveKey(p.keyFile, true)
 	if err != nil {
 		return err
 	}
@@ -782,7 +791,7 @@ func runProxy(p proxyParams) error {
 	}
 
 	// Resolve SSH key for cert refresh — same logic as connect.
-	privKeyPath, err := resolveKey(p.keyFile)
+	privKeyPath, err := resolveKey(p.keyFile, false) // never prompt: stdin/stdout are the SSH stream
 	if err != nil {
 		return err
 	}
