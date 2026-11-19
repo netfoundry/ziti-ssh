@@ -28,7 +28,6 @@ import (
 	"os"
 	"strings"
 	"time"
-	"unicode"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -108,16 +107,25 @@ func PublicKeyBytes(pub ssh.PublicKey) []byte {
 // DeriveUsername maps a Ziti identity name to a valid Linux username.
 //
 // Rules applied in order:
-//  1. Lowercase the entire string.
+//  1. Lowercase ASCII letters (A–Z only).
 //  2. Replace any character outside [a-z0-9_-] with '_'.
+//
+// Only ASCII is case-folded: unicode.ToLower maps some non-ASCII letters to
+// ASCII ones (U+212A KELVIN SIGN → 'k', U+0130 'İ' → 'i'), which would let a
+// lookalike identity name derive the same username as another identity.
 //  3. If the result starts with a digit, prefix with 'z'.
 //  4. Truncate to 32 characters.
 //
 // The result is guaranteed to be non-empty as long as identity is non-empty,
 // because every character is either kept or replaced with '_'.
 func DeriveUsername(identity string) string {
-	// Step 1: lowercase.
-	s := strings.Map(unicode.ToLower, identity)
+	// Step 1: lowercase ASCII letters only.
+	s := strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, identity)
 
 	// Step 2: replace characters outside [a-z0-9_-] with '_'.
 	var b strings.Builder

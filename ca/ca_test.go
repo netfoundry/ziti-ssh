@@ -405,3 +405,19 @@ func TestParseExtensions(t *testing.T) {
 		}
 	}
 }
+
+func TestDeriveUsername_NoNonASCIICaseFolding(t *testing.T) {
+	// Lookalike identity names must not derive the same username as the
+	// ASCII name they imitate.
+	cases := map[string]string{
+		"admİn":   "adm_n",   // LATIN CAPITAL LETTER I WITH DOT ABOVE
+		"Karen":   "_aren",   // KELVIN SIGN
+		"ALICE":        "alice",   // ASCII still folded
+		"Ünïcode-User": "_n_code-user",
+	}
+	for in, want := range cases {
+		if got := ca.DeriveUsername(in); got != want {
+			t.Errorf("DeriveUsername(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

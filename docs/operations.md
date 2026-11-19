@@ -27,7 +27,7 @@ ziti-ssh ziggy@web-server-prod
 The CA derives a Linux username from each caller's Ziti identity name and places it in the certificate's `ValidPrincipals`. `ziti-ssh-host` creates the Linux user on the first connection from that identity and deletes it (including home directory) when the last session closes.
 
 **Username derivation rules** (`ca.DeriveUsername`):
-1. Lowercase the entire identity name.
+1. Lowercase ASCII letters (`A`–`Z`); other characters are not case-folded, so non-ASCII lookalikes such as the Kelvin sign `K` never become ASCII letters.
 2. Replace any character outside `[a-z0-9_-]` with `_`.
 3. If the result starts with a digit, prefix it with `z`.
 4. Truncate to 32 characters.

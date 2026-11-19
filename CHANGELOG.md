@@ -126,6 +126,10 @@ See security advisory GHSA-TBD for details.
 **Updated docs:** `docs/operations.md` (account ownership flow diagram, lifecycle, new "Managing account ownership" section, files-written table), `docs/configuration.md` (`users` subcommands, sudoers path), `ARCHITECTURE.md` (`UserManager`, `deleteUser`, §12 account ownership boundary), `CLAUDE.md`.
 
 ### Fixed
+#### Derived usernames fold ASCII case only (behaviour change)
+
+- `ca.DeriveUsername` lowercases only `A`–`Z`; every other non-`[a-z0-9_-]` character becomes `_`. Previously Unicode case folding mapped some non-ASCII letters to ASCII (the Kelvin sign to `k`, `İ` to `i`), so a lookalike identity name could derive another identity's username. Only identity names containing such characters derive a different name; upgrade `ziti-ssh-ca` and `ziti-ssh-host` together.
+
 #### Permission key matching (behaviour change)
 
 - `ziti-ssh-host.v1` permission keys are matched by `host.MatchPattern`: `*` matches any run of characters including `/`, `?` one character, everything else literally. Previously `path.Match` was used, where `*` stopped at `/` (so `"*"` did not match identity names containing `/`), `[…]` was a character class and `\` an escape. Keys containing `[` or `\` are flagged in the log and by `inspect`.
