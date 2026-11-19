@@ -251,6 +251,7 @@ No HTTP, no framing beyond the newline.
 | Key ID | `ziti:<identity-name>` |
 | Validity | 5 minutes from signing time by default (configurable via `--cert-ttl`) |
 | Extensions | `permit-pty`, `permit-port-forwarding`, `permit-agent-forwarding` |
+| Critical options | `source-address=127.0.0.1/32,::1/128` (`--cert-source-address`): sshd accepts the cert only from loopback, i.e. via the local `ziti-ssh-host` proxy, so a cert cannot be used by connecting to port 22 directly |
 
 The Key ID appears in `/var/log/auth.log` on every SSH host, providing a per-identity audit trail even though all users share the same account in `shared` mode.
 
@@ -268,6 +269,7 @@ All binaries accept configuration via flags and environment variables (flags tak
 | `--principal` | `ZITI_SSH_PRINCIPAL` | `ziggy` | SSH certificate principal (shared mode only) |
 | `--mode` | `ZITI_SSH_MODE` | `shared` | Principal mode: `shared` or `per-identity` |
 | `--cert-ttl` | `ZITI_CERT_TTL` | `5m` | Certificate validity duration (e.g. `4h`, `12h`, `24h`); must be > 0 |
+| `--cert-source-address` | `ZITI_CERT_SOURCE_ADDRESS` | `127.0.0.1/32,::1/128` | Comma-separated IPs/CIDRs written to each certificate's `source-address` critical option; sshd accepts the certificate only from those addresses. The default (loopback) means certificates work only through `ziti-ssh-host`'s local proxy. `none` disables it. |
 | `--rate-limit` | `ZITI_RATE_LIMIT` | `5` | Max cert signing requests per minute per identity |
 | `--rate-burst` | `ZITI_RATE_BURST` | `3` | Burst allowance for the per-identity rate limiter |
 | `--ziti-timeout` | `ZITI_TIMEOUT` | `30s` | Timeout for blocking Ziti network operations |

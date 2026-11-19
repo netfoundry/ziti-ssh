@@ -67,6 +67,7 @@ func main() {
 		certTTLFlag     string
 		rateLimitFlag   string
 		rateBurstFlag   string
+		sourceAddrFlag  string
 		zitiTimeoutFlag string
 		versionFlag     bool
 	)
@@ -91,6 +92,7 @@ func main() {
 			rateLimitStr := config.EnvOrFlag(rateLimitFlag, "ZITI_RATE_LIMIT", "5")
 			rateBurstStr := config.EnvOrFlag(rateBurstFlag, "ZITI_RATE_BURST", "3")
 			zitiTimeoutStr := config.EnvOrFlag(zitiTimeoutFlag, "ZITI_TIMEOUT", "30s")
+			sourceAddrStr := config.EnvOrFlag(sourceAddrFlag, "ZITI_CERT_SOURCE_ADDRESS", ca.DefaultSourceAddress)
 
 			if identityFile == "" {
 				return fmt.Errorf("--identity (or ZITI_IDENTITY) is required")
@@ -128,7 +130,12 @@ func main() {
 				return fmt.Errorf("--rate-burst (or ZITI_RATE_BURST): must be a positive integer, got %q", rateBurstStr)
 			}
 
-			return run(identityFile, caKeyFile, serviceName, principal, mode, certTTL, rateLimit, rateBurst, zitiTimeout)
+			sourceAddress, err := ca.ParseSourceAddress(sourceAddrStr)
+			if err != nil {
+				return fmt.Errorf("--cert-source-address (or ZITI_CERT_SOURCE_ADDRESS): %w", err)
+			}
+
+			return run(identityFile, caKeyFile, serviceName, principal, mode, certTTL, sourceAddress, rateLimit, rateBurst, zitiTimeout)
 		},
 	}
 
@@ -139,6 +146,7 @@ func main() {
 	root.Flags().StringVar(&modeFlag, "mode", "", "Principal mode: \"shared\" (default) or \"per-identity\" (or set ZITI_SSH_MODE)")
 	root.Flags().StringVar(&certTTLFlag, "cert-ttl", "", "Certificate validity duration (or set ZITI_CERT_TTL, default: 5m)")
 	root.Flags().StringVar(&rateLimitFlag, "rate-limit", "", "Max cert signing requests per minute per identity (or set ZITI_RATE_LIMIT, default: 5)")
+	root.Flags().StringVar(&sourceAddrFlag, "cert-source-address", "", "Comma-separated IPs/CIDRs set as the certificate source-address option, or \"none\" (or set ZITI_CERT_SOURCE_ADDRESS, default: "+ca.DefaultSourceAddress+")")
 	root.Flags().StringVar(&rateBurstFlag, "rate-burst", "", "Burst allowance for per-identity rate limiter (or set ZITI_RATE_BURST, default: 3)")
 	root.PersistentFlags().StringVar(&zitiTimeoutFlag, "ziti-timeout", "", "Timeout for Ziti network operations (or set ZITI_TIMEOUT, default: 30s)")
 	root.PersistentFlags().BoolVarP(&versionFlag, "version", "V", false, "Print version and exit")
@@ -238,13 +246,14 @@ const drainTimeout = 30 * time.Second
 // burst window.
 const idleLimiterTTL = 10 * time.Minute
 
-func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL time.Duration, ratePerMinute float64, rateBurst int, zitiTimeout time.Duration) error {
+func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL time.Duration, sourceAddress string, ratePerMinute float64, rateBurst int, zitiTimeout time.Duration) error {
 	// Load CA key.
 	signer, caPub, err := ca.LoadKey(caKeyFile)
 	if err != nil {
 		return fmt.Errorf("load CA key: %w", err)
 	}
 	slog.Info("CA key loaded", "service", serviceName, "mode", mode, "principal", principal,
+		"cert_ttl", certTTL, "cert_source_address", sourceAddressForLog(sourceAddress),
 		"rate_limit_per_min", ratePerMinute, "rate_burst", rateBurst)
 
 	caPubBytes := ca.PublicKeyBytes(caPub)
@@ -338,7 +347,7 @@ func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL t
 		wg.Add(1)
 		go func(c net.Conn) {
 			defer wg.Done()
-			handleConn(c, signer, caPubBytes, principal, mode, certTTL, limiter)
+			handleConn(c, signer, caPubBytes, principal, mode, certTTL, sourceAddress, limiter)
 		}(conn)
 	}
 
@@ -371,7 +380,7 @@ func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL t
 // In "shared" mode the principal comes from the operator-configured flag.
 // In "per-identity" mode the principal is derived from the caller's Ziti identity
 // name via ca.DeriveUsername.
-func handleConn(conn net.Conn, signer ssh.Signer, caPubBytes []byte, principal, mode string, certTTL time.Duration, limiter *ratelimit.Map) {
+func handleConn(conn net.Conn, signer ssh.Signer, caPubBytes []byte, principal, mode string, certTTL time.Duration, sourceAddress string, limiter *ratelimit.Map) {
 	defer conn.Close()
 
 	// Extract the router-verified caller identity. Fail closed if absent.
@@ -436,7 +445,7 @@ func handleConn(conn net.Conn, signer ssh.Signer, caPubBytes []byte, principal, 
 		return
 	}
 
-	certBytes, err := ca.SignCert(signer, pubKey, identity, effectivePrincipal, certTTL)
+	certBytes, err := ca.SignCert(signer, pubKey, identity, effectivePrincipal, certTTL, sourceAddress)
 	if err != nil {
 		log.Error("sign certificate", "err", err)
 		return
@@ -487,4 +496,12 @@ func callerIdentity(conn net.Conn) string {
 		}
 	}
 	return name
+}
+
+// sourceAddressForLog renders the configured source-address restriction.
+func sourceAddressForLog(sourceAddress string) string {
+	if sourceAddress == "" {
+		return "none (certificates accepted from any address)"
+	}
+	return sourceAddress
 }

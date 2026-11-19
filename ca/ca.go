@@ -21,6 +21,7 @@ package ca
 import (
 	"crypto/rand"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -49,11 +50,13 @@ func LoadKey(path string) (ssh.Signer, ssh.PublicKey, error) {
 // SignCert signs a short-lived SSH user certificate for the given public key.
 // identity is the Ziti identity name of the caller (embedded in the Key ID for
 // audit purposes). principal is the Linux username the cert grants access to.
-// ttl controls validity duration — pass 8*time.Hour for standard production use.
+// ttl controls validity duration (the CA defaults to 5 minutes).
+// sourceAddress, when non-empty, is set as the "source-address" critical
+// option (see ParseSourceAddress and DefaultSourceAddress); "" omits it.
 //
 // The returned bytes are in authorized_keys format, ready to write to a
 // ~/.ssh/<key>-cert.pub file.
-func SignCert(signer ssh.Signer, pubKey ssh.PublicKey, identity, principal string, ttl time.Duration) ([]byte, error) {
+func SignCert(signer ssh.Signer, pubKey ssh.PublicKey, identity, principal string, ttl time.Duration, sourceAddress string) ([]byte, error) {
 	if identity == "" {
 		return nil, fmt.Errorf("identity must not be empty")
 	}
@@ -76,6 +79,12 @@ func SignCert(signer ssh.Signer, pubKey ssh.PublicKey, identity, principal strin
 				"permit-agent-forwarding": "",
 			},
 		},
+	}
+	if sourceAddress != "" {
+		// sshd accepts the certificate only from these addresses. Every
+		// legitimate login reaches sshd from the host's own ziti-ssh-host
+		// proxy over loopback, so this confines certificates to the Ziti path.
+		cert.Permissions.CriticalOptions = map[string]string{"source-address": sourceAddress}
 	}
 
 	if err := cert.SignCert(rand.Reader, signer); err != nil {
@@ -164,4 +173,51 @@ func ValidatePerIdentityPrincipal(principal string) error {
 		return fmt.Errorf("derived principal %q must not start with '-'", principal)
 	}
 	return nil
+}
+
+// DefaultSourceAddress is the default "source-address" critical option: the
+// loopback addresses from which ziti-ssh-host proxies connections to sshd.
+const DefaultSourceAddress = "127.0.0.1/32,::1/128"
+
+// ParseSourceAddress validates and normalises a value for the certificate
+// "source-address" critical option: a comma-separated list of IP addresses or
+// CIDR blocks. A bare IP becomes a /32 (IPv4) or /128 (IPv6). CIDRs with host
+// bits set are rejected to avoid silently widening the range. The value
+// "none" disables the option and returns "".
+func ParseSourceAddress(v string) (string, error) {
+	v = strings.TrimSpace(v)
+	if strings.EqualFold(v, "none") {
+		return "", nil
+	}
+	if v == "" {
+		return "", fmt.Errorf("source address list is empty (use \"none\" to disable)")
+	}
+	var out []string
+	for _, item := range strings.Split(v, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			return "", fmt.Errorf("source address list %q has an empty entry", v)
+		}
+		if strings.Contains(item, "/") {
+			ip, ipnet, err := net.ParseCIDR(item)
+			if err != nil {
+				return "", fmt.Errorf("invalid CIDR %q: %w", item, err)
+			}
+			if !ip.Equal(ipnet.IP) {
+				return "", fmt.Errorf("CIDR %q has host bits set (did you mean %s?)", item, ipnet.String())
+			}
+			out = append(out, ipnet.String())
+			continue
+		}
+		ip := net.ParseIP(item)
+		if ip == nil {
+			return "", fmt.Errorf("invalid IP address %q", item)
+		}
+		if ip.To4() != nil {
+			out = append(out, ip.To4().String()+"/32")
+		} else {
+			out = append(out, ip.String()+"/128")
+		}
+	}
+	return strings.Join(out, ","), nil
 }

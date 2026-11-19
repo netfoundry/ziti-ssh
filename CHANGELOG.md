@@ -8,6 +8,13 @@ All notable changes to this project will be documented in this file.
 
 See security advisory GHSA-TBD for details.
 
+#### Certificates restricted to the Ziti path (`source-address`)
+
+`ziti-ssh-ca` now adds the OpenSSH `source-address` critical option to every certificate, defaulting to `127.0.0.1/32,::1/128`. sshd accepts a certificate only from those addresses; `ziti-ssh-host` always proxies to `127.0.0.1:22`, so the same certificate keeps working on every host the caller's Ziti policies allow, but is rejected on any connection that reaches port 22 directly.
+
+- New flag `--cert-source-address` / `ZITI_CERT_SOURCE_ADDRESS` (comma-separated IPs or CIDRs, or `none` to omit the option). Invalid values stop the CA at startup.
+- If something other than the local `ziti-ssh-host` delivers connections to sshd, set this accordingly.
+
 #### Caller identity taken from the edge router (BREAKING)
 
 `ziti-ssh-ca` and `ziti-ssh-host` now identify each caller only by the dialer identity name that the caller's edge router attaches to the connection (`GetDialerIdentityName()`). The client-supplied caller ID header is no longer used for any decision; if it differs, a warning is logged (`client-supplied caller id does not match router-verified dialer identity`).

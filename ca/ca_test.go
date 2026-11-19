@@ -67,7 +67,7 @@ func TestSignCert(t *testing.T) {
 	const ttl = 5 * time.Minute
 
 	before := time.Now()
-	certBytes, err := ca.SignCert(caSigner, clientPub, identity, principal, ttl)
+	certBytes, err := ca.SignCert(caSigner, clientPub, identity, principal, ttl, ca.DefaultSourceAddress)
 	after := time.Now()
 
 	if err != nil {
@@ -97,6 +97,16 @@ func TestSignCert(t *testing.T) {
 		wantKeyId := "ziti:" + identity
 		if cert.KeyId != wantKeyId {
 			t.Errorf("KeyId = %q, want %q", cert.KeyId, wantKeyId)
+		}
+	})
+
+	t.Run("SourceAddress", func(t *testing.T) {
+		got := cert.CriticalOptions["source-address"]
+		if got != ca.DefaultSourceAddress {
+			t.Errorf("source-address = %q, want %q", got, ca.DefaultSourceAddress)
+		}
+		if len(cert.CriticalOptions) != 1 {
+			t.Errorf("CriticalOptions = %v, want only source-address", cert.CriticalOptions)
 		}
 	})
 
@@ -148,7 +158,7 @@ func TestSignCert_EmptyIdentityRejected(t *testing.T) {
 	caSigner, _ := generateTestCA(t)
 	clientPub := generateTestClientKey(t)
 
-	_, err := ca.SignCert(caSigner, clientPub, "", "ziggy", 8*time.Hour)
+	_, err := ca.SignCert(caSigner, clientPub, "", "ziggy", 8*time.Hour, "")
 	if err == nil {
 		t.Fatal("expected error for empty identity, got nil")
 	}
@@ -158,7 +168,7 @@ func TestSignCert_EmptyPrincipalRejected(t *testing.T) {
 	caSigner, _ := generateTestCA(t)
 	clientPub := generateTestClientKey(t)
 
-	_, err := ca.SignCert(caSigner, clientPub, "alice", "", 8*time.Hour)
+	_, err := ca.SignCert(caSigner, clientPub, "alice", "", 8*time.Hour, "")
 	if err == nil {
 		t.Fatal("expected error for empty principal, got nil")
 	}
@@ -287,6 +297,43 @@ func TestValidatePerIdentityPrincipal(t *testing.T) {
 	for _, p := range []string{"alice", "dba-alice", "z123bot"} {
 		if err := ca.ValidatePerIdentityPrincipal(p); err != nil {
 			t.Errorf("ValidatePerIdentityPrincipal(%q) = %v, want nil", p, err)
+		}
+	}
+}
+
+func TestSignCert_NoSourceAddress(t *testing.T) {
+	caSigner, _ := generateTestCA(t)
+	certBytes, err := ca.SignCert(caSigner, generateTestClientKey(t), "alice", "ziggy", 5*time.Minute, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, _, _, _, err := ssh.ParseAuthorizedKey(certBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts := pub.(*ssh.Certificate).CriticalOptions; len(opts) != 0 {
+		t.Errorf("CriticalOptions = %v, want none", opts)
+	}
+}
+
+func TestParseSourceAddress(t *testing.T) {
+	valid := map[string]string{
+		ca.DefaultSourceAddress:   "127.0.0.1/32,::1/128",
+		"127.0.0.1":               "127.0.0.1/32",
+		" 10.0.0.0/8 , ::1 ":      "10.0.0.0/8,::1/128",
+		"192.168.1.0/24,fd00::/8": "192.168.1.0/24,fd00::/8",
+		"none":                    "",
+		"NONE":                    "",
+	}
+	for in, want := range valid {
+		got, err := ca.ParseSourceAddress(in)
+		if err != nil || got != want {
+			t.Errorf("ParseSourceAddress(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"", "localhost", "127.0.0.1/33", "10.0.0.5/24", "127.0.0.1,,::1", "1.2.3"} {
+		if got, err := ca.ParseSourceAddress(in); err == nil {
+			t.Errorf("ParseSourceAddress(%q) = %q, want error", in, got)
 		}
 	}
 }

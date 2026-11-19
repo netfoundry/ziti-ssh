@@ -326,7 +326,9 @@ What happens to the account itself depends on `ZITI_USER_CLEANUP`:
 
 ### Outstanding SSH certificates
 
-Revoking Ziti access does not invalidate the user's SSH certificate — it may still have up to the CA's certificate TTL of validity remaining (default 5 minutes, `--cert-ttl`). However, the certificate is useless without a live Ziti connection to reach any SSH host, so this is not a practical concern in normal operation. The certificate cannot be used to connect directly to port 22 because that port is firewalled; it can only be used through the Ziti overlay.
+Revoking Ziti access does not invalidate the user's SSH certificate — it may still have up to the CA's certificate TTL of validity remaining (default 5 minutes, `--cert-ttl`). However, the certificate is useless without a live Ziti connection to reach any SSH host. Each certificate carries the `source-address` critical option (default `127.0.0.1/32,::1/128`, `--cert-source-address` on `ziti-ssh-ca`), so sshd accepts it only from loopback — that is, only when the connection arrives through the host's own `ziti-ssh-host` proxy. Even if port 22 is reachable directly (security group, LAN, VPN), sshd rejects the certificate there and logs the source-address mismatch.
+
+Change `--cert-source-address` only if something other than `ziti-ssh-host` on the same machine delivers connections to sshd; `none` removes the restriction and should be paired with a firewall that keeps port 22 unreachable.
 
 If the CA itself needs to be rotated (for example, after a credential compromise), see [CA key rotation](#ca-key-rotation) below.
 

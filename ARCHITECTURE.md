@@ -409,6 +409,7 @@ Certificates are issued on demand and are ephemeral. There is no certificate sto
 | `Extensions["permit-pty"]` | `""` | Hardcoded |
 | `Extensions["permit-port-forwarding"]` | `""` | Hardcoded |
 | `Extensions["permit-agent-forwarding"]` | `""` | Hardcoded |
+| `CriticalOptions["source-address"]` | `127.0.0.1/32,::1/128` | `--cert-source-address` / `ZITI_CERT_SOURCE_ADDRESS`; omitted when set to `none` |
 
 ### TTL and Revocation
 
@@ -437,6 +438,9 @@ cert := &ssh.Certificate{
             "permit-agent-forwarding": "",
         },
     },
+}
+if sourceAddress != "" { // --cert-source-address, default "127.0.0.1/32,::1/128"
+    cert.Permissions.CriticalOptions = map[string]string{"source-address": sourceAddress}
 }
 cert.SignCert(rand.Reader, signer)
 ```
@@ -650,6 +654,8 @@ This is possible because `ziti-ssh-ca` runs on the same host as the Ziti control
 **Identity validation:** `callerIdentity` trusts only the router-set `DialerIdentityName` header (`GetDialerIdentityName()`), never the client-set `CallerId` header (`SourceIdentifier()`). It returns `""` when the router supplied no dialer identity, and `handleConn` rejects such connections before reading any data from them. `ziti-ssh-host` applies the same rule in `per-identity` mode. This requires every edge router to run OpenZiti v2.0.0 or later.
 
 **Principal derivation:** In `shared` mode, `ValidPrincipals` is set from the operator-configured `--principal` flag — a client cannot influence which Linux user they get. In `per-identity` mode, the principal is derived deterministically from the router-verified identity name via `ca.DeriveUsername`. The name comes from the dialer's edge router, which authenticated the client over mTLS, so the client cannot substitute another name. The derivation function (lowercase, replace non-`[a-z0-9_-]` with `_`, prefix `z` if digit-leading, truncate to 32) is purely defensive — it sanitizes the identity name for use as a POSIX username and is not a security boundary. Because it is lossy (`Alice` and `alice`, or `a.b` and `a_b`, derive the same name), `ziti-ssh-host` binds each account to the first identity that created it in its ownership registry and rejects any other identity deriving the same username. `ziti-ssh-ca` refuses to sign a per-identity certificate whose derived principal is a reserved account name (`ca.IsReservedUsername`: `root`, system accounts, `ubuntu`, `admin`, …) or starts with `-`; the host uses the same list.
+
+**Certificates are bound to the Ziti path:** every certificate carries the `source-address` critical option (default `127.0.0.1/32,::1/128`). Each host's sshd only ever receives legitimate logins from that host's own `ziti-ssh-host` proxy over loopback, so the same certificate works on every host the caller's Ziti policies allow, while sshd rejects it on any connection that reaches port 22 directly (a security group, LAN or VPN path that bypasses Ziti). A local user on the SSH host itself who also holds the private key can still use it via loopback until it expires.
 
 **Ziti as the authorization boundary:** Any identity that can dial `ssh-ca` receives a certificate. Any identity that can dial `ssh` with a given terminator address reaches that host. Access control is managed entirely in Ziti service policies (dial policies, service policies). This is intentional — the CA is a dumb signing service; the access control lives in Ziti.
 

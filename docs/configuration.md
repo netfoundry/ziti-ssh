@@ -74,6 +74,7 @@ All binaries resolve each setting in the same order: CLI flag > environment vari
 | `--principal` | `ZITI_SSH_PRINCIPAL` | `ziggy` | No | Linux username placed in `ValidPrincipals` (shared mode only) |
 | `--mode` | `ZITI_SSH_MODE` | `shared` | No | Principal mode: `shared` or `per-identity` |
 | `--cert-ttl` | `ZITI_CERT_TTL` | `5m` | No | Certificate validity duration (e.g. `4h`, `12h`, `24h`); must be > 0 |
+| `--cert-source-address` | `ZITI_CERT_SOURCE_ADDRESS` | `127.0.0.1/32,::1/128` | No | Comma-separated IPs/CIDRs written to each certificate's `source-address` critical option; sshd accepts the certificate only from those addresses. The default (loopback) means certificates work only through `ziti-ssh-host`'s local proxy. `none` disables it. |
 | `--rate-limit` | `ZITI_RATE_LIMIT` | `5` | No | Maximum cert signing requests per minute per identity (decimal values accepted for sub-minute rates) |
 | `--rate-burst` | `ZITI_RATE_BURST` | `3` | No | Burst allowance for the per-identity token-bucket rate limiter |
 | `--ziti-timeout` | `ZITI_TIMEOUT` | `30s` | No | Timeout for blocking Ziti network operations (authenticate, listen). Accepts any `time.Duration` string, e.g. `30s`, `1m`. |
