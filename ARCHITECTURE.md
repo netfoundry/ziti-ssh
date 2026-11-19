@@ -50,15 +50,15 @@ Entry points: `cmd/ziti-ssh-ca/main.go` (service and root) and `cmd/ziti-ssh-ca/
 3. Initialize a Ziti context from the identity file with `ziti.NewContextFromFile`, then call `zitiCtx.Authenticate()`.
 4. Call `zitiCtx.Listen(serviceName)` to bind the named Ziti service and receive an `edge.Listener`.
 5. Build a per-identity token-bucket rate limiter (`ratelimit.New`) and start its eviction goroutine.
-6. Loop: `listener.Accept()` → `go handleConn(...)`.
+6. Loop: `listener.Accept()` → `dispatch(...)`: if one of `--max-connections` slots (default 64) is free, run `handleConn` in a goroutine and release the slot when it returns; otherwise close the connection immediately.
 
 Each connection handler (`handleConn`):
 
 1. Calls `GetDialerIdentityName()` on the connection — the router-verified identity name of the caller (see [§6](#6-ziti-identity-flow)). Rejects the connection if it is empty.
-2. Reads one newline-terminated line from the connection.
-3. Resolves the effective principal from the configured mode (see [Mode: shared vs per-identity](#mode-shared-vs-per-identity)).
-4. Enforces the per-identity rate limit for cert-signing requests (CA public key requests are not rate-limited).
-5. Dispatches on line content: empty → write CA public key; non-empty → parse as SSH public key, sign, write certificate.
+2. Resolves the effective principal from the configured mode (see [Mode: shared vs per-identity](#mode-shared-vs-per-identity)).
+3. Sets a 10-second deadline on the connection.
+4. Enforces the per-identity rate limit **before reading anything**, for every request type (CA public key requests included); a limited caller receives `error: rate limit exceeded`.
+5. Reads one newline-terminated line (at most 4 KiB) and dispatches on its content: empty → write CA public key; non-empty → parse as SSH public key, sign, write certificate.
 6. Logs every outcome with the identity name as a structured field.
 
 The CA signer (`ssh.Signer`) is initialized once and passed to every handler. `ssh.Signer` wraps a Go `crypto.Signer` — the standard library's Ed25519 implementation is safe for concurrent use, so no mutex is required.
@@ -256,6 +256,8 @@ Client                         ziti-ssh-ca
 **Response encoding:** A single line in authorized_keys format, terminated by `\n`.
 - CA public key response: `ssh-ed25519 AAAA... <comment>\n`
 - Signed certificate response: `ssh-ed25519-cert-v01@openssh.com AAAA...\n`
+- Refusal: `error: <reason>\n` (e.g. `error: rate limit exceeded`). Every request, including a CA public key request, counts against the caller's rate limit.
+- When `--max-connections` concurrent connections are already open, a new connection is closed without a response.
 
 Both are produced by `ssh.MarshalAuthorizedKey` from `golang.org/x/crypto/ssh`.
 

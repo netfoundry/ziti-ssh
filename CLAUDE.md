@@ -159,7 +159,8 @@ Three modes of operation: a long-running service, a one-shot `enroll` command, a
 - If the request body is empty, returns the CA public key instead (used by hosts during enrollment)
 - Embeds the Ziti identity name as the certificate Key ID (for audit logging)
 - Issues certs with a configurable principal (default: `ziggy`) and 5m validity
-- Enforces a per-identity token-bucket rate limit (default: 5 req/min, burst 3)
+- Enforces a per-identity token-bucket rate limit (default: 5 req/min, burst 3) on every request, checked before the request is read
+- Caps concurrent connections (`--max-connections`, default 64); further connections are closed immediately
 
 **`enroll` subcommand** — enrolls the CA server's Ziti identity from a one-time JWT file. Writes the identity JSON to `/etc/ziti-ssh-ca/identity.json` (mode 0600) by default; `--out` overrides the path. No CA-specific post-enrollment steps needed.
 
@@ -240,6 +241,7 @@ ssh-db  config: dba-carol → [mysql]        ← DBA team, database-level access
 Over a raw Ziti connection to `ssh-ca`:
 - **Fetch CA public key:** send empty line (`\n`) → receive CA public key in authorized_keys format
 - **Sign cert:** send SSH public key in authorized_keys format → receive signed cert in authorized_keys format
+- **Refusal:** `error: <reason>` line (e.g. `error: rate limit exceeded`). Both request types count against the per-identity rate limit, which is checked before the request is read. Connections beyond `--max-connections` are closed without a reply; each connection has a 10 s deadline and a 4 KiB request cap.
 
 No HTTP, no framing beyond the newline.
 
@@ -270,8 +272,9 @@ All binaries accept configuration via flags and environment variables (flags tak
 | `--mode` | `ZITI_SSH_MODE` | `shared` | Principal mode: `shared` or `per-identity` |
 | `--cert-ttl` | `ZITI_CERT_TTL` | `5m` | Certificate validity duration (e.g. `4h`, `12h`, `24h`); must be > 0 |
 | `--cert-source-address` | `ZITI_CERT_SOURCE_ADDRESS` | `127.0.0.1/32,::1/128` | Comma-separated IPs/CIDRs written to each certificate's `source-address` critical option; sshd accepts the certificate only from those addresses. The default (loopback) means certificates work only through `ziti-ssh-host`'s local proxy. `none` disables it. |
-| `--rate-limit` | `ZITI_RATE_LIMIT` | `5` | Max cert signing requests per minute per identity |
+| `--rate-limit` | `ZITI_RATE_LIMIT` | `5` | Max requests (cert signing and CA public key) per minute per identity |
 | `--rate-burst` | `ZITI_RATE_BURST` | `3` | Burst allowance for the per-identity rate limiter |
+| `--max-connections` | `ZITI_MAX_CONNECTIONS` | `64` | Maximum concurrent CA connections; further connections are closed immediately |
 | `--ziti-timeout` | `ZITI_TIMEOUT` | `30s` | Timeout for blocking Ziti network operations |
 
 `config apply` / `config remove` additional flags:

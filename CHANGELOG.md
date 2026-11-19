@@ -15,6 +15,12 @@ See security advisory GHSA-TBD for details.
 - New flag `--cert-source-address` / `ZITI_CERT_SOURCE_ADDRESS` (comma-separated IPs or CIDRs, or `none` to omit the option). Invalid values stop the CA at startup.
 - If something other than the local `ziti-ssh-host` delivers connections to sshd, set this accordingly.
 
+#### CA connection limits
+
+- `ziti-ssh-ca` caps concurrent connections (`--max-connections` / `ZITI_MAX_CONNECTIONS`, default 64); connections beyond the cap are closed immediately.
+- The per-identity rate limit is now checked before the request is read and applies to CA public key requests as well as certificate requests. A limited caller receives `error: rate limit exceeded`.
+- The per-connection deadline is reduced from 30 s to 10 s.
+
 #### Optional termination of a user's processes on disconnect
 
 - New `ziti-ssh-host` setting `ZITI_TERMINATE_ON_DISCONNECT` (default `false`, per-identity mode with `ZITI_USER_CLEANUP=false`). When `true`, all of an account's processes are ended when its last session closes — lingering disabled, `loginctl terminate-user`, then SIGTERM/SIGKILL to the account's UID — while the account and home directory are kept. Also applied at startup to accounts that still had sessions open when the daemon stopped.

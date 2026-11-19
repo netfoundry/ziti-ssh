@@ -68,6 +68,7 @@ func main() {
 		rateLimitFlag   string
 		rateBurstFlag   string
 		sourceAddrFlag  string
+		maxConnsFlag    string
 		zitiTimeoutFlag string
 		versionFlag     bool
 	)
@@ -93,6 +94,7 @@ func main() {
 			rateBurstStr := config.EnvOrFlag(rateBurstFlag, "ZITI_RATE_BURST", "3")
 			zitiTimeoutStr := config.EnvOrFlag(zitiTimeoutFlag, "ZITI_TIMEOUT", "30s")
 			sourceAddrStr := config.EnvOrFlag(sourceAddrFlag, "ZITI_CERT_SOURCE_ADDRESS", ca.DefaultSourceAddress)
+			maxConnsStr := config.EnvOrFlag(maxConnsFlag, "ZITI_MAX_CONNECTIONS", strconv.Itoa(defaultMaxConnections))
 
 			if identityFile == "" {
 				return fmt.Errorf("--identity (or ZITI_IDENTITY) is required")
@@ -135,7 +137,12 @@ func main() {
 				return fmt.Errorf("--cert-source-address (or ZITI_CERT_SOURCE_ADDRESS): %w", err)
 			}
 
-			return run(identityFile, caKeyFile, serviceName, principal, mode, certTTL, sourceAddress, rateLimit, rateBurst, zitiTimeout)
+			maxConns, err := strconv.Atoi(maxConnsStr)
+			if err != nil || maxConns < 1 {
+				return fmt.Errorf("--max-connections (or ZITI_MAX_CONNECTIONS): must be a positive integer, got %q", maxConnsStr)
+			}
+
+			return run(identityFile, caKeyFile, serviceName, principal, mode, certTTL, sourceAddress, rateLimit, rateBurst, maxConns, zitiTimeout)
 		},
 	}
 
@@ -147,6 +154,7 @@ func main() {
 	root.Flags().StringVar(&certTTLFlag, "cert-ttl", "", "Certificate validity duration (or set ZITI_CERT_TTL, default: 5m)")
 	root.Flags().StringVar(&rateLimitFlag, "rate-limit", "", "Max cert signing requests per minute per identity (or set ZITI_RATE_LIMIT, default: 5)")
 	root.Flags().StringVar(&sourceAddrFlag, "cert-source-address", "", "Comma-separated IPs/CIDRs set as the certificate source-address option, or \"none\" (or set ZITI_CERT_SOURCE_ADDRESS, default: "+ca.DefaultSourceAddress+")")
+	root.Flags().StringVar(&maxConnsFlag, "max-connections", "", "Maximum concurrent CA connections; further connections are closed (or set ZITI_MAX_CONNECTIONS, default: "+strconv.Itoa(defaultMaxConnections)+")")
 	root.Flags().StringVar(&rateBurstFlag, "rate-burst", "", "Burst allowance for per-identity rate limiter (or set ZITI_RATE_BURST, default: 3)")
 	root.PersistentFlags().StringVar(&zitiTimeoutFlag, "ziti-timeout", "", "Timeout for Ziti network operations (or set ZITI_TIMEOUT, default: 30s)")
 	root.PersistentFlags().BoolVarP(&versionFlag, "version", "V", false, "Print version and exit")
@@ -246,7 +254,7 @@ const drainTimeout = 30 * time.Second
 // burst window.
 const idleLimiterTTL = 10 * time.Minute
 
-func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL time.Duration, sourceAddress string, ratePerMinute float64, rateBurst int, zitiTimeout time.Duration) error {
+func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL time.Duration, sourceAddress string, ratePerMinute float64, rateBurst int, maxConns int, zitiTimeout time.Duration) error {
 	// Load CA key.
 	signer, caPub, err := ca.LoadKey(caKeyFile)
 	if err != nil {
@@ -254,7 +262,7 @@ func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL t
 	}
 	slog.Info("CA key loaded", "service", serviceName, "mode", mode, "principal", principal,
 		"cert_ttl", certTTL, "cert_source_address", sourceAddressForLog(sourceAddress),
-		"rate_limit_per_min", ratePerMinute, "rate_burst", rateBurst)
+		"rate_limit_per_min", ratePerMinute, "rate_burst", rateBurst, "max_connections", maxConns)
 
 	caPubBytes := ca.PublicKeyBytes(caPub)
 
@@ -336,6 +344,7 @@ func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL t
 	}()
 
 	// Accept loop.
+	slots := make(chan struct{}, maxConns)
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -344,11 +353,9 @@ func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL t
 			slog.Info("listener closed, draining in-flight connections")
 			break
 		}
-		wg.Add(1)
-		go func(c net.Conn) {
-			defer wg.Done()
+		dispatch(conn, slots, &wg, func(c net.Conn) {
 			handleConn(c, signer, caPubBytes, principal, mode, certTTL, sourceAddress, limiter)
-		}(conn)
+		})
 	}
 
 	// Stop the limiter eviction goroutine now that we're shutting down.
@@ -374,7 +381,7 @@ func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL t
 
 // handleConn serves a single incoming Ziti connection.
 // It reads one line from the client:
-//   - empty line  → send CA public key (not rate-limited)
+//   - empty line  → send CA public key
 //   - public key  → sign and return certificate (rate-limited per identity)
 //
 // In "shared" mode the principal comes from the operator-configured flag.
@@ -403,13 +410,23 @@ func handleConn(conn net.Conn, signer ssh.Signer, caPubBytes []byte, principal, 
 		log = log.With("derived_principal", effectivePrincipal)
 	}
 
-	// Bound the connection lifetime: 30 s is generous for a single-line request.
-	// The size cap (4 KiB) is well above any real SSH public key but prevents a
-	// slow-sender from holding the connection indefinitely.
-	if err := conn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+	// Bound the connection lifetime: the request is a single line sent right
+	// after dialing. The size cap (4 KiB) is well above any real SSH public key.
+	if err := conn.SetDeadline(time.Now().Add(connDeadline)); err != nil {
 		log.Error("set deadline", "err", err)
 		return
 	}
+
+	// Enforce the per-identity rate limit before reading anything, for every
+	// request type (certificate and CA public key alike).
+	if !limiter.Allow(identity) {
+		log.Warn("rate limit exceeded, rejecting request", "identity", identity)
+		if _, err := conn.Write([]byte("error: rate limit exceeded\n")); err != nil {
+			log.Error("write rate limit error", "err", err)
+		}
+		return
+	}
+
 	const maxRequestBytes = 4096
 	reader := bufio.NewReader(io.LimitReader(conn, maxRequestBytes))
 	line, err := reader.ReadString('\n')
@@ -420,20 +437,11 @@ func handleConn(conn net.Conn, signer ssh.Signer, caPubBytes []byte, principal, 
 	line = strings.TrimSpace(line)
 
 	if line == "" {
-		// Client requested the CA public key — not subject to rate limiting.
+		// Client requested the CA public key.
 		if _, err := conn.Write(caPubBytes); err != nil {
 			log.Error("write CA public key", "err", err)
 		} else {
 			log.Info("served CA public key")
-		}
-		return
-	}
-
-	// Cert signing request — enforce per-identity rate limit.
-	if !limiter.Allow(identity) {
-		log.Warn("rate limit exceeded, rejecting cert signing request", "identity", identity)
-		if _, err := conn.Write([]byte("error: rate limit exceeded\n")); err != nil {
-			log.Error("write rate limit error", "err", err)
 		}
 		return
 	}
@@ -504,4 +512,31 @@ func sourceAddressForLog(sourceAddress string) string {
 		return "none (certificates accepted from any address)"
 	}
 	return sourceAddress
+}
+
+const (
+	// defaultMaxConnections bounds concurrent CA connections.
+	defaultMaxConnections = 64
+	// connDeadline bounds each connection's lifetime.
+	connDeadline = 10 * time.Second
+)
+
+// dispatch runs handle(conn) in a new goroutine if a connection slot is free,
+// and returns true. If all slots are in use it closes conn immediately and
+// returns false. The slot is released when handle returns.
+func dispatch(conn net.Conn, slots chan struct{}, wg *sync.WaitGroup, handle func(net.Conn)) bool {
+	select {
+	case slots <- struct{}{}:
+	default:
+		slog.Warn("connection limit reached; closing new connection", "max_connections", cap(slots))
+		_ = conn.Close()
+		return false
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer func() { <-slots }()
+		handle(conn)
+	}()
+	return true
 }
