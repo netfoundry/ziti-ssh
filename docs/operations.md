@@ -211,6 +211,20 @@ For accounts that are **not** registered, a file of that shape is never removed 
 
 ---
 
+## Host identity (terminator names)
+
+`ziti-ssh connect web-server-prod` asks the Ziti network for the terminator **named** `web-server-prod` on the `ssh` service. In OpenZiti, a terminator name is an address chosen by whoever binds the service (`ziti-ssh-host` uses its own identity name), not a verified identity. The controller only ensures that, at any moment, all terminators with one name belong to the same identity. When the real host is offline, **any identity with Bind on the service** can register that name, and clients cannot tell — OpenZiti does not tell the dialer which identity answered, and `ziti-ssh` does not yet verify SSH host keys.
+
+What this means in practice:
+
+- **Access control is per service, not per host.** Dial on `ssh` reaches every host bound to `ssh`; Bind on `ssh` lets an identity answer for any host name that is not currently taken. Grant Bind only to host identities (`#ssh-hosts`).
+- **A compromised or misconfigured host identity can impersonate other hosts while they are offline**, receiving what the user types (including `sudo` passwords) and any forwarded agent. This is why `-A` is refused unless `--forward-agent-unverified` is given, and why the CA does not grant `permit-agent-forwarding` by default.
+- **For hosts that need a strong identity guarantee, use one service per host** (or per small group of equally trusted hosts) with a Bind policy naming only that host's identity, and dial the service by name (`ziti-ssh ziggy@ssh-web-server-prod` when `ssh-web-server-prod` is a service). The Ziti policy then enforces who can answer.
+
+Verifiable host identity at the dialer is being pursued upstream (openziti/ziti#4172, a controller-signed circuit token naming the terminating identity; openziti/sdk-golang#980, SDK verification). `ziti-ssh` will verify the host against it once available.
+
+---
+
 ## Caller identity verification
 
 `ziti-ssh-ca` (all modes) and `ziti-ssh-host` (`per-identity` mode) identify each caller by the **dialer identity name that the caller's edge router attaches to the connection**. The router derives it from the identity it authenticated, so the client cannot influence it. The separate client-supplied caller ID header is ignored for all decisions. If it differs from the router-supplied name, a warning is logged:

@@ -339,6 +339,8 @@ On the host side, `ziti-ssh-host run` uses `BindUsingEdgeIdentity: true`. This c
 
 ## 7. Addressable Terminators for Host Routing
 
+> **Limitation:** a terminator name is an address chosen by the binding identity, not an authenticated identity. OpenZiti only prevents two *different* identities from holding the same name at the same time, and the dialer is not told which identity answered. An identity with Bind on the service can therefore answer for an offline host's name. Access control is per service; per-host services give a per-host guarantee. See [operations.md](docs/operations.md#host-identity-terminator-names).
+
 Each Ziti service that `ziti-ssh-host` binds has multiple terminators — one per enrolled host. Each `ziti-ssh-host run` instance adds a terminator with its identity name as the address using `BindUsingEdgeIdentity: true`:
 
 ```

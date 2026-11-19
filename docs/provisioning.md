@@ -64,7 +64,8 @@ ziti edge create service-policy dial-ssh-ca Dial \
   --service-roles "@ssh-ca" \
   --identity-roles "#ssh-clients"
 
-# hosts bind ssh (one terminator per host, addressed by identity name)
+# hosts bind ssh (one terminator per host, addressed by identity name;
+# grant Bind only to host identities — see the Access scope note below)
 ziti edge create service-policy bind-ssh Bind \
   --service-roles "@ssh" \
   --identity-roles "#ssh-hosts"
@@ -122,6 +123,8 @@ ziti edge create identity alice \
 Copy the JWT to the user's machine. Enrollment is covered in [Setting up a client identity](#setting-up-a-client-identity).
 
 The identity name chosen for each host (`web-server-prod` above) is the address users pass to `ziti-ssh` — choose it carefully, as it is also the terminator address on the `ssh` service.
+
+> **Access scope:** Dial on the `ssh` service reaches every host bound to it, and the terminator name is an address, not a verified identity — any identity with Bind on `ssh` can answer for a host name that is not currently in use. Grant Bind only to host identities. For hosts that need per-host access control or a strong host identity, give each its own service with a Bind policy naming only that host. See [Host identity (terminator names)](operations.md#host-identity-terminator-names).
 
 ---
 
