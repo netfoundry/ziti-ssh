@@ -83,7 +83,7 @@ For each connecting identity, `ziti-ssh-host` resolves permissions as follows:
 
 1. **Exact match** — if the config has an entry whose key is the exact Ziti identity name, that entry is used. Global fallbacks are ignored.
 
-2. **Most-specific glob match** — if no exact key exists, all glob patterns in the config (keys containing `*` or `?`) are tested via `path.Match`. The pattern with the longest literal prefix before the first wildcard wins. Global fallbacks are ignored for the matched identity.
+2. **Most-specific glob match** — if no exact key exists, all glob patterns in the config (keys containing `*` or `?`) are tested: `*` matches any run of characters (including none, and including `/`), `?` matches exactly one character, and every other character — including `[`, `]` and `\` — matches itself. The pattern with the longest literal prefix before the first wildcard wins, then the one with the most literal characters; any remaining tie goes to the pattern that sorts first. Global fallbacks are ignored for the matched identity.
 
 3. **`"*"` catch-all** — if neither an exact key nor a more-specific glob matches, a key of `"*"` in the config is used. This is the preferred way to define a default permission set, because the config propagates live to all running `ziti-ssh-host` instances without requiring an env file edit or service restart.
 

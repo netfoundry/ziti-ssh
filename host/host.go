@@ -28,8 +28,8 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -61,11 +61,15 @@ type PermissionsConfig struct {
 // Resolution order:
 //  1. Exact key match — zitiIdentity found as a literal key in the map.
 //  2. Most specific glob pattern — among all map keys containing '*' or '?'
-//     that match zitiIdentity (via path.Match), the winner is determined by
+//     that match zitiIdentity (via MatchPattern: '*' any run of characters,
+//     including '/'; '?' one character; everything else literal), the
+//     winner is determined by
 //     a two-field score: (prefixLen, totalLiterals) compared lexicographically
 //     descending. prefixLen is the count of literal characters before the first
 //     wildcard; totalLiterals is the count of all non-wildcard characters in
 //     the pattern. This correctly ranks "*@dba" (0, 4) above "*" (0, 0).
+//     Patterns with equal scores are ordered by the pattern string (the
+//     lexically smaller wins), so the result never depends on map order.
 //  3. Env var fallback — globalGroups / globalSudoersRule (unchanged).
 //
 // In all matching cases the matched entry is returned as-is; global
@@ -88,27 +92,24 @@ func (pc *PermissionsConfig) ResolveWithSource(zitiIdentity string, globalGroups
 		// Step 2: glob match — find the most specific pattern that matches.
 		bestPrefixLen := -1
 		bestTotalLiterals := 0
+		bestPattern := ""
 		var bestEntry IdentityPermissions
 		for pattern, entry := range pc.Permissions {
 			if !strings.ContainsAny(pattern, "*?") {
 				// Pure literal key that didn't match exactly — skip.
 				continue
 			}
-			matched, err := path.Match(pattern, zitiIdentity)
-			if err != nil {
-				// path.Match only errors on malformed patterns (unclosed '[').
-				// Log and skip rather than crashing.
-				slog.Warn("invalid glob pattern in permissions config, skipping",
-					"pattern", pattern, "err", err)
-				continue
-			}
-			if !matched {
+			if !MatchPattern(pattern, zitiIdentity) {
 				continue
 			}
 			pl, tl := patternSpecificity(pattern)
-			if pl > bestPrefixLen || (pl == bestPrefixLen && tl > bestTotalLiterals) {
+			better := pl > bestPrefixLen ||
+				(pl == bestPrefixLen && tl > bestTotalLiterals) ||
+				(pl == bestPrefixLen && tl == bestTotalLiterals && pattern < bestPattern)
+			if better {
 				bestPrefixLen = pl
 				bestTotalLiterals = tl
+				bestPattern = pattern
 				bestEntry = entry
 			}
 		}
@@ -122,6 +123,55 @@ func (pc *PermissionsConfig) ResolveWithSource(zitiIdentity string, globalGroups
 		Groups:      globalGroups,
 		SudoersRule: globalSudoersRule,
 	}, false
+}
+
+// MatchPattern reports whether a ziti-ssh-host.v1 permissions key matches a
+// Ziti identity name. '*' matches any run of characters (including none and
+// including '/'), '?' matches exactly one character, and every other
+// character — including '[', ']' and '\' — matches itself. (Earlier
+// releases used path.Match, where '*' stopped at '/', '[…]' was a character
+// class and '\' an escape.)
+func MatchPattern(pattern, name string) bool {
+	p, n := []rune(pattern), []rune(name)
+	// Iterative wildcard match with single-star backtracking.
+	pi, ni, starP, starN := 0, 0, -1, 0
+	for ni < len(n) {
+		switch {
+		case pi < len(p) && (p[pi] == '?' || p[pi] == n[ni]):
+			pi++
+			ni++
+		case pi < len(p) && p[pi] == '*':
+			starP, starN = pi, ni
+			pi++
+		case starP >= 0:
+			pi = starP + 1
+			starN++
+			ni = starN
+		default:
+			return false
+		}
+	}
+	for pi < len(p) && p[pi] == '*' {
+		pi++
+	}
+	return pi == len(p)
+}
+
+// PatternWarnings lists permissions keys whose meaning changed when matching
+// moved from path.Match to MatchPattern: keys containing '[' or '\' (now
+// literal characters).
+func (pc *PermissionsConfig) PatternWarnings() []string {
+	if pc == nil {
+		return nil
+	}
+	var out []string
+	for key := range pc.Permissions {
+		if strings.ContainsAny(key, "[\\") {
+			out = append(out, fmt.Sprintf("key %q: '[' and '\\' are matched literally (only '*' and '?' are wildcards)", key))
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // patternSpecificity returns two counts for a glob pattern:

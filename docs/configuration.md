@@ -249,7 +249,7 @@ Identity keys are the **Ziti identity names** as they appear in the controller �
 
 Keys may be:
 - **Exact identity names** — matched literally (case-sensitive).
-- **Glob patterns** — keys containing `*` or `?` are matched via `path.Match`. The most specific match wins (longest literal prefix before the first wildcard).
+- **Glob patterns** — keys containing `*` or `?` are patterns: `*` matches any run of characters (including none, and including `/`), `?` matches exactly one character, and every other character — including `[`, `]` and `\` — matches itself. The most specific match wins: longest literal prefix before the first wildcard, then most literal characters overall; remaining ties go to the pattern that sorts first, so the result never depends on ordering. Keys containing `[` or `\` are flagged at load (log warning and `inspect`), because earlier releases treated them as character classes / escapes.
 - **`"*"` catch-all** — matches any identity not covered by an exact key or more-specific pattern. This is the preferred alternative to `ZITI_SSH_GROUPS`/`ZITI_SUDOERS_RULE` for setting a default permission set, because it lives in the config and propagates live without a host restart.
 
 ### Interaction with global fallbacks

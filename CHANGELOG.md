@@ -126,6 +126,11 @@ See security advisory GHSA-TBD for details.
 **Updated docs:** `docs/operations.md` (account ownership flow diagram, lifecycle, new "Managing account ownership" section, files-written table), `docs/configuration.md` (`users` subcommands, sudoers path), `ARCHITECTURE.md` (`UserManager`, `deleteUser`, §12 account ownership boundary), `CLAUDE.md`.
 
 ### Fixed
+#### Permission key matching (behaviour change)
+
+- `ziti-ssh-host.v1` permission keys are matched by `host.MatchPattern`: `*` matches any run of characters including `/`, `?` one character, everything else literally. Previously `path.Match` was used, where `*` stopped at `/` (so `"*"` did not match identity names containing `/`), `[…]` was a character class and `\` an escape. Keys containing `[` or `\` are flagged in the log and by `inspect`.
+- Patterns of equal specificity are now ordered by the pattern string, so which entry applies no longer depends on map iteration order.
+
 #### Client key and file checks
 
 - When `ziti-ssh` generates a key it no longer passes an empty passphrase: `ssh-keygen` asks for one (Enter for none).

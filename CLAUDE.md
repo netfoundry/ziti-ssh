@@ -232,7 +232,7 @@ In `per-identity` mode, Linux permissions for each connecting identity are resol
    - `ZITI_SSH_GROUPS` — comma-separated Linux group names
    - `ZITI_SUDOERS_RULE` — sudoers rule fragment
 
-**Resolution order:** (1) exact key match; (2) most-specific glob pattern (longest literal prefix before the first wildcard wins); (3) `"*"` catch-all; (4) global fallbacks. Any matched config entry is the complete permission specification — global fallbacks are not merged in. The `"*"` catch-all is preferred over env var fallbacks because it lives in the Ziti config and propagates live without restarting hosts.
+**Resolution order:** (1) exact key match; (2) most-specific glob pattern (longest literal prefix before the first wildcard wins, then most literals, then lexically smallest pattern); (3) `"*"` catch-all; (4) global fallbacks. Patterns use `host.MatchPattern`: `*` any run (incl. `/`), `?` one character, all else literal (`[`/`\` keys flagged by `PermissionsConfig.PatternWarnings`). Any matched config entry is the complete permission specification — global fallbacks are not merged in. The `"*"` catch-all is preferred over env var fallbacks because it lives in the Ziti config and propagates live without restarting hosts.
 
 **Scope:** the `ziti-ssh-host.v1` config is attached to a specific Ziti service. Because a host can bind to multiple services simultaneously, different permission sets can apply to the same physical host depending on which service a caller dials. This enables role-tiered deployments:
 

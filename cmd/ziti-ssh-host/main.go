@@ -794,6 +794,9 @@ func loadPermissionsConfig(zitiCtx ziti.Context, serviceName string) (*host.Perm
 			serviceName, strings.Join(collisions, "; "))
 	}
 
+	for _, w := range pc.PatternWarnings() {
+		slog.Warn("ziti-ssh-host.v1 config: pattern meaning changed", "service", serviceName, "detail", w)
+	}
 	slog.Info("loaded ziti-ssh-host.v1 config", "service", serviceName, "identities", len(pc.Permissions))
 	return pc, nil
 }
@@ -1202,6 +1205,9 @@ func runInspect(identityFile string, serviceNames []string, zitiTimeout time.Dur
 			}
 			fmt.Println()
 			printPermissionsTable(pc)
+			for _, w := range pc.PatternWarnings() {
+				fmt.Printf("  WARNING: %s\n", w)
+			}
 			if policyErr == nil {
 				printPolicyRefusals(svcName, pc, policy)
 			}
