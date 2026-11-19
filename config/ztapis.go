@@ -32,6 +32,9 @@ import (
 // controller URL, meaning a process restart fails if that specific controller
 // is offline (even if other cluster members are healthy).
 func PersistZtAPIs(identityFile string, urls []string) error {
+	if len(urls) == 0 {
+		return fmt.Errorf("refusing to persist an empty controller URL list")
+	}
 	data, err := os.ReadFile(identityFile)
 	if err != nil {
 		return fmt.Errorf("read identity file: %w", err)

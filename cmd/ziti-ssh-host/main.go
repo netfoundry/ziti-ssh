@@ -385,6 +385,14 @@ type clusterCA struct {
 // per unique intermediate CA (deduplicated by actual public key bytes, not
 // SubjectKeyId which is unreliable across HA nodes).
 func collectClusterCAs(urlRoots []string, rootPool *x509.CertPool) ([]clusterCA, error) {
+	cas, _, err := collectClusterCAsDetailed(urlRoots, rootPool)
+	return cas, err
+}
+
+// collectClusterCAsDetailed is collectClusterCAs, also reporting how many
+// controllers could not be queried.
+func collectClusterCAsDetailed(urlRoots []string, rootPool *x509.CertPool) ([]clusterCA, int, error) {
+	failed := 0
 	seen := make(map[string]bool)
 	var out []clusterCA
 
@@ -392,6 +400,7 @@ func collectClusterCAs(urlRoots []string, rootPool *x509.CertPool) ([]clusterCA,
 		cert, err := intCAFromController(urlRoot, rootPool)
 		if err != nil {
 			slog.Warn("could not get intermediate CA from controller", "url", urlRoot, "err", err)
+			failed++
 			continue
 		}
 
@@ -424,9 +433,9 @@ func collectClusterCAs(urlRoots []string, rootPool *x509.CertPool) ([]clusterCA,
 	}
 
 	if len(out) == 0 {
-		return nil, fmt.Errorf("no intermediate CA public keys found across %d controller(s)", len(urlRoots))
+		return nil, failed, fmt.Errorf("no intermediate CA public keys found across %d controller(s)", len(urlRoots))
 	}
-	return out, nil
+	return out, failed, nil
 }
 
 // clusterCAsToBytes concatenates all authorized_key lines from cas into a
@@ -481,21 +490,32 @@ func intCAFromController(controllerURL string, rootPool *x509.CertPool) (*x509.C
 			"selfSigned", cert.Subject.String() == cert.Issuer.String())
 	}
 
-	if len(state.PeerCertificates) == 0 {
+	// Use the chain Go verified against rootPool, not the certificates the
+	// server sent: a server could append an extra CA certificate to
+	// PeerCertificates, which would then become an SSH trust anchor. Only the
+	// enrollment bootstrap (no root pool yet) falls back to PeerCertificates.
+	chain := state.PeerCertificates
+	if rootPool != nil {
+		if len(state.VerifiedChains) == 0 || len(state.VerifiedChains[0]) < 2 {
+			return nil, fmt.Errorf("no verified certificate chain from %q", host)
+		}
+		chain = state.VerifiedChains[0]
+	}
+	if len(chain) == 0 {
 		return nil, fmt.Errorf("no certificates in TLS chain from %q", host)
 	}
-	leaf := state.PeerCertificates[0]
+	leaf := chain[0]
 	// Walk the chain and pick the cert whose Subject matches the leaf's Issuer
 	// field. Raw-bytes comparison avoids encoding differences that string
 	// formatting can obscure, and correctly identifies the signing intermediate
 	// even when the chain contains cross-signed or multiple intermediate certs.
-	for _, cert := range state.PeerCertificates[1:] {
+	for _, cert := range chain[1:] {
 		if cert.IsCA && bytes.Equal(cert.RawSubject, leaf.RawIssuer) {
 			return cert, nil
 		}
 	}
 	// Fallback to the original heuristic for unusual chain orderings.
-	for _, cert := range state.PeerCertificates {
+	for _, cert := range chain {
 		if cert.IsCA && !bytes.Equal(cert.RawSubject, cert.RawIssuer) {
 			return cert, nil
 		}
@@ -508,6 +528,11 @@ func intCAFromController(controllerURL string, rootPool *x509.CertPool) (*x509.C
 // sshd if the set has changed. Logs only when the set changes (additions
 // with controller URL, removals by count).
 func refreshTrustedCAs(urls []*url.URL, rootPool *x509.CertPool) error {
+	// Called from both the controller-URL event handler and the periodic
+	// poller; serialise so two refreshes cannot interleave their read/write.
+	trustRefreshMu.Lock()
+	defer trustRefreshMu.Unlock()
+
 	if len(urls) == 0 {
 		return nil
 	}
@@ -516,16 +541,25 @@ func refreshTrustedCAs(urls []*url.URL, rootPool *x509.CertPool) error {
 		urlStrs[i] = u.String()
 	}
 
-	newCAs, err := collectClusterCAs(urlStrs, rootPool)
+	newCAs, failed, err := collectClusterCAsDetailed(urlStrs, rootPool)
 	if err != nil {
 		return fmt.Errorf("collect CA public keys: %w", err)
 	}
-	newKeyBytes := clusterCAsToBytes(newCAs)
 
 	current, err := os.ReadFile(sshdCAPubKeyFile)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("read %q: %w", sshdCAPubKeyFile, err)
 	}
+
+	// If any controller did not answer, keep every currently trusted key: an
+	// unreachable controller's CA must not be dropped (that would break
+	// logins for certificates it signed). Keys are only removed when all
+	// controllers in the cluster list answered and none presented them.
+	if failed > 0 {
+		slog.Warn("some controllers did not answer; keeping currently trusted CA keys", "failed", failed, "controllers", len(urls))
+		newCAs = mergeTrustedKeys(current, newCAs)
+	}
+	newKeyBytes := clusterCAsToBytes(newCAs)
 
 	if sshPubKeySetsEqual(current, newKeyBytes) {
 		slog.Debug("trusted CA keys unchanged", "controllers", len(urls))
@@ -813,6 +847,10 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 		}
 		urls, ok := args[0].([]*url.URL)
 		if !ok {
+			return
+		}
+		if len(urls) == 0 {
+			slog.Warn("ignoring empty controller URL list from controller")
 			return
 		}
 		cachedMu.Lock()
@@ -1347,4 +1385,25 @@ func ensureSSHDLockdown(mode string) error {
 		}
 	}
 	return nil
+}
+
+// trustRefreshMu serialises refreshTrustedCAs.
+var trustRefreshMu sync.Mutex
+
+// mergeTrustedKeys returns collected plus every key in the current
+// TrustedUserCAKeys content that collected does not already contain.
+func mergeTrustedKeys(current []byte, collected []clusterCA) []clusterCA {
+	have := make(map[string]bool)
+	for _, ca := range collected {
+		have[normalizeSSHKey(strings.TrimSpace(string(ca.AuthorizedKey)))] = true
+	}
+	out := append([]clusterCA(nil), collected...)
+	for _, line := range nonEmptyLines(string(current)) {
+		k := normalizeSSHKey(line)
+		if !have[k] {
+			have[k] = true
+			out = append(out, clusterCA{ControllerURL: "(kept: controller unreachable)", AuthorizedKey: []byte(strings.TrimSpace(line) + "\n")})
+		}
+	}
+	return out
 }
