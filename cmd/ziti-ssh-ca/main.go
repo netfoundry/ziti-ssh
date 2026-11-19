@@ -69,6 +69,7 @@ func main() {
 		rateBurstFlag   string
 		sourceAddrFlag  string
 		maxConnsFlag    string
+		extensionsFlag  string
 		zitiTimeoutFlag string
 		versionFlag     bool
 	)
@@ -95,6 +96,7 @@ func main() {
 			zitiTimeoutStr := config.EnvOrFlag(zitiTimeoutFlag, "ZITI_TIMEOUT", "30s")
 			sourceAddrStr := config.EnvOrFlag(sourceAddrFlag, "ZITI_CERT_SOURCE_ADDRESS", ca.DefaultSourceAddress)
 			maxConnsStr := config.EnvOrFlag(maxConnsFlag, "ZITI_MAX_CONNECTIONS", strconv.Itoa(defaultMaxConnections))
+			extensionsStr := config.EnvOrFlag(extensionsFlag, "ZITI_CERT_EXTENSIONS", ca.DefaultExtensions)
 
 			if identityFile == "" {
 				return fmt.Errorf("--identity (or ZITI_IDENTITY) is required")
@@ -142,7 +144,12 @@ func main() {
 				return fmt.Errorf("--max-connections (or ZITI_MAX_CONNECTIONS): must be a positive integer, got %q", maxConnsStr)
 			}
 
-			return run(identityFile, caKeyFile, serviceName, principal, mode, certTTL, sourceAddress, rateLimit, rateBurst, maxConns, zitiTimeout)
+			extensions, err := ca.ParseExtensions(extensionsStr)
+			if err != nil {
+				return fmt.Errorf("--cert-extensions (or ZITI_CERT_EXTENSIONS): %w", err)
+			}
+
+			return run(identityFile, caKeyFile, serviceName, principal, mode, certTTL, sourceAddress, extensions, rateLimit, rateBurst, maxConns, zitiTimeout)
 		},
 	}
 
@@ -154,6 +161,7 @@ func main() {
 	root.Flags().StringVar(&certTTLFlag, "cert-ttl", "", "Certificate validity duration (or set ZITI_CERT_TTL, default: 5m)")
 	root.Flags().StringVar(&rateLimitFlag, "rate-limit", "", "Max cert signing requests per minute per identity (or set ZITI_RATE_LIMIT, default: 5)")
 	root.Flags().StringVar(&sourceAddrFlag, "cert-source-address", "", "Comma-separated IPs/CIDRs set as the certificate source-address option, or \"none\" (or set ZITI_CERT_SOURCE_ADDRESS, default: "+ca.DefaultSourceAddress+")")
+	root.Flags().StringVar(&extensionsFlag, "cert-extensions", "", "Comma-separated certificate extensions to grant, or \"none\" (or set ZITI_CERT_EXTENSIONS, default: "+ca.DefaultExtensions+")")
 	root.Flags().StringVar(&maxConnsFlag, "max-connections", "", "Maximum concurrent CA connections; further connections are closed (or set ZITI_MAX_CONNECTIONS, default: "+strconv.Itoa(defaultMaxConnections)+")")
 	root.Flags().StringVar(&rateBurstFlag, "rate-burst", "", "Burst allowance for per-identity rate limiter (or set ZITI_RATE_BURST, default: 3)")
 	root.PersistentFlags().StringVar(&zitiTimeoutFlag, "ziti-timeout", "", "Timeout for Ziti network operations (or set ZITI_TIMEOUT, default: 30s)")
@@ -254,14 +262,14 @@ const drainTimeout = 30 * time.Second
 // burst window.
 const idleLimiterTTL = 10 * time.Minute
 
-func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL time.Duration, sourceAddress string, ratePerMinute float64, rateBurst int, maxConns int, zitiTimeout time.Duration) error {
+func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL time.Duration, sourceAddress string, extensions []string, ratePerMinute float64, rateBurst int, maxConns int, zitiTimeout time.Duration) error {
 	// Load CA key.
 	signer, caPub, err := ca.LoadKey(caKeyFile)
 	if err != nil {
 		return fmt.Errorf("load CA key: %w", err)
 	}
 	slog.Info("CA key loaded", "service", serviceName, "mode", mode, "principal", principal,
-		"cert_ttl", certTTL, "cert_source_address", sourceAddressForLog(sourceAddress),
+		"cert_ttl", certTTL, "cert_source_address", sourceAddressForLog(sourceAddress), "cert_extensions", extensions,
 		"rate_limit_per_min", ratePerMinute, "rate_burst", rateBurst, "max_connections", maxConns)
 
 	caPubBytes := ca.PublicKeyBytes(caPub)
@@ -354,7 +362,7 @@ func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL t
 			break
 		}
 		dispatch(conn, slots, &wg, func(c net.Conn) {
-			handleConn(c, signer, caPubBytes, principal, mode, certTTL, sourceAddress, limiter)
+			handleConn(c, signer, caPubBytes, principal, mode, certTTL, sourceAddress, extensions, limiter)
 		})
 	}
 
@@ -387,7 +395,7 @@ func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL t
 // In "shared" mode the principal comes from the operator-configured flag.
 // In "per-identity" mode the principal is derived from the caller's Ziti identity
 // name via ca.DeriveUsername.
-func handleConn(conn net.Conn, signer ssh.Signer, caPubBytes []byte, principal, mode string, certTTL time.Duration, sourceAddress string, limiter *ratelimit.Map) {
+func handleConn(conn net.Conn, signer ssh.Signer, caPubBytes []byte, principal, mode string, certTTL time.Duration, sourceAddress string, extensions []string, limiter *ratelimit.Map) {
 	defer conn.Close()
 
 	// Extract the router-verified caller identity. Fail closed if absent.
@@ -459,7 +467,7 @@ func handleConn(conn net.Conn, signer ssh.Signer, caPubBytes []byte, principal, 
 		return
 	}
 
-	certBytes, err := ca.SignCert(signer, pubKey, identity, effectivePrincipal, certTTL, sourceAddress)
+	certBytes, err := ca.SignCert(signer, pubKey, identity, effectivePrincipal, certTTL, sourceAddress, extensions)
 	if err != nil {
 		log.Error("sign certificate", "err", err)
 		return

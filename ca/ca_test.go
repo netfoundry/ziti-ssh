@@ -70,7 +70,7 @@ func TestSignCert(t *testing.T) {
 	const ttl = 5 * time.Minute
 
 	before := time.Now()
-	certBytes, err := ca.SignCert(caSigner, clientPub, identity, principal, ttl, ca.DefaultSourceAddress)
+	certBytes, err := ca.SignCert(caSigner, clientPub, identity, principal, ttl, ca.DefaultSourceAddress, mustExtensions(t, ca.DefaultExtensions))
 	after := time.Now()
 
 	if err != nil {
@@ -144,15 +144,17 @@ func TestSignCert(t *testing.T) {
 	})
 
 	t.Run("Extensions", func(t *testing.T) {
-		required := []string{
-			"permit-pty",
-			"permit-port-forwarding",
-			"permit-agent-forwarding",
-		}
-		for _, ext := range required {
+		// Default: terminals and port forwarding, but no agent forwarding.
+		for _, ext := range []string{"permit-pty", "permit-port-forwarding"} {
 			if _, ok := cert.Extensions[ext]; !ok {
 				t.Errorf("missing extension %q", ext)
 			}
+		}
+		if _, ok := cert.Extensions["permit-agent-forwarding"]; ok {
+			t.Error("agent forwarding granted by default")
+		}
+		if len(cert.Extensions) != 2 {
+			t.Errorf("unexpected extensions: %v", cert.Extensions)
 		}
 	})
 }
@@ -161,7 +163,7 @@ func TestSignCert_EmptyIdentityRejected(t *testing.T) {
 	caSigner, _ := generateTestCA(t)
 	clientPub := generateTestClientKey(t)
 
-	_, err := ca.SignCert(caSigner, clientPub, "", "ziggy", 8*time.Hour, "")
+	_, err := ca.SignCert(caSigner, clientPub, "", "ziggy", 8*time.Hour, "", nil)
 	if err == nil {
 		t.Fatal("expected error for empty identity, got nil")
 	}
@@ -171,7 +173,7 @@ func TestSignCert_EmptyPrincipalRejected(t *testing.T) {
 	caSigner, _ := generateTestCA(t)
 	clientPub := generateTestClientKey(t)
 
-	_, err := ca.SignCert(caSigner, clientPub, "alice", "", 8*time.Hour, "")
+	_, err := ca.SignCert(caSigner, clientPub, "alice", "", 8*time.Hour, "", nil)
 	if err == nil {
 		t.Fatal("expected error for empty principal, got nil")
 	}
@@ -306,7 +308,7 @@ func TestValidatePerIdentityPrincipal(t *testing.T) {
 
 func TestSignCert_NoSourceAddress(t *testing.T) {
 	caSigner, _ := generateTestCA(t)
-	certBytes, err := ca.SignCert(caSigner, generateTestClientKey(t), "alice", "ziggy", 5*time.Minute, "")
+	certBytes, err := ca.SignCert(caSigner, generateTestClientKey(t), "alice", "ziggy", 5*time.Minute, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,6 +379,29 @@ func TestValidateClientKey(t *testing.T) {
 	} {
 		if err := ca.ValidateClientKey(k, caPub); err == nil {
 			t.Errorf("%s accepted", name)
+		}
+	}
+}
+
+func mustExtensions(t *testing.T, v string) []string {
+	t.Helper()
+	e, err := ca.ParseExtensions(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+func TestParseExtensions(t *testing.T) {
+	if got := mustExtensions(t, " permit-pty , permit-agent-forwarding,permit-pty"); strings.Join(got, ",") != "permit-pty,permit-agent-forwarding" {
+		t.Errorf("got %v", got)
+	}
+	if got := mustExtensions(t, "none"); len(got) != 0 {
+		t.Errorf("none: got %v", got)
+	}
+	for _, bad := range []string{"", "permit-everything", "permit-pty,,permit-user-rc"} {
+		if _, err := ca.ParseExtensions(bad); err == nil {
+			t.Errorf("ParseExtensions(%q) accepted", bad)
 		}
 	}
 }

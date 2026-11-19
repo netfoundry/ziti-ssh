@@ -412,9 +412,7 @@ Certificates are issued on demand and are ephemeral. There is no certificate sto
 | `ValidPrincipals` | `[]string{principal}` | shared mode: `--principal` flag (default: `ziggy`); per-identity mode: `ca.DeriveUsername(callerIdentity)` |
 | `ValidAfter` | `time.Now().Unix()` | Signing time |
 | `ValidBefore` | `time.Now().Add(ttl).Unix()` | Signing time + TTL (default 5m, configurable via `--cert-ttl` / `ZITI_CERT_TTL`) |
-| `Extensions["permit-pty"]` | `""` | Hardcoded |
-| `Extensions["permit-port-forwarding"]` | `""` | Hardcoded |
-| `Extensions["permit-agent-forwarding"]` | `""` | Hardcoded |
+| `Extensions` | `permit-pty`, `permit-port-forwarding` | `--cert-extensions` / `ZITI_CERT_EXTENSIONS` (`ca.ParseExtensions`); agent forwarding not granted by default |
 | `CriticalOptions["source-address"]` | `127.0.0.1/32,::1/128` | `--cert-source-address` / `ZITI_CERT_SOURCE_ADDRESS`; omitted when set to `none` |
 
 ### TTL and Revocation
@@ -438,11 +436,8 @@ cert := &ssh.Certificate{
     ValidAfter:      uint64(now.Unix()),
     ValidBefore:     uint64(now.Add(ttl).Unix()),
     Permissions: ssh.Permissions{
-        Extensions: map[string]string{
-            "permit-pty":              "",
-            "permit-port-forwarding":  "",
-            "permit-agent-forwarding": "",
-        },
+        // From --cert-extensions; default "permit-pty,permit-port-forwarding".
+        Extensions: map[string]string{"permit-pty": "", "permit-port-forwarding": ""},
     },
 }
 if sourceAddress != "" { // --cert-source-address, default "127.0.0.1/32,::1/128"

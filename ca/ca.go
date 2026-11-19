@@ -55,10 +55,12 @@ func LoadKey(path string) (ssh.Signer, ssh.PublicKey, error) {
 // ttl controls validity duration (the CA defaults to 5 minutes).
 // sourceAddress, when non-empty, is set as the "source-address" critical
 // option (see ParseSourceAddress and DefaultSourceAddress); "" omits it.
+// extensions are the certificate extensions (permissions) to grant, as
+// returned by ParseExtensions.
 //
 // The returned bytes are in authorized_keys format, ready to write to a
 // ~/.ssh/<key>-cert.pub file.
-func SignCert(signer ssh.Signer, pubKey ssh.PublicKey, identity, principal string, ttl time.Duration, sourceAddress string) ([]byte, error) {
+func SignCert(signer ssh.Signer, pubKey ssh.PublicKey, identity, principal string, ttl time.Duration, sourceAddress string, extensions []string) ([]byte, error) {
 	if identity == "" {
 		return nil, fmt.Errorf("identity must not be empty")
 	}
@@ -75,12 +77,11 @@ func SignCert(signer ssh.Signer, pubKey ssh.PublicKey, identity, principal strin
 		ValidAfter:      uint64(now.Unix()),
 		ValidBefore:     uint64(now.Add(ttl).Unix()),
 		Permissions: ssh.Permissions{
-			Extensions: map[string]string{
-				"permit-pty":              "",
-				"permit-port-forwarding":  "",
-				"permit-agent-forwarding": "",
-			},
+			Extensions: map[string]string{},
 		},
+	}
+	for _, e := range extensions {
+		cert.Permissions.Extensions[e] = ""
 	}
 	if sourceAddress != "" {
 		// sshd accepts the certificate only from these addresses. Every
@@ -266,4 +267,45 @@ func ValidateClientKey(key, caKey ssh.PublicKey) error {
 		return fmt.Errorf("refusing to certify the CA's own key")
 	}
 	return nil
+}
+
+// DefaultExtensions are the certificate extensions granted by default:
+// interactive terminals and port forwarding (ziti-ssh -L/-R/-D). Agent
+// forwarding is not granted by default: clients cannot yet verify which host
+// they reached (see the H8 notes in docs/operations.md).
+const DefaultExtensions = "permit-pty,permit-port-forwarding"
+
+// knownExtensions are the OpenSSH user-certificate extensions.
+var knownExtensions = map[string]bool{
+	"permit-pty":              true,
+	"permit-port-forwarding":  true,
+	"permit-agent-forwarding": true,
+	"permit-X11-forwarding":   true,
+	"permit-user-rc":          true,
+	"no-touch-required":       true,
+}
+
+// ParseExtensions validates a comma-separated list of certificate extensions.
+// "none" grants no extensions (no PTY, no forwarding).
+func ParseExtensions(v string) ([]string, error) {
+	v = strings.TrimSpace(v)
+	if strings.EqualFold(v, "none") {
+		return []string{}, nil
+	}
+	if v == "" {
+		return nil, fmt.Errorf("extension list is empty (use \"none\" to grant no extensions)")
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, e := range strings.Split(v, ",") {
+		e = strings.TrimSpace(e)
+		if !knownExtensions[e] {
+			return nil, fmt.Errorf("unknown certificate extension %q", e)
+		}
+		if !seen[e] {
+			seen[e] = true
+			out = append(out, e)
+		}
+	}
+	return out, nil
 }

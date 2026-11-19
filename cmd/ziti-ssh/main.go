@@ -404,21 +404,24 @@ func parseTarget(arg string) (username, target string, err error) {
 
 // connectParams holds all resolved settings for the connect command.
 type connectParams struct {
-	identityFile   string
-	caService      string
-	sshService     string
-	service        string // explicit override (--service)
-	keyFile        string
-	oidc           oidcFlowParams
-	zitiTimeout    time.Duration
-	target         string // raw "[user@]target" argument
-	command        string // optional remote command; empty means interactive shell
-	verbose        bool
-	noShell        bool                        // -N: do not open a shell, only run forwards
-	forwardAgent   bool                        // -A: forward local SSH agent to remote session
-	localForwards  []client.LocalForwardSpec   // -L specs
-	remoteForwards []client.RemoteForwardSpec  // -R specs
-	dynamicProxies []client.DynamicForwardSpec // -D specs
+	identityFile string
+	caService    string
+	sshService   string
+	service      string // explicit override (--service)
+	keyFile      string
+	oidc         oidcFlowParams
+	zitiTimeout  time.Duration
+	target       string // raw "[user@]target" argument
+	command      string // optional remote command; empty means interactive shell
+	verbose      bool
+	noShell      bool // -N: do not open a shell, only run forwards
+	forwardAgent bool // -A: forward local SSH agent to remote session
+	// forwardAgentUnverified acknowledges that the host cannot be verified
+	// (see checkAgentForwarding) and allows -A anyway.
+	forwardAgentUnverified bool
+	localForwards          []client.LocalForwardSpec   // -L specs
+	remoteForwards         []client.RemoteForwardSpec  // -R specs
+	dynamicProxies         []client.DynamicForwardSpec // -D specs
 }
 
 // certTimeRemaining parses the certificate at certPath and returns the time
@@ -451,6 +454,9 @@ func certTimeRemaining(certPath string) (string, bool) {
 }
 
 func runConnect(p connectParams) error {
+	if err := checkAgentForwarding(p.forwardAgent, p.forwardAgentUnverified); err != nil {
+		return err
+	}
 	username, host, err := parseTarget(p.target)
 	if err != nil {
 		return err
@@ -1206,16 +1212,17 @@ Usage:
 
 	// ---------------------------------------------------------------- connect
 	var (
-		caServiceFlag    string
-		sshServiceFlag   string
-		serviceFlag      string
-		keyFlag          string
-		oidcIssuerFlag   string
-		noShellFlag      bool
-		forwardAgentFlag bool
-		localFwdFlags    []string
-		remoteFwdFlags   []string
-		dynamicFwdFlags  []string
+		caServiceFlag              string
+		sshServiceFlag             string
+		serviceFlag                string
+		keyFlag                    string
+		oidcIssuerFlag             string
+		noShellFlag                bool
+		forwardAgentFlag           bool
+		forwardAgentUnverifiedFlag bool
+		localFwdFlags              []string
+		remoteFwdFlags             []string
+		dynamicFwdFlags            []string
 	)
 	connectCmd = &cobra.Command{
 		Use:   "connect [user@]<target> [-- <command> [args...]]",
@@ -1306,15 +1313,16 @@ Examples:
 					ClientSecret: cfg.OIDC.ClientSecret,
 					CallbackPort: oidcCallbackPort,
 				},
-				zitiTimeout:    zitiTimeout,
-				target:         args[0],
-				command:        remoteCommand,
-				verbose:        verbose,
-				noShell:        noShellFlag,
-				forwardAgent:   forwardAgentFlag,
-				localForwards:  localFwds,
-				remoteForwards: remoteFwds,
-				dynamicProxies: dynFwds,
+				zitiTimeout:            zitiTimeout,
+				target:                 args[0],
+				command:                remoteCommand,
+				verbose:                verbose,
+				noShell:                noShellFlag,
+				forwardAgent:           forwardAgentFlag,
+				forwardAgentUnverified: forwardAgentUnverifiedFlag,
+				localForwards:          localFwds,
+				remoteForwards:         remoteFwds,
+				dynamicProxies:         dynFwds,
 			})
 		},
 	}
@@ -1324,7 +1332,8 @@ Examples:
 	connectCmd.Flags().StringVar(&keyFlag, "key", "", "SSH private key path (default: auto-detect from ~/.ssh/)")
 	connectCmd.Flags().StringVar(&oidcIssuerFlag, "oidc-issuer", "", "OIDC issuer URL; triggers browser-based OIDC auth before connecting (or set oidc.issuer in config)")
 	connectCmd.Flags().BoolVarP(&noShellFlag, "no-shell", "N", false, "Do not open a shell; only forward ports (requires at least one -L, -R, or -D)")
-	connectCmd.Flags().BoolVarP(&forwardAgentFlag, "forward-agent", "A", false, "Forward local SSH agent to the remote session (requires SSH_AUTH_SOCK)")
+	connectCmd.Flags().BoolVarP(&forwardAgentFlag, "forward-agent", "A", false, "Forward local SSH agent to the remote session (requires SSH_AUTH_SOCK and --forward-agent-unverified)")
+	connectCmd.Flags().BoolVar(&forwardAgentUnverifiedFlag, "forward-agent-unverified", false, "Allow -A although the host's identity cannot be verified (the host can use your agent while connected)")
 	connectCmd.Flags().StringArrayVarP(&localFwdFlags, "local-forward", "L", nil, "Local port forward: [bind:]localport:remotehost:remoteport (may be repeated)")
 	connectCmd.Flags().StringArrayVarP(&remoteFwdFlags, "remote-forward", "R", nil, "Remote port forward: [bind:]remoteport:localhost:localport (may be repeated)")
 	connectCmd.Flags().StringArrayVarP(&dynamicFwdFlags, "dynamic", "D", nil, "Dynamic SOCKS5 proxy: [bind:]port (may be repeated)")
@@ -1556,3 +1565,16 @@ Example:
 
 // Compile-time assertion: confirm the time package is referenced.
 var _ = time.Now
+
+// checkAgentForwarding refuses -A unless the user explicitly accepts that the
+// host cannot be verified. ziti-ssh cannot yet confirm which identity answered
+// on a terminator address, so a host impersonating another could use the
+// forwarded agent to authenticate as the user elsewhere while connected.
+func checkAgentForwarding(forward, unverified bool) error {
+	if forward && !unverified {
+		return fmt.Errorf("-A/--forward-agent is disabled: ziti-ssh cannot yet verify which host answered, " +
+			"and a forwarded agent can be used by that host while you are connected. " +
+			"To forward anyway, add --forward-agent-unverified (the CA must also grant permit-agent-forwarding)")
+	}
+	return nil
+}

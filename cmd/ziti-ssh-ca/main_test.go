@@ -103,7 +103,7 @@ func serve(t *testing.T, signer ssh.Signer, caPub []byte, limiter *ratelimit.Map
 	t.Helper()
 	client, server := net.Pipe()
 	go handleConn(&zitiLikeConn{Conn: server, dialerName: "alice"}, signer, caPub, "ziggy", "shared",
-		5*time.Minute, ca.DefaultSourceAddress, limiter)
+		5*time.Minute, ca.DefaultSourceAddress, []string{"permit-pty"}, limiter)
 	t.Cleanup(func() { client.Close() })
 	return client
 }

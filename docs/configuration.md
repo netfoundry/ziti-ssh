@@ -25,7 +25,8 @@ All binaries resolve each setting in the same order: CLI flag > environment vari
 | `--key` | — | auto-detect | SSH private key path |
 | `--oidc-issuer` | — | — | OIDC issuer URL; triggers browser-based OIDC auth (overrides `oidc.issuer` in config) |
 | `-N` / `--no-shell` | — | false | Do not open a shell; only run port forwards. Requires at least one `-L`, `-R`, or `-D`. |
-| `-A` / `--forward-agent` | — | false | Forward the local SSH agent to the remote session. Requires `SSH_AUTH_SOCK`. Non-fatal if the agent is unreachable — session continues without forwarding. |
+| `-A` / `--forward-agent` | — | false | Forward the local SSH agent to the remote session. Refused unless `--forward-agent-unverified` is also given (the host cannot yet be verified), and the CA must grant `permit-agent-forwarding`. Requires `SSH_AUTH_SOCK`. Non-fatal if the agent is unreachable — session continues without forwarding. |
+| `--forward-agent-unverified` | — | false | Allow `-A` although the host's identity cannot be verified. The remote host can use your agent while you are connected. |
 | `-L` / `--local-forward` | — | — | Local port forward: `[bind:]localport:remotehost:remoteport`. May be repeated. |
 | `-R` / `--remote-forward` | — | — | Remote port forward: `[bind:]remoteport:localhost:localport`. May be repeated. |
 | `-D` / `--dynamic` | — | — | Dynamic SOCKS5 proxy: `[bind:]port`. May be repeated. |
@@ -74,6 +75,7 @@ All binaries resolve each setting in the same order: CLI flag > environment vari
 | `--principal` | `ZITI_SSH_PRINCIPAL` | `ziggy` | No | Linux username placed in `ValidPrincipals` (shared mode only) |
 | `--mode` | `ZITI_SSH_MODE` | `shared` | No | Principal mode: `shared` or `per-identity` |
 | `--cert-ttl` | `ZITI_CERT_TTL` | `5m` | No | Certificate validity duration (e.g. `4h`, `12h`, `24h`); must be > 0 |
+| `--cert-extensions` | `ZITI_CERT_EXTENSIONS` | `permit-pty,permit-port-forwarding` | No | Certificate extensions (permissions) to grant, comma-separated, or `none`. Valid: `permit-pty`, `permit-port-forwarding`, `permit-agent-forwarding`, `permit-X11-forwarding`, `permit-user-rc`, `no-touch-required`. Agent forwarding is not granted by default. |
 | `--cert-source-address` | `ZITI_CERT_SOURCE_ADDRESS` | `127.0.0.1/32,::1/128` | No | Comma-separated IPs/CIDRs written to each certificate's `source-address` critical option; sshd accepts the certificate only from those addresses. The default (loopback) means certificates work only through `ziti-ssh-host`'s local proxy. `none` disables it. |
 | `--rate-limit` | `ZITI_RATE_LIMIT` | `5` | No | Maximum requests (cert signing and CA public key) per minute per identity (decimal values accepted for sub-minute rates) |
 | `--rate-burst` | `ZITI_RATE_BURST` | `3` | No | Burst allowance for the per-identity token-bucket rate limiter |

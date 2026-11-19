@@ -157,8 +157,13 @@ ziti-ssh connect ziggy@web-server-prod -L 8080:db.internal:5432
 
 The `-A` / `--forward-agent` flag forwards your local SSH agent to the remote session. This lets processes running on the remote host use keys held by your local agent — for example, to make onward SSH hops to other machines without copying private keys to the remote host.
 
+**Agent forwarding is off by default and needs two opt-ins**, because `ziti-ssh` cannot yet verify which host answered on a terminator address (an OpenZiti limitation, see [operations.md](operations.md#host-identity-terminator-names)), and a forwarded agent can be used by the remote host for as long as you are connected:
+
+1. The CA must grant the `permit-agent-forwarding` extension (`--cert-extensions` / `ZITI_CERT_EXTENSIONS` on `ziti-ssh-ca`; the default grants only `permit-pty,permit-port-forwarding`).
+2. You must pass `--forward-agent-unverified` together with `-A`; `-A` alone is refused with an explanation.
+
 ```sh
-ziti-ssh connect -A ziggy@web-server-prod
+ziti-ssh connect -A --forward-agent-unverified ziggy@web-server-prod
 ```
 
 Agent forwarding requires `SSH_AUTH_SOCK` to be set in your environment (i.e. a running SSH agent). If it is not set, or the agent cannot be reached, `ziti-ssh` logs a warning and opens the session normally without forwarding — the connection is not aborted.
@@ -169,7 +174,7 @@ eval "$(ssh-agent -s)"
 ssh-add ~/.ssh/id_ed25519
 
 # Now connect with agent forwarding
-ziti-ssh connect -A ziggy@web-server-prod
+ziti-ssh connect -A --forward-agent-unverified ziggy@web-server-prod
 
 # On the remote host you can SSH onward using your local agent keys:
 # ssh another-internal-host
@@ -178,10 +183,8 @@ ziti-ssh connect -A ziggy@web-server-prod
 Agent forwarding can be combined with port forwarding flags:
 
 ```sh
-ziti-ssh connect -A -L 5432:db.internal:5432 ziggy@web-server-prod
+ziti-ssh connect -A --forward-agent-unverified -L 5432:db.internal:5432 ziggy@web-server-prod
 ```
-
-The SSH certificates issued by `ziti-ssh-ca` already include the `permit-agent-forwarding` extension, so no CA or sshd configuration changes are needed.
 
 ---
 
@@ -278,7 +281,6 @@ The certificate is written to `~/.ssh/<key>-cert.pub` and its details are printe
                 ziggy
         Critical Options: (none)
         Extensions:
-                permit-agent-forwarding
                 permit-port-forwarding
                 permit-pty
 ```
