@@ -1,4 +1,5 @@
-FROM golang:1.26-bookworm
+# Pinned by digest (multi-arch index); Dependabot (docker ecosystem) updates it.
+FROM golang:1.26-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0
 
 ARG VERSION=0.1.0
 ARG FORMAT=deb,rpm

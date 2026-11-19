@@ -8,6 +8,11 @@ updates:
       go-minor-patch:
         update-types: [minor, patch]
 
+  - package-ecosystem: docker
+    directory: /scripts
+    schedule:
+      interval: weekly
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
