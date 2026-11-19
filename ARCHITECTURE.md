@@ -46,7 +46,7 @@ Entry points: `cmd/ziti-ssh-ca/main.go` (service and root) and `cmd/ziti-ssh-ca/
 **Service startup sequence:**
 
 1. Resolve configuration (flags > env vars > defaults) via `config.EnvOrFlag`.
-2. Load the Ed25519 CA private key from disk with `ca.LoadKey` — fail fast if the file is missing or unparseable.
+2. Load the controller's intermediate CA private key (RSA, ECDSA or Ed25519) from disk with `ca.LoadKey` — fail fast if the file is missing or unparseable.
 3. Initialize a Ziti context from the identity file with `ziti.NewContextFromFile`, then call `zitiCtx.Authenticate()`.
 4. Call `zitiCtx.Listen(serviceName)` to bind the named Ziti service and receive an `edge.Listener`.
 5. Build a per-identity token-bucket rate limiter (`ratelimit.New`) and start its eviction goroutine.
@@ -61,7 +61,7 @@ Each connection handler (`handleConn`):
 5. Reads one newline-terminated line (at most 4 KiB) and dispatches on its content (a key that fails `ca.ValidateClientKey` — certificate, DSA, RSA < 3072 bits, unsupported type, or the CA's own key — gets an `error:` reply): empty → write CA public key; non-empty → parse as SSH public key, sign, write certificate.
 6. Logs every outcome with the identity name as a structured field.
 
-The CA signer (`ssh.Signer`) is initialized once and passed to every handler. `ssh.Signer` wraps a Go `crypto.Signer` — the standard library's Ed25519 implementation is safe for concurrent use, so no mutex is required.
+The CA signer (`ssh.Signer`) is initialized once and passed to every handler. `ssh.Signer` wraps a Go `crypto.Signer` — the standard library's RSA, ECDSA and Ed25519 implementations are safe for concurrent use, so no mutex is required.
 
 **`config` subcommand** (`cmd/ziti-ssh-ca/config.go`):
 
@@ -255,7 +255,7 @@ Client                         ziti-ssh-ca
 - Non-empty line: treated as an SSH public key in authorized_keys format (`ssh-ed25519 AAAA...`).
 
 **Response encoding:** A single line in authorized_keys format, terminated by `\n`.
-- CA public key response: `ssh-ed25519 AAAA... <comment>\n`
+- CA public key response: `<key type> AAAA... <comment>\n` — the type of the controller's intermediate CA key, typically `ssh-rsa`
 - Signed certificate response: `ssh-ed25519-cert-v01@openssh.com AAAA...\n`
 - Refusal: `error: <reason>\n` (e.g. `error: rate limit exceeded`). Every request, including a CA public key request, counts against the caller's rate limit.
 - When `--max-connections` concurrent connections are already open, a new connection is closed without a response.
@@ -449,7 +449,7 @@ if sourceAddress != "" { // --cert-source-address, default "127.0.0.1/32,::1/128
 cert.SignCert(rand.Reader, signer)
 ```
 
-`ssh.Certificate.SignCert` serializes the certificate in OpenSSH wire format, signs the serialized bytes with the CA key using Ed25519, and attaches the signature. The result is marshaled to authorized_keys format by `ssh.MarshalAuthorizedKey`.
+`ssh.Certificate.SignCert` serializes the certificate in OpenSSH wire format, signs the serialized bytes with the CA key (with an RSA CA key the signature algorithm is `rsa-sha2-256`, as `ssh-keygen -L` reports for issued certificates — accepted by OpenSSH's default `CASignatureAlgorithms`), and attaches the signature. The result is marshaled to authorized_keys format by `ssh.MarshalAuthorizedKey`.
 
 ---
 

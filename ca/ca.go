@@ -14,8 +14,9 @@
     limitations under the License.
 */
 
-// Package ca provides SSH certificate authority operations: loading Ed25519 CA
-// keys and signing short-lived SSH user certificates bound to Ziti identities.
+// Package ca provides SSH certificate authority operations: loading the CA key
+// (the Ziti controller's intermediate CA private key — RSA, ECDSA or Ed25519)
+// and signing short-lived SSH user certificates bound to Ziti identities.
 package ca
 
 import (
@@ -32,9 +33,11 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// LoadKey reads an Ed25519 private key from path and returns an ssh.Signer
-// and the corresponding ssh.PublicKey. The key must be stored in PEM format
-// (as produced by ssh-keygen -t ed25519).
+// LoadKey reads the CA private key from path and returns an ssh.Signer and the
+// corresponding ssh.PublicKey. It accepts any key ssh.ParsePrivateKey does —
+// PEM-encoded RSA, ECDSA or Ed25519 (PKCS#1, PKCS#8, SEC 1 or OpenSSH format).
+// In production this is the Ziti controller's intermediate CA key (never the
+// offline root CA key); on stock controllers it is typically RSA.
 func LoadKey(path string) (ssh.Signer, ssh.PublicKey, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

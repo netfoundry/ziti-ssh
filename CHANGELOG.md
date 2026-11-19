@@ -157,6 +157,11 @@ See security advisory GHSA-TBD for details.
 
 ### Changed
 
+#### Documentation and cleanup
+
+- The CA key is described correctly as the controller's intermediate CA key (RSA, ECDSA or Ed25519; RSA on stock controllers), not "Ed25519".
+- Removed the unused `scripts/build-deb.sh`; packages are built with `scripts/build-packages.sh` (nfpm).
+
 #### Dependency, toolchain, and CI refresh
 
 - `github.com/openziti/sdk-golang` moved from v1.9.0 to **v1.8.4**. v1.9.0 was retracted upstream ("published from main before the module moved to `github.com/openziti/sdk-golang/v2`; the supported v1 line is 1.8.x").

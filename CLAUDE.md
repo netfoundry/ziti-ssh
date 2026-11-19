@@ -276,7 +276,7 @@ All binaries accept configuration via flags and environment variables (flags tak
 | Flag | Env var | Default | Description |
 |---|---|---|---|
 | `--identity` | `ZITI_IDENTITY` | — | Path to Ziti identity file |
-| `--ca-key` | `ZITI_CA_KEY` | — | Path to CA private key (Ed25519) |
+| `--ca-key` | `ZITI_CA_KEY` | — | Path to the controller's intermediate CA private key (RSA, ECDSA or Ed25519; typically RSA) |
 | `--service` | `ZITI_CA_SERVICE` | `ssh-ca` | Ziti service name to bind |
 | `--principal` | `ZITI_SSH_PRINCIPAL` | `ziggy` | SSH certificate principal (shared mode only) |
 | `--mode` | `ZITI_SSH_MODE` | `shared` | Principal mode: `shared` or `per-identity` |
@@ -403,7 +403,7 @@ The key file should remain mode 0600 and owned by the controller service user. `
 
 - **Language:** Go
 - **Target OS:** Ubuntu 24.04+ (also the upcoming 26.04)
-- **CA key type:** Ed25519
+- **CA key type:** whatever the controller's intermediate CA uses (RSA on stock controllers; ECDSA and Ed25519 also supported)
 - **Shared Linux user:** `ziggy` (default, configurable)
 
 ## Project Structure

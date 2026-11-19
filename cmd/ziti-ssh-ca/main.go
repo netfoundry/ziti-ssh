@@ -154,7 +154,7 @@ func main() {
 	}
 
 	root.Flags().StringVar(&identityFlag, "identity", "", "Path to Ziti identity file (or set ZITI_IDENTITY)")
-	root.Flags().StringVar(&caKeyFlag, "ca-key", "", "Path to CA private key (Ed25519) (or set ZITI_CA_KEY)")
+	root.Flags().StringVar(&caKeyFlag, "ca-key", "", "Path to the controller intermediate CA private key (RSA, ECDSA or Ed25519) (or set ZITI_CA_KEY)")
 	root.Flags().StringVar(&serviceFlag, "service", "", "Ziti service name to bind (or set ZITI_CA_SERVICE, default: ssh-ca)")
 	root.Flags().StringVar(&principalFlag, "principal", "", "SSH certificate principal in shared mode (or set ZITI_SSH_PRINCIPAL, default: ziggy)")
 	root.Flags().StringVar(&modeFlag, "mode", "", "Principal mode: \"shared\" (default) or \"per-identity\" (or set ZITI_SSH_MODE)")
