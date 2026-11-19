@@ -157,6 +157,11 @@ See security advisory GHSA-TBD for details.
 
 ### Changed
 
+#### `ziti-ssh-ca config`: controller trust and password handling
+
+- Controller TLS trust works like `ziti edge login`: if the system CAs do not trust the controller, its CA bundle is fetched from `/.well-known/est/cacerts`, the controller's certificate is verified against it, the CAs are shown and the user is asked to trust them (`--yes` for scripts). The bundle is saved under `$XDG_CONFIG_HOME/ziti-ssh/controllers/` and reused. A changed CA is refused unless confirmed interactively (`--yes` never replaces it). `--insecure` remains but warns.
+- The admin password can come from `--password-file <file|->`, `ZITI_CTRL_PASSWORD_FILE`, `ZITI_CTRL_PASSWORD`, or a hidden prompt. `--password` still works but warns that it is visible in the process list and shell history.
+
 #### Documentation and cleanup
 
 - The CA key is described correctly as the controller's intermediate CA key (RSA, ECDSA or Ed25519; RSA on stock controllers), not "Ed25519".

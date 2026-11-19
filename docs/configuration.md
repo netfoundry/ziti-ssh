@@ -116,8 +116,10 @@ The `config` subcommand manages the `ziti-ssh-host.v1` config type on the Ziti c
 |---|---|---|---|
 | `--controller` | `ZITI_CTRL_ADDRESS` | — | Controller hostname, optionally with port (default port: 443). Do not include `https://`. |
 | `--username` | `ZITI_CTRL_USERNAME` | — | Controller admin username |
-| `--password` | `ZITI_CTRL_PASSWORD` | — | Controller admin password |
-| `--insecure` | `ZITI_CTRL_INSECURE` | false | Skip TLS certificate verification. Mutually exclusive with `--controller-ca`. |
+| `--password` | `ZITI_CTRL_PASSWORD` | — | Controller admin password. The flag is visible in the process list and prints a warning; prefer the environment variable, `--password-file`, or the interactive prompt (used when none is given and a terminal is attached). |
+| `--password-file` | `ZITI_CTRL_PASSWORD_FILE` | — | Read the password from the first line of a file; `-` reads stdin |
+| `--yes` / `-y` | — | false | Trust the controller's CA bundle on first use without asking. Never replaces a saved bundle that no longer matches. |
+| `--insecure` | `ZITI_CTRL_INSECURE` | false | Skip TLS certificate verification (last resort; prints a warning — the admin password is sent unverified). Normally the controller's own CA bundle is fetched, confirmed and saved instead (see provisioning). Mutually exclusive with `--controller-ca`. |
 | `--controller-ca` | `ZITI_CTRL_CA` | — | Path to PEM CA certificate to trust for the controller TLS connection. Mutually exclusive with `--insecure`. |
 
 See [Configuring per-identity permissions](provisioning.md#configuring-per-identity-permissions-ziti-ssh-hostv1) in the provisioning guide for usage examples.

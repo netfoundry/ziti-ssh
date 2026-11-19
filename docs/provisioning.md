@@ -396,8 +396,8 @@ Register the `ziti-ssh-host.v1` config type in the Ziti controller. This step is
 ```sh
 ziti-ssh-ca config apply \
   --controller ctrl.example.com \
-  --username admin \
-  --password <password>
+  --username admin
+# prompts for the password; for scripts use --password-file <file> or ZITI_CTRL_PASSWORD
 ```
 
 This creates the config type if it does not exist, or updates it to the current schema if it does. To preview the schema that will be registered without connecting to the controller:
@@ -406,7 +406,9 @@ This creates the config type if it does not exist, or updates it to the current 
 ziti-ssh-ca config print
 ```
 
-> **TLS note:** If your controller uses a self-signed certificate, add `--insecure` to skip verification, or `--controller-ca /path/to/ca.pem` to trust a specific CA. All flags can also be set via environment variables (`ZITI_CTRL_ADDRESS`, `ZITI_CTRL_USERNAME`, `ZITI_CTRL_PASSWORD`, `ZITI_CTRL_INSECURE`, `ZITI_CTRL_CA`) — useful for scripted provisioning.
+> **Controller TLS trust:** like `ziti edge login`, the first connection to a controller whose certificate the system does not trust downloads the controller's own CA bundle (`/.well-known/est/cacerts`), checks that the controller's certificate is issued by it, prints each CA's subject and SHA-256 fingerprint, and asks `Trust this controller certificate authority? [y/N]` (`--yes` accepts without asking — for scripts). The bundle is saved under `$XDG_CONFIG_HOME/ziti-ssh/controllers/` and used from then on. If the controller later presents a different CA, the command refuses with a warning and only replaces the saved bundle after interactive confirmation — `--yes` never does. Alternatively pass `--controller-ca /path/to/ca.pem`. `--insecure` (no verification; sends the admin password to whoever answers) remains as a last resort and prints a warning.
+>
+> **Password:** prompted for (hidden) when run in a terminal; otherwise use `--password-file <file>` (`-` = stdin) / `ZITI_CTRL_PASSWORD_FILE`, or `ZITI_CTRL_PASSWORD`. `--password` still works but warns, because it is visible in the process list and shell history. Other settings have environment variables too (`ZITI_CTRL_ADDRESS`, `ZITI_CTRL_USERNAME`, `ZITI_CTRL_CA`, `ZITI_CTRL_INSECURE`).
 
 ### 2. Create a config for a service
 

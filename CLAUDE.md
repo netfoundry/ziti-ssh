@@ -174,7 +174,7 @@ Three modes of operation: a long-running service, a one-shot `enroll` command, a
 - `config apply` — idempotent install-or-update of the `ziti-ssh-host.v1` config type: checks whether it exists, then creates or replaces it.
 - `config remove` — removes the `ziti-ssh-host.v1` config type if present.
 
-Flags: `--controller <host[:port]>` (default port 443), `--username`, `--password`, `--insecure` (skip TLS verify), `--controller-ca <path>` (trust a specific CA cert). All have env var equivalents (`ZITI_CTRL_ADDRESS`, `ZITI_CTRL_USERNAME`, `ZITI_CTRL_PASSWORD`, `ZITI_CTRL_INSECURE`, `ZITI_CTRL_CA`). `--insecure` and `--controller-ca` are mutually exclusive.
+Flags: `--controller <host[:port]>` (default port 443), `--username`, `--password` (warns; prefer `--password-file`, env, or the hidden prompt), `--password-file <file|->`, `--yes`, `--insecure` (skip TLS verify; warns), `--controller-ca <path>` (trust a specific CA cert). Controller TLS trust (`cmd/ziti-ssh-ca/ctrltrust.go`) mirrors `ziti edge login`: `--controller-ca` → saved bundle (`$XDG_CONFIG_HOME/ziti-ssh/controllers/<host>_<port>.pem`) → system roots → fetch `/.well-known/est/cacerts`, verify the server against it, confirm (or `--yes`) and save; a changed CA is refused unless confirmed interactively (`--yes` never replaces). All have env var equivalents (`ZITI_CTRL_ADDRESS`, `ZITI_CTRL_USERNAME`, `ZITI_CTRL_PASSWORD`, `ZITI_CTRL_INSECURE`, `ZITI_CTRL_CA`). `--insecure` and `--controller-ca` are mutually exclusive.
 
 ### Host Daemon (`ziti-ssh-host`)
 
@@ -294,7 +294,9 @@ All binaries accept configuration via flags and environment variables (flags tak
 |---|---|---|---|
 | `--controller` | `ZITI_CTRL_ADDRESS` | — | Controller host, optionally with port (default port: 443) |
 | `--username` | `ZITI_CTRL_USERNAME` | — | Controller admin username |
-| `--password` | `ZITI_CTRL_PASSWORD` | — | Controller admin password |
+| `--password` | `ZITI_CTRL_PASSWORD` | — | Controller admin password (flag warns: visible in process list) |
+| `--password-file` | `ZITI_CTRL_PASSWORD_FILE` | — | Password from a file (`-` = stdin) |
+| `--yes` | — | false | Trust the controller CA bundle on first use without asking |
 | `--insecure` | `ZITI_CTRL_INSECURE` | false | Skip TLS certificate verification |
 | `--controller-ca` | `ZITI_CTRL_CA` | — | Path to PEM CA cert to trust for controller TLS |
 
