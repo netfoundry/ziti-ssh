@@ -18,7 +18,7 @@ depends:
 
 contents:
   - src: "dist/binaries/ziti-ssh-ca"
-    dst: /usr/local/bin/ziti-ssh-ca
+    dst: /usr/bin/ziti-ssh-ca
     file_info:
       mode: 0755
   - src: packaging/systemd/ziti-ssh-ca.service
@@ -32,3 +32,5 @@ contents:
 
 scripts:
   postinstall: packaging/scripts/postinstall-ziti-ssh-ca.sh
+  preremove: packaging/scripts/preremove-ziti-ssh-ca.sh
+  postremove: packaging/scripts/postremove-ziti-ssh-ca.sh

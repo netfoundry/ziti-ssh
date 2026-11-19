@@ -157,7 +157,7 @@ Wants=network-online.target
 Type=notify
 User=ziti-controller
 EnvironmentFile=/etc/ziti-ssh-ca/env
-ExecStart=/usr/local/bin/ziti-ssh-ca
+ExecStart=/usr/bin/ziti-ssh-ca
 Restart=on-failure
 RestartSec=5
 

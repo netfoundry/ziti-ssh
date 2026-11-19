@@ -11,7 +11,7 @@ Type=notify
 # (mode 0700) and is only readable by root.
 User=root
 EnvironmentFile=-/etc/ziti-ssh-host/env
-ExecStart=/usr/local/bin/ziti-ssh-host run
+ExecStart=/usr/bin/ziti-ssh-host run
 Restart=on-failure
 RestartSec=5
 

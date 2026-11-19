@@ -511,3 +511,18 @@ go build -o /usr/local/bin/ziti-scp  ./cmd/ziti-scp
 ```
 
 </details>
+
+---
+
+## Uninstalling
+
+Packages install binaries to `/usr/bin` (earlier releases used `/usr/local/bin`; upgrading moves them automatically).
+
+| Action | `ziti-ssh-host` | `ziti-ssh-ca` | `ziti-ssh`, `ziti-scp` |
+|---|---|---|---|
+| `apt remove` / `rpm -e` | Service stopped and disabled. Configuration, identity, sshd trust and Linux accounts are kept. | Service stopped and disabled. Configuration and identity are kept. | Binary removed. |
+| `apt purge` (deb only) | Additionally removes `/etc/ssh/sshd_config.d/ziti-ssh.conf` and `/etc/ssh/ziti_ca.pub` and reloads sshd, so the host **stops trusting the Ziti CA**. `/etc/ziti-ssh-host/` (identity, env), the account ownership registry and Linux accounts are kept. | Additionally removes the managed systemd drop-in `ziti-ssh-ca.service.d/10-controller-user.conf` (unless edited by hand). `/etc/ziti-ssh-ca/` is kept. | — |
+
+**rpm has no purge.** After `rpm -e ziti-ssh-host`, delete `/etc/ssh/sshd_config.d/ziti-ssh.conf` and `/etc/ssh/ziti_ca.pub` and reload sshd (`systemctl reload sshd`) if the host should no longer accept Ziti certificates.
+
+Delete Ziti identities (`/etc/ziti-ssh-host/identity.json`, `/etc/ziti-ssh-ca/identity.json`) and per-identity Linux accounts yourself if they are no longer needed; the packages never remove them.

@@ -19,7 +19,7 @@ depends:
 
 contents:
   - src: "dist/binaries/ziti-scp"
-    dst: /usr/local/bin/ziti-scp
+    dst: /usr/bin/ziti-scp
     file_info:
       mode: 0755
 

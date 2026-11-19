@@ -153,7 +153,7 @@ Wants=network-online.target
 [Service]
 Type=notify
 EnvironmentFile=-/etc/ziti-ssh-host/env
-ExecStart=/usr/local/bin/ziti-ssh-host run
+ExecStart=/usr/bin/ziti-ssh-host run
 Restart=on-failure
 RestartSec=5
 

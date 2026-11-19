@@ -20,7 +20,7 @@ depends:
 
 contents:
   - src: "dist/binaries/ziti-ssh-host"
-    dst: /usr/local/bin/ziti-ssh-host
+    dst: /usr/bin/ziti-ssh-host
     file_info:
       mode: 0755
   - src: packaging/systemd/ziti-ssh-host.service
@@ -34,3 +34,5 @@ contents:
 
 scripts:
   postinstall: packaging/scripts/postinstall-ziti-ssh-host.sh
+  preremove: packaging/scripts/preremove-ziti-ssh-host.sh
+  postremove: packaging/scripts/postremove-ziti-ssh-host.sh
