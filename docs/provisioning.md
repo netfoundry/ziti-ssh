@@ -141,7 +141,20 @@ Or install from a locally built package:
 dpkg -i ziti-ssh-ca_<version>-1_<arch>.deb
 ```
 
-The postinstall script creates `/etc/ziti-ssh-ca/env` (mode 0640) with all variables commented out, and runs `systemctl daemon-reload`.
+The postinstall script creates `/etc/ziti-ssh-ca/env` (mode 0640) with all variables commented out, sets the service user (below), and runs `systemctl daemon-reload`.
+
+**Service user.** `ziti-ssh-ca` must run as the same OS user as the Ziti controller, because it reads the controller's intermediate CA key (mode 0600, owned by that user). That user varies: the `openziti-controller` package (v2.0+) runs the controller as `ziti-controller`; other deployments use e.g. `ziti`. The postinstall script detects it — from `User=` in `ziti-controller.service`, otherwise from the owner of a running `ziti controller run` process — and writes `/etc/systemd/system/ziti-ssh-ca.service.d/10-controller-user.conf` with that `User=`/`Group=`, and makes that user the owner of `/etc/ziti-ssh-ca` (mode 0750) so the service can save controller URL updates to its identity file. An existing administrator override that sets `User=` is never changed, and the managed drop-in is left alone once edited by hand (delete its first line to take ownership).
+
+If no controller is detected (for example the package is installed before the controller), the unit keeps its default `User=ziti` and the postinstall prints instructions. Check and fix with:
+
+```sh
+systemctl show -p User,Group ziti-ssh-ca          # what the CA will run as
+systemctl show -p User ziti-controller            # what the controller runs as
+sudo systemctl edit ziti-ssh-ca                   # [Service] User=<user> Group=<group>
+sudo chown <user>:<group> /etc/ziti-ssh-ca /etc/ziti-ssh-ca/identity.json
+```
+
+Re-running the package's postinstall (reinstalling the package) after the controller is installed also performs the detection.
 
 ### 2. Locate the Ziti controller intermediate CA private key
 
@@ -155,7 +168,7 @@ Root CA (offline)
 
 `ziti-ssh-ca` uses the **controller's intermediate CA private key** — the key that signs Ziti identity certificates. Do not use the root CA key; the root CA private key is kept offline and never used at runtime.
 
-In production, `ziti-ssh-ca` runs on the same machine as the Ziti controller, as the same OS user (typically `ziti`). This gives it direct filesystem access to the controller's PKI without any credential distribution.
+In production, `ziti-ssh-ca` runs on the same machine as the Ziti controller, as the same OS user (`ziti-controller` with the `openziti-controller` v2 package; `ziti` in some other deployments — see **Service user** above). This gives it direct filesystem access to the controller's PKI without any credential distribution.
 
 The intermediate CA private key is typically found at a path like:
 

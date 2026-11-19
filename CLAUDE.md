@@ -378,7 +378,7 @@ The root CA private key is kept offline and is not used at runtime. The controll
 
 The `--ca-key` argument to `ziti-ssh-ca` is the **controller's intermediate CA private key** — not the root CA key. This is the key that signs Ziti identity certificates, and it is therefore the key sshd must trust via `TrustedUserCAKeys`.
 
-In production, `ziti-ssh-ca` runs on the same machine as the Ziti controller, as the same OS user (typically `ziti`). This gives it direct filesystem access to the controller's PKI. The intermediate CA key path is typically:
+In production, `ziti-ssh-ca` runs on the same machine as the Ziti controller, as the same OS user as the controller (`ziti-controller` with the `openziti-controller` v2 package, `ziti` in other deployments). The package postinstall detects that user and writes the drop-in `/etc/systemd/system/ziti-ssh-ca.service.d/10-controller-user.conf`; the unit's default is `User=ziti`. This gives it direct filesystem access to the controller's PKI. The intermediate CA key path is typically:
 
 ```
 /var/lib/ziti-controller/pki/intermediate-ca/keys/intermediate-ca.key

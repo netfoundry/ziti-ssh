@@ -97,6 +97,11 @@ See security advisory GHSA-TBD for details.
 - `ziti-ssh-host run`: at startup, legacy `/etc/sudoers.d/<username>` files are removed for registered accounts; legacy-format files for unregistered accounts are reported (log warning and `ziti-ssh-host users list`) but never removed automatically.
 - `docs/operations.md`: revocation section corrected — with `ZITI_USER_CLEANUP=false` (default) the account and its processes are kept after the last session closes.
 
+#### `ziti-ssh-ca` package runs as the controller's service user
+
+- The postinstall script detects the Ziti controller's service user (from `ziti-controller.service`, otherwise the owner of a running `ziti controller run` process) and writes the systemd drop-in `/etc/systemd/system/ziti-ssh-ca.service.d/10-controller-user.conf`. The `openziti-controller` v2 package runs the controller as `ziti-controller`, so the unit's fixed `User=ziti` left the CA unable to read the intermediate key there. Administrator overrides that set `User=` are left unchanged; if no controller is detected, instructions are printed.
+- `/etc/ziti-ssh-ca` is now owned by the service user (mode 0750) so controller URL updates can be saved to the identity file.
+
 ### Changed
 
 #### Dependency, toolchain, and CI refresh
