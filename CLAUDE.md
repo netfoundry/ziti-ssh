@@ -192,7 +192,7 @@ Four subcommands:
 
 **`run`:**
 1. Initializes Ziti context from the identity file; declares `ziti-ssh-host.v1` as a requested config type so the controller delivers it with the service detail
-2. Subscribes to `EventControllerUrlsUpdated` before authenticating; when the controller cluster membership changes: (a) persists the updated controller URL list to the identity JSON via `config.PersistZtAPIs`, and (b) fetches CA public keys from the new set of controllers and rewrites `TrustedUserCAKeys` + reloads sshd if the set changed. All four binaries call `PersistZtAPIs` on this event so the identity file always reflects the live cluster membership.
+2. Subscribes to `EventControllerUrlsUpdated` before authenticating; when the controller cluster membership changes: (a) persists the updated controller URL list to the identity JSON via `config.PersistZtAPIs`, and (b) fetches CA public keys from the new set of controllers and rewrites `TrustedUserCAKeys` + reloads sshd if the set changed. All four binaries call `PersistZtAPIs` on this event so the identity file always reflects the live cluster membership. Entries must pass `config.CheckControllerURL` (https, host, no userinfo/query/fragment); `FilterControllerURLs` drops the rest (also before CA-key refresh), dedupes, and an unchanged list is not rewritten.
 3. Accepts one or more `--ssh-service` values (flag may be repeated; `ZITI_SSH_SERVICE` accepts comma-separated list; defaults to `ssh`)
 4. For each service: opens a separate Ziti listener, loads and parses the `ziti-ssh-host.v1` config, builds independent `ProxyHooks` carrying that service's permission map
 5. Proxies incoming connections to `127.0.0.1:22`

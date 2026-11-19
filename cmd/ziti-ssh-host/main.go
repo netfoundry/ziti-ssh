@@ -533,6 +533,11 @@ func refreshTrustedCAs(urls []*url.URL, rootPool *x509.CertPool) error {
 	trustRefreshMu.Lock()
 	defer trustRefreshMu.Unlock()
 
+	// Only fetch CA keys from well-formed https controller URLs.
+	urls, rejected := config.FilterControllerURLs(urls)
+	for _, r := range rejected {
+		slog.Warn("ignoring controller URL", "reason", r)
+	}
 	if len(urls) == 0 {
 		return nil
 	}
@@ -854,6 +859,10 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 		}
 		if len(urls) == 0 {
 			slog.Warn("ignoring empty controller URL list from controller")
+			return
+		}
+		if valid, _ := config.FilterControllerURLs(urls); len(valid) == 0 {
+			slog.Warn("ignoring controller URL list with no acceptable https URLs", "count", len(urls))
 			return
 		}
 		cachedMu.Lock()

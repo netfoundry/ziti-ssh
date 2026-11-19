@@ -126,6 +126,11 @@ See security advisory GHSA-TBD for details.
 **Updated docs:** `docs/operations.md` (account ownership flow diagram, lifecycle, new "Managing account ownership" section, files-written table), `docs/configuration.md` (`users` subcommands, sudoers path), `ARCHITECTURE.md` (`UserManager`, `deleteUser`, §12 account ownership boundary), `CLAUDE.md`.
 
 ### Fixed
+#### Controller URL lists validated
+
+- Controller URL lists pushed by the controller are filtered before use: entries must be `https` with a host and no user info, query or fragment; others are logged and dropped, and duplicates removed. This applies before `ziti-ssh-host` fetches CA keys and before any binary saves the list to its identity file.
+- The identity file is no longer rewritten when the controller list has not changed.
+
 #### Certificate serials and clock-skew tolerance
 
 - Each certificate carries a random 64-bit serial (was always 0). `ziti-ssh-ca` logs it when issuing (`serial=`) and sshd logs it at login, so a login can be traced to its issuance.
