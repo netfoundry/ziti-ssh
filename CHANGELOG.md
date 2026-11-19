@@ -126,6 +126,11 @@ See security advisory GHSA-TBD for details.
 **Updated docs:** `docs/operations.md` (account ownership flow diagram, lifecycle, new "Managing account ownership" section, files-written table), `docs/configuration.md` (`users` subcommands, sudoers path), `ARCHITECTURE.md` (`UserManager`, `deleteUser`, §12 account ownership boundary), `CLAUDE.md`.
 
 ### Fixed
+#### Certificate serials and clock-skew tolerance
+
+- Each certificate carries a random 64-bit serial (was always 0). `ziti-ssh-ca` logs it when issuing (`serial=`) and sshd logs it at login, so a login can be traced to its issuance.
+- Certificates are valid from 60 seconds before signing, so an SSH host whose clock is slightly behind the CA's accepts a new certificate. Expiry is unchanged (signing time + `--cert-ttl`).
+
 #### Derived usernames fold ASCII case only (behaviour change)
 
 - `ca.DeriveUsername` lowercases only `A`–`Z`; every other non-`[a-z0-9_-]` character becomes `_`. Previously Unicode case folding mapped some non-ASCII letters to ASCII (the Kelvin sign to `k`, `İ` to `i`), so a lookalike identity name could derive another identity's username. Only identity names containing such characters derive a different name; upgrade `ziti-ssh-ca` and `ziti-ssh-host` together.

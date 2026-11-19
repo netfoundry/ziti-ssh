@@ -264,7 +264,8 @@ No HTTP, no framing beyond the newline.
 |---|---|
 | Principal | Configurable (default: `ziggy`); derived from identity name in `per-identity` mode |
 | Key ID | `ziti:<identity-name>` |
-| Validity | 5 minutes from signing time by default (configurable via `--cert-ttl`) |
+| Serial | Random non-zero 64-bit value; logged by the CA at issue and by sshd at login |
+| Validity | From 60 s before signing (`ca.ClockSkewAllowance`, clock-skew tolerance) until 5 minutes after signing by default (configurable via `--cert-ttl`) |
 | Extensions | `permit-pty`, `permit-port-forwarding` by default (`--cert-extensions`; agent forwarding only if configured) |
 | Critical options | `source-address=127.0.0.1/32,::1/128` (`--cert-source-address`): sshd accepts the cert only from loopback, i.e. via the local `ziti-ssh-host` proxy, so a cert cannot be used by connecting to port 22 directly |
 

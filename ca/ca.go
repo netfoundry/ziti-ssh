@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"os"
@@ -70,14 +71,21 @@ func SignCert(signer ssh.Signer, pubKey ssh.PublicKey, identity, principal strin
 		return nil, fmt.Errorf("principal must not be empty")
 	}
 
+	serial, err := randomSerial()
+	if err != nil {
+		return nil, err
+	}
 	now := time.Now()
 	cert := &ssh.Certificate{
 		CertType:        ssh.UserCert,
 		Key:             pubKey,
+		Serial:          serial,
 		KeyId:           "ziti:" + identity,
 		ValidPrincipals: []string{principal},
-		ValidAfter:      uint64(now.Unix()),
-		ValidBefore:     uint64(now.Add(ttl).Unix()),
+		// Backdated so an SSH host whose clock is slightly behind the CA's
+		// still accepts a freshly issued certificate.
+		ValidAfter:  uint64(now.Add(-ClockSkewAllowance).Unix()),
+		ValidBefore: uint64(now.Add(ttl).Unix()),
 		Permissions: ssh.Permissions{
 			Extensions: map[string]string{},
 		},
@@ -102,6 +110,25 @@ func SignCert(signer ssh.Signer, pubKey ssh.PublicKey, identity, principal strin
 // PublicKeyBytes marshals pub to authorized_keys format.
 func PublicKeyBytes(pub ssh.PublicKey) []byte {
 	return ssh.MarshalAuthorizedKey(pub)
+}
+
+// ClockSkewAllowance is how far before the signing time a certificate's
+// validity starts, so hosts with a clock slightly behind the CA's accept it.
+const ClockSkewAllowance = 60 * time.Second
+
+// randomSerial returns a random non-zero 64-bit certificate serial. sshd logs
+// it with every certificate login ("ID ziti:<identity> (serial N)"), and the
+// CA logs it when issuing, so a login can be matched to its issuance.
+func randomSerial() (uint64, error) {
+	var b [8]byte
+	for {
+		if _, err := rand.Read(b[:]); err != nil {
+			return 0, fmt.Errorf("generate certificate serial: %w", err)
+		}
+		if v := binary.BigEndian.Uint64(b[:]); v != 0 {
+			return v, nil
+		}
+	}
 }
 
 // DeriveUsername maps a Ziti identity name to a valid Linux username.

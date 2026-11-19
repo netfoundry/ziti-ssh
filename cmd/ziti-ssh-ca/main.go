@@ -478,7 +478,14 @@ func handleConn(conn net.Conn, signer ssh.Signer, caPubBytes []byte, principal, 
 		return
 	}
 
-	log.Info("issued SSH certificate", "principal", effectivePrincipal, "ttl", certTTL)
+	// The serial appears in sshd's log for every login with this certificate.
+	var serial uint64
+	if pk, _, _, _, err := ssh.ParseAuthorizedKey(certBytes); err == nil {
+		if c, ok := pk.(*ssh.Certificate); ok {
+			serial = c.Serial
+		}
+	}
+	log.Info("issued SSH certificate", "principal", effectivePrincipal, "ttl", certTTL, "serial", serial)
 }
 
 // Compile-time assertion: SDK connections must expose the router-verified

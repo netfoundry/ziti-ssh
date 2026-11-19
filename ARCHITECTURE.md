@@ -413,14 +413,15 @@ Certificates are issued on demand and are ephemeral. There is no certificate sto
 | `Key` | Client's submitted public key | Wire protocol request |
 | `KeyId` | `ziti:<identity-name>` | Extracted from Ziti connection |
 | `ValidPrincipals` | `[]string{principal}` | shared mode: `--principal` flag (default: `ziggy`); per-identity mode: `ca.DeriveUsername(callerIdentity)` |
-| `ValidAfter` | `time.Now().Unix()` | Signing time |
+| `Serial` | random non-zero `uint64` | `crypto/rand`; logged by the CA (`issued SSH certificate … serial=N`) and by sshd on login (`serial N`) |
+| `ValidAfter` | `time.Now().Add(-ca.ClockSkewAllowance).Unix()` | Signing time − 60 s, so hosts whose clock is slightly behind the CA's accept new certificates |
 | `ValidBefore` | `time.Now().Add(ttl).Unix()` | Signing time + TTL (default 5m, configurable via `--cert-ttl` / `ZITI_CERT_TTL`) |
 | `Extensions` | `permit-pty`, `permit-port-forwarding` | `--cert-extensions` / `ZITI_CERT_EXTENSIONS` (`ca.ParseExtensions`); agent forwarding not granted by default |
 | `CriticalOptions["source-address"]` | `127.0.0.1/32,::1/128` | `--cert-source-address` / `ZITI_CERT_SOURCE_ADDRESS`; omitted when set to `none` |
 
 ### TTL and Revocation
 
-The TTL defaults to 5 minutes and is configurable via `--cert-ttl` (flag) or `ZITI_CERT_TTL` (environment variable) on `ziti-ssh-ca`. Any positive `time.Duration` string is accepted (e.g. `4h`, `12h`, `24h`). There is no revocation mechanism. Access control is handled upstream:
+The TTL defaults to 5 minutes and is configurable via `--cert-ttl` (flag) or `ZITI_CERT_TTL` (environment variable) on `ziti-ssh-ca`. Any positive `time.Duration` string is accepted (e.g. `4h`, `12h`, `24h`). There is no revocation mechanism (no KRL); with a 5-minute default TTL this is accepted. Access control is handled upstream:
 
 - **While TTL is active:** A user whose Ziti identity is revoked at the controller can no longer dial the `ssh` service — they cannot open new SSH sessions. Any existing SSH session (TCP connection already established) continues until it closes naturally.
 - **After TTL expires:** The certificate is no longer accepted by `sshd`. The user must obtain a new certificate, which requires a live Ziti identity.
@@ -434,9 +435,10 @@ For most operational scenarios this is sufficient. If immediate hard revocation 
 cert := &ssh.Certificate{
     CertType:        ssh.UserCert,
     Key:             pubKey,
+    Serial:          serial, // random, non-zero
     KeyId:           "ziti:" + identity,
     ValidPrincipals: []string{principal},
-    ValidAfter:      uint64(now.Unix()),
+    ValidAfter:      uint64(now.Add(-ca.ClockSkewAllowance).Unix()), // 60 s backdate
     ValidBefore:     uint64(now.Add(ttl).Unix()),
     Permissions: ssh.Permissions{
         // From --cert-extensions; default "permit-pty,permit-port-forwarding".

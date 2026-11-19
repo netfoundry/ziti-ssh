@@ -304,7 +304,7 @@ The certificate is written to `~/.ssh/<key>-cert.pub` and its details are printe
         Public key: ED25519-CERT SHA256:...
         Signing CA: ED25519 SHA256:... (using ssh-ed25519)
         Key ID: "ziti:alice"
-        Serial: 0
+        Serial: 7294018234810342811
         Valid: from 2026-03-30T09:00:00 to 2026-03-30T17:00:00
         Principals:
                 ziggy

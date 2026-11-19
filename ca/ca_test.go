@@ -126,13 +126,13 @@ func TestSignCert(t *testing.T) {
 		validAfter := time.Unix(int64(cert.ValidAfter), 0)
 		validBefore := time.Unix(int64(cert.ValidBefore), 0)
 
-		// ValidAfter must be at or after our before-timestamp (with 1s slack for clock granularity).
-		if validAfter.Before(before.Add(-time.Second)) {
-			t.Errorf("ValidAfter %v is before test start %v", validAfter, before)
+		// ValidAfter is backdated by ClockSkewAllowance (1s slack for
+		// clock granularity) so hosts slightly behind the CA accept it.
+		if validAfter.Before(before.Add(-ca.ClockSkewAllowance - time.Second)) {
+			t.Errorf("ValidAfter %v is more than %v before test start %v", validAfter, ca.ClockSkewAllowance, before)
 		}
-		// ValidAfter must not be in the future relative to after.
-		if validAfter.After(after.Add(time.Second)) {
-			t.Errorf("ValidAfter %v is after test end %v", validAfter, after)
+		if validAfter.After(after.Add(-ca.ClockSkewAllowance + time.Second)) {
+			t.Errorf("ValidAfter %v is not backdated by %v (test end %v)", validAfter, ca.ClockSkewAllowance, after)
 		}
 
 		// ValidBefore must be approximately now+5m (within 5 seconds).
@@ -419,5 +419,31 @@ func TestDeriveUsername_NoNonASCIICaseFolding(t *testing.T) {
 		if got := ca.DeriveUsername(in); got != want {
 			t.Errorf("DeriveUsername(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestSignCert_RandomSerial(t *testing.T) {
+	_, caPriv, _ := ed25519.GenerateKey(rand.Reader)
+	signer, err := ssh.NewSignerFromKey(caPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub, _ := ssh.NewPublicKey(userPub)
+	seen := map[uint64]bool{}
+	for i := 0; i < 20; i++ {
+		b, err := ca.SignCert(signer, pub, "alice", "ziggy", 5*time.Minute, ca.DefaultSourceAddress, []string{"permit-pty"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		pk, _, _, _, err := ssh.ParseAuthorizedKey(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := pk.(*ssh.Certificate).Serial
+		if s == 0 || seen[s] {
+			t.Fatalf("serial %d is zero or repeated", s)
+		}
+		seen[s] = true
 	}
 }
