@@ -19,12 +19,14 @@ package host
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/netfoundry/ziti-ssh/ca"
@@ -259,6 +261,12 @@ func deleteUser(username string, uid int) error {
 	if err := terminateUserProcesses(username, uid); err != nil {
 		slog.Warn("proceeding with userdel", "username", username, "err", err)
 	}
+	// userdel -r removes only the home directory and mail spool. Files the
+	// user left in shared temporary directories would otherwise pass to the
+	// next account that is given the same UID.
+	if n := removeOwnedFiles(sharedTempDirs, uid); n > 0 {
+		slog.Info("removed user's files from shared temporary directories", "username", username, "uid", uid, "count", n)
+	}
 
 	cmd := exec.Command("userdel", "-r", "--", username)
 	cmd.Env = childEnv()
@@ -373,4 +381,55 @@ func ManagedGroupMembers() ([]string, error) {
 		return nil, nil
 	}
 	return strings.Split(fields[3], ","), nil
+}
+
+// sharedTempDirs are world-writable directories cleaned of a deleted user's
+// files before userdel.
+var sharedTempDirs = []string{"/tmp", "/var/tmp", "/dev/shm"}
+
+// removeOwnedFiles deletes, under each root, every entry owned by uid:
+// regular files, symlinks themselves (never their targets) and other
+// non-directories, then directories owned by uid that are empty afterwards.
+// It never follows symlinks, never removes a root itself, and leaves any
+// directory that still contains other users' files. Errors are logged and
+// skipped. It returns the number of entries removed.
+func removeOwnedFiles(roots []string, uid int) int {
+	removed := 0
+	for _, root := range roots {
+		var dirs []string
+		_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil // unreadable entry: skip it, keep walking
+			}
+			if p == root {
+				return nil
+			}
+			info, err := os.Lstat(p)
+			if err != nil {
+				return nil
+			}
+			st, ok := info.Sys().(*syscall.Stat_t)
+			if !ok || int(st.Uid) != uid {
+				return nil
+			}
+			if d.IsDir() {
+				dirs = append(dirs, p) // remove after its contents, if empty
+				return nil
+			}
+			if err := os.Remove(p); err != nil {
+				slog.Debug("could not remove file", "path", p, "err", err)
+				return nil
+			}
+			removed++
+			return nil
+		})
+		// Deepest first, so emptied parents can be removed too. os.Remove
+		// fails on non-empty directories, which keeps other users' files.
+		for i := len(dirs) - 1; i >= 0; i-- {
+			if err := os.Remove(dirs[i]); err == nil {
+				removed++
+			}
+		}
+	}
+	return removed
 }

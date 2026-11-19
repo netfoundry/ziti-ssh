@@ -214,7 +214,8 @@ Safe on a nil receiver — returns the global fallbacks when no config is attach
 
 1. Remove `/etc/sudoers.d/ziti-ssh-host-<username>` if present.
 2. `terminateUserProcesses`: run `loginctl disable-linger -- <username>` and `loginctl terminate-user -- <username>` (errors logged but ignored — the session may already be gone), then poll with `pgrep -u <uid>` until no processes remain (5 s), then `pkill -TERM -u <uid>` (10 s), then `pkill -KILL -u <uid>` (5 s).
-3. Run `userdel -r -- <username>` to remove the account and home directory.
+3. `removeOwnedFiles`: delete entries owned by the UID in `/tmp`, `/var/tmp` and `/dev/shm` (files and symlinks themselves, then directories left empty; never following links, never removing other users' files), so they cannot pass to the next account given the same UID.
+4. Run `userdel -r -- <username>` to remove the account and home directory.
 
 With `ZITI_TERMINATE_ON_DISCONNECT=true` and cleanup off, `ReleaseUser` (and `CleanupOrphans` after a crash) calls `terminateUserProcesses` via `accountOps.TerminateProcesses` after dropping privileges, without deleting the account.
 

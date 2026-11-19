@@ -353,7 +353,7 @@ In every mode the account's supplementary groups are cleared at that point. What
 |---|---|---|---|
 | `false` (default) | `false` (default) | Kept | **Kept running** — a revoked identity's processes continue. The daemon logs a startup warning in this configuration. |
 | `false` | `true` | Kept | Ended: lingering disabled, `loginctl terminate-user`, then SIGTERM and SIGKILL to the account's UID |
-| `true` | any | Deleted (`userdel -r`) | Ended (same sequence, before deletion) |
+| `true` | any | Deleted (`userdel -r`), and the user's files in `/tmp`, `/var/tmp` and `/dev/shm` removed | Ended (same sequence, before deletion) |
 
 The host cannot distinguish a revocation from an ordinary disconnect — it only sees the last session close — so for revocation to also stop running processes, enable `ZITI_TERMINATE_ON_DISCONNECT=true` or `ZITI_USER_CLEANUP=true`. Users then lose background jobs whenever their last session closes. Otherwise an administrator must end them manually on each host (`loginctl terminate-user <username>`, and `userdel -r <username>` to remove the account).
 

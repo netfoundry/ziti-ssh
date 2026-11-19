@@ -33,6 +33,10 @@ See security advisory GHSA-TBD for details.
 - `ziti-ssh connect -A` is refused unless `--forward-agent-unverified` is also given: clients cannot yet verify which host answered on a terminator address (an OpenZiti limitation), and a forwarded agent can be used by that host while connected.
 - **Action:** to keep agent forwarding, add `permit-agent-forwarding` to `ZITI_CERT_EXTENSIONS` on the CA and use `-A --forward-agent-unverified`.
 
+#### Temporary files removed with deleted accounts
+
+- With `ZITI_USER_CLEANUP=true`, files a deleted user owned in `/tmp`, `/var/tmp` and `/dev/shm` are removed before `userdel` (symlinks are removed, never followed; directories only when empty), so they do not pass to the next account given the same UID.
+
 #### Controller CA key tracking
 
 - `ziti-ssh-host` takes each controller's intermediate CA from the TLS chain verified against the enrollment root CA (`VerifiedChains`) instead of the certificates the server presented, which could include an extra CA certificate that would have become an SSH trust anchor.

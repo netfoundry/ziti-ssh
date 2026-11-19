@@ -878,3 +878,47 @@ func TestEnsureUser_AlwaysInManagedGroup(t *testing.T) {
 		t.Errorf("release must drop configured groups but keep the managed group: %v", ops.calls)
 	}
 }
+
+// ---- G3: files left in shared temporary directories ------------------------
+
+func TestRemoveOwnedFiles(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "keep-me")
+	if err := os.WriteFile(outside, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite := func(p string) {
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite(filepath.Join(root, "a.txt"))
+	mustWrite(filepath.Join(root, "sub", "deep", "b.txt"))
+	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	// A different UID owns nothing here: nothing may be removed.
+	if n := removeOwnedFiles([]string{root}, os.Getuid()+1); n != 0 {
+		t.Fatalf("removed %d entries owned by another uid", n)
+	}
+
+	n := removeOwnedFiles([]string{root}, os.Getuid())
+	// a.txt, b.txt, link, deep/, sub/
+	if n != 5 {
+		t.Errorf("removed %d entries, want 5", n)
+	}
+	entries, _ := os.ReadDir(root)
+	if len(entries) != 0 {
+		t.Errorf("entries left in root: %v", entries)
+	}
+	if _, err := os.Stat(root); err != nil {
+		t.Error("root directory itself was removed")
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Error("symlink target outside the root was removed")
+	}
+}
