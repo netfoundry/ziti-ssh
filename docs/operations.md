@@ -55,12 +55,12 @@ The connection is rejected — and the account left untouched — when the accou
 
 **Ephemeral user lifecycle:**
 - On first connection from an identity, `useradd -m -s /bin/bash -- <username>` runs and the account is recorded in the ownership registry.
-- On every connection, supplementary groups are set to exactly the resolved list with `usermod -G <groups> -- <username>` (from the `ziti-ssh-host.v1` config entry, or `ZITI_SSH_GROUPS`). Groups must already exist on the host; failure is non-fatal and logged.
-- If a sudoers rule is resolved (config entry or `ZITI_SUDOERS_RULE`), it is written to `/etc/sudoers.d/ziti-ssh-host-<username>` (validated with `visudo -c` before installation); otherwise any existing file is removed.
+- On every connection, supplementary groups are set to exactly the resolved list with `usermod -G <groups> -- <username>` (from the `ziti-ssh-host.v1` config entry, or `ZITI_SSH_GROUPS`). Groups must already exist on the host. **If this fails — for example because a group does not exist — the connection is rejected.**
+- If a sudoers rule is resolved (config entry or `ZITI_SUDOERS_RULE`), it is written to `/etc/sudoers.d/ziti-ssh-host-<username>` (validated with `visudo -c` before installation); otherwise any existing file is removed. If the rule cannot be installed, the existing file is removed and the connection is rejected; if an existing file cannot be removed, the connection is rejected.
 - Concurrent sessions from the same identity are reference-counted — `useradd` is only called once.
-- When the last session from an identity closes, the sudoers file is removed. With `ZITI_USER_CLEANUP=true`, the cleanup sequence then runs: `loginctl terminate-user` drains the systemd session, the user's processes (matched by UID) are polled until they exit, escalating to SIGTERM and then SIGKILL, and `userdel -r` removes the account and home directory and its ownership record. Accounts not in the registry with a matching UID are never touched.
+- When the last session from an identity closes, the sudoers file is removed and the account's supplementary groups are cleared. With `ZITI_USER_CLEANUP=true`, the cleanup sequence then runs: `loginctl terminate-user` drains the systemd session, the user's processes (matched by UID) are polled until they exit, escalating to SIGTERM and then SIGKILL, and `userdel -r` removes the account and home directory and its ownership record. Accounts not in the registry with a matching UID are never touched.
 - By default the Linux account is kept after disconnect. Set `ZITI_USER_CLEANUP=true` to delete the account when the last session closes.
-- Usernames with active sessions are persisted to `/var/lib/ziti-ssh-host/managed-users`. On startup, `CleanupOrphans` reads this file: with `ZITI_USER_CLEANUP=true` it deletes each listed account that is still registered (they had sessions open when the process was last killed); otherwise it removes their leftover sudoers files and keeps the accounts.
+- Usernames with active sessions are persisted to `/var/lib/ziti-ssh-host/managed-users`. On startup, `CleanupOrphans` reads this file: with `ZITI_USER_CLEANUP=true` it deletes each listed account that is still registered (they had sessions open when the process was last killed); otherwise it removes their leftover sudoers files, clears their supplementary groups, and keeps the accounts.
 
 **Connecting in per-identity mode:**
 ```sh
@@ -125,7 +125,7 @@ Each host has its own service (e.g., `ssh-web-01`, `ssh-web-02`) with a fully in
 
 ### Constraints
 
-- **Groups must exist on the host.** `ziti-ssh-host` does not create Linux groups. If a config entry references a group that does not exist, `usermod -G` will fail. The failure is logged and the session proceeds with the user account created but without the requested group membership.
+- **Groups must exist on the host.** `ziti-ssh-host` does not create Linux groups. If a config entry references a group that does not exist, `usermod -G` fails and **the connection is rejected** (`rejecting connection: could not apply permissions`). The identity cannot log in to that host until the config is fixed or the group is created. Check with `ziti-ssh-host inspect` after every config change.
 - **First-connection-wins for concurrent cross-service sessions.** If the same identity connects through two services simultaneously, the Linux account is created once with the permissions from the first connection. The second service's config is not applied retroactively.
 - **Any matched config entry suppresses global fallbacks entirely.** An identity matched by an exact key, a glob pattern, or the `"*"` catch-all receives only what that entry specifies — globals are not merged in.
 - **No config attached is not an error.** `ziti-ssh-host` logs a debug message and uses global fallbacks.
@@ -175,6 +175,7 @@ For accounts that are **not** registered, a file of that shape is never removed 
 
 | Log message (prefix) | Meaning |
 |---|---|
+| `rejecting connection: could not apply permissions` (`step` field) | Setting groups or writing/removing the sudoers file failed — usually a group in the config that does not exist on the host, or a sudoers rule `visudo` rejects. Fix the `ziti-ssh-host.v1` entry (or `ZITI_SSH_GROUPS` / `ZITI_SUDOERS_RULE`) or create the group. |
 | `refusing to manage pre-existing account` | Account exists but is not registered. Claim it if it belongs to that identity; otherwise rename or remove the Ziti identity. |
 | `username "<u>" (derived from "<id>") is already in use by Ziti identity` | Two identities derive the same username. Rename one of the identities. |
 | `does not match registered uid` | Account was replaced outside `ziti-ssh-host`. |

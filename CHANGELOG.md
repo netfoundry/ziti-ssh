@@ -15,6 +15,12 @@ See security advisory GHSA-TBD for details.
 - New flag `--cert-source-address` / `ZITI_CERT_SOURCE_ADDRESS` (comma-separated IPs or CIDRs, or `none` to omit the option). Invalid values stop the CA at startup.
 - If something other than the local `ziti-ssh-host` delivers connections to sshd, set this accordingly.
 
+#### Per-identity permissions are applied fail-closed (behaviour change)
+
+- If `ziti-ssh-host` cannot set an account's supplementary groups, remove a legacy sudoers file, or write/remove its sudoers file, the connection is now **rejected** instead of continuing with the account's previous groups and sudoers rule. If a new sudoers rule cannot be installed, the existing file is removed first. Log line: `rejecting connection: could not apply permissions`.
+- **Action:** a group named in a `ziti-ssh-host.v1` entry or `ZITI_SSH_GROUPS` that does not exist on the host now blocks that identity's logins on that host. Verify configs with `ziti-ssh-host inspect`.
+- When the last session closes with `ZITI_USER_CLEANUP=false`, supplementary groups are cleared as well as the sudoers file (also after a restart following a crash).
+
 #### OIDC callback server listens on loopback only and refuses an occupied port
 
 - The temporary OIDC callback server now binds only `127.0.0.1` and `::1` (previously all interfaces), and claims the port before contacting the identity provider. If either address is already in use the flow stops with an error instead of opening the browser. The redirect URI (`http://localhost:<callback_port>/auth/callback`) and default port are unchanged; no identity-provider changes are needed.

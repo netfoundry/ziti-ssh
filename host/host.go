@@ -522,8 +522,9 @@ func (m *UserManager) Registry() *OwnerRegistry { return m.registry }
 // identity (derived-username collision), an account deleted and recreated
 // with a different UID, a UID below MinManagedUID, or a reserved/invalid name.
 //
-// On success, supplementary groups are set to exactly perms.Groups and the
-// sudoers file is written (or removed if perms.SudoersRule is empty). The
+// Supplementary groups are then set to exactly perms.Groups and the sudoers
+// file is written (or removed if perms.SudoersRule is empty); if any of that
+// fails the connection is rejected. The
 // session is counted (only after ownership is verified) and the username
 // recorded in the state file.
 func (m *UserManager) EnsureUser(zitiIdentity, username string, perms IdentityPermissions) error {
@@ -551,29 +552,21 @@ func (m *UserManager) EnsureUser(zitiIdentity, username string, perms IdentityPe
 		return err
 	}
 
-	// Count the session only once ownership is verified. Counting earlier
-	// would let a rejected (e.g. colliding) identity's in-flight attempt make
-	// the owner's final ReleaseUser believe a session is still open and skip
-	// teardown.
+	// Apply the resolved permissions. Any failure rejects the connection
+	// (fail closed): continuing would leave the account with whatever groups
+	// or sudoers rule it had before, which may be more than the current
+	// config grants.
+	if err := m.applyPermissions(zitiIdentity, username, perms); err != nil {
+		return err
+	}
+
+	// Count the session only once ownership is verified and permissions are
+	// applied. Counting earlier would let a rejected attempt make the owner's
+	// final ReleaseUser believe a session is still open and skip teardown.
 	m.mu.Lock()
 	m.sessions[username]++
 	isFirst := m.sessions[username] == 1
 	m.mu.Unlock()
-
-	if err := m.ops.SetGroups(username, perms.Groups); err != nil {
-		// Non-fatal: a missing group reduces permissions rather than blocking.
-		slog.Error("setting supplementary groups failed", "username", username, "groups", perms.Groups, "err", err)
-	}
-	if err := m.ops.RemoveLegacySudoers(username); err != nil {
-		slog.Error("failed to remove legacy sudoers file", "username", username, "err", err)
-	}
-	if perms.SudoersRule != "" {
-		if err := m.ops.InstallSudoers(username, perms.SudoersRule); err != nil {
-			slog.Error("failed to write sudoers file", "username", username, "err", err)
-		}
-	} else if err := m.ops.RemoveSudoers(username); err != nil {
-		slog.Error("failed to remove stale sudoers file", "username", username, "err", err)
-	}
 
 	if isFirst {
 		if err := m.syncStateFile(); err != nil {
@@ -581,6 +574,49 @@ func (m *UserManager) EnsureUser(zitiIdentity, username string, perms IdentityPe
 		}
 	}
 	return nil
+}
+
+// applyPermissions sets the account's supplementary groups to exactly
+// perms.Groups and installs or removes its sudoers file. It returns an error
+// (and the caller rejects the connection) if any step fails. If a new sudoers
+// rule cannot be installed, any existing sudoers file is removed first so an
+// older rule cannot remain in force. Must be called with the per-user lock.
+func (m *UserManager) applyPermissions(zitiIdentity, username string, perms IdentityPermissions) error {
+	reject := func(what string, err error) error {
+		slog.Error("rejecting connection: could not apply permissions",
+			"identity", zitiIdentity, "username", username, "step", what, "err", err)
+		return fmt.Errorf("identity %q: %s for %q: %w", zitiIdentity, what, username, err)
+	}
+	if err := m.ops.SetGroups(username, perms.Groups); err != nil {
+		return reject(fmt.Sprintf("setting supplementary groups %v", perms.Groups), err)
+	}
+	if err := m.ops.RemoveLegacySudoers(username); err != nil {
+		return reject("removing legacy sudoers file", err)
+	}
+	if perms.SudoersRule != "" {
+		if err := m.ops.InstallSudoers(username, perms.SudoersRule); err != nil {
+			if rmErr := m.ops.RemoveSudoers(username); rmErr != nil {
+				slog.Error("could not remove existing sudoers file after failed update",
+					"username", username, "err", rmErr)
+			}
+			return reject("writing sudoers file", err)
+		}
+	} else if err := m.ops.RemoveSudoers(username); err != nil {
+		return reject("removing sudoers file", err)
+	}
+	return nil
+}
+
+// dropPrivileges clears supplementary groups and removes the sudoers file of
+// an owned account with no open sessions. Failures are logged; the next
+// connection re-applies (or rejects) permissions in any case.
+func (m *UserManager) dropPrivileges(username string) {
+	if err := m.ops.RemoveSudoers(username); err != nil {
+		slog.Error("failed to remove sudoers file", "username", username, "err", err)
+	}
+	if err := m.ops.SetGroups(username, nil); err != nil {
+		slog.Error("failed to clear supplementary groups", "username", username, "err", err)
+	}
 }
 
 // ensureOwnedAccount verifies or establishes ownership of username for
@@ -691,10 +727,8 @@ func (m *UserManager) ReleaseUser(username string) error {
 	}
 
 	if !m.cleanupOnDisconnect {
-		slog.Info("last session closed, cleanup disabled — keeping Linux user", "username", username)
-		if err := m.ops.RemoveSudoers(username); err != nil {
-			slog.Error("failed to remove sudoers file", "username", username, "err", err)
-		}
+		slog.Info("last session closed, cleanup disabled — keeping Linux user without supplementary groups or sudoers", "username", username)
+		m.dropPrivileges(username)
 		if err := m.syncStateFile(); err != nil {
 			slog.Error("failed to update state file", "username", username, "err", err)
 		}
@@ -778,9 +812,7 @@ func (m *UserManager) CleanupOrphans() error {
 			// left by a crash, but keep the account.
 			slog.Info("cleanup disabled; keeping account after restart", "username", username)
 			if _, ok := m.verifiedOwnedUID(username); ok {
-				if err := m.ops.RemoveSudoers(username); err != nil {
-					slog.Error("failed to remove orphan sudoers file", "username", username, "err", err)
-				}
+				m.dropPrivileges(username)
 			}
 			continue
 		}

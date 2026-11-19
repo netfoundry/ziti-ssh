@@ -17,6 +17,7 @@
 package host
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,11 +32,18 @@ type fakeOps struct {
 	users     map[string]int // username → uid
 	nextUID   int
 	createErr error
+	fail      map[string]error // op ("groups", "sudoers", "rmsudoers", "rmlegacy") → error to return
 	calls     []string
 }
 
+func (f *fakeOps) failure(op string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.fail[op]
+}
+
 func newFakeOps() *fakeOps {
-	return &fakeOps{users: map[string]int{}, nextUID: 1001}
+	return &fakeOps{users: map[string]int{}, nextUID: 1001, fail: map[string]error{}}
 }
 
 func (f *fakeOps) record(call string) {
@@ -76,11 +84,20 @@ func (f *fakeOps) CreateUser(u string) error {
 
 func (f *fakeOps) SetGroups(u string, g []string) error {
 	f.record("groups:" + u + ":" + strings.Join(g, ","))
-	return nil
+	return f.failure("groups")
 }
-func (f *fakeOps) InstallSudoers(u, r string) error   { f.record("sudoers:" + u); return nil }
-func (f *fakeOps) RemoveSudoers(u string) error       { f.record("rmsudoers:" + u); return nil }
-func (f *fakeOps) RemoveLegacySudoers(u string) error { f.record("rmlegacy:" + u); return nil }
+func (f *fakeOps) InstallSudoers(u, r string) error {
+	f.record("sudoers:" + u)
+	return f.failure("sudoers")
+}
+func (f *fakeOps) RemoveSudoers(u string) error {
+	f.record("rmsudoers:" + u)
+	return f.failure("rmsudoers")
+}
+func (f *fakeOps) RemoveLegacySudoers(u string) error {
+	f.record("rmlegacy:" + u)
+	return f.failure("rmlegacy")
+}
 func (f *fakeOps) DeleteUser(u string, uid int) error {
 	f.record("delete:" + u)
 	f.mu.Lock()
@@ -588,5 +605,105 @@ func TestLegacySudoers_FindAndReconcile(t *testing.T) {
 	}
 	if ops.called("rmlegacy:bob") {
 		t.Error("legacy-format file for unregistered account was removed")
+	}
+}
+
+// ---- H5: fail closed when permissions cannot be applied --------------------
+
+func TestEnsureUser_PermissionFailuresRejectConnection(t *testing.T) {
+	boom := errors.New("boom")
+	cases := []struct {
+		name      string
+		failOp    string
+		perms     IdentityPermissions
+		wantCalls []string // must have been attempted
+		notCalls  []string // must not have been attempted
+	}{
+		{"groups fail", "groups", adminPerms, nil, []string{"sudoers:"}},
+		{"legacy sudoers removal fails", "rmlegacy", adminPerms, nil, []string{"sudoers:"}},
+		// A failed install must also remove any existing file so an older rule
+		// cannot stay in force.
+		{"sudoers install fails", "sudoers", adminPerms, []string{"rmsudoers:alice"}, nil},
+		{"sudoers removal fails (no rule configured)", "rmsudoers", IdentityPermissions{Groups: []string{"dev"}}, nil, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ops := newFakeOps()
+			m := testManager(t, t.TempDir(), ops, false)
+			ops.fail[tc.failOp] = boom
+
+			err := m.EnsureUser("alice", "alice", tc.perms)
+			if err == nil || !errors.Is(err, boom) {
+				t.Fatalf("want rejection wrapping the failure, got %v", err)
+			}
+			if n := m.sessions["alice"]; n != 0 {
+				t.Errorf("rejected connection counted as a session (count %d)", n)
+			}
+			for _, c := range tc.wantCalls {
+				if !ops.called(c) {
+					t.Errorf("expected call %q; calls: %v", c, ops.calls)
+				}
+			}
+			for _, c := range tc.notCalls {
+				if ops.called(c) {
+					t.Errorf("unexpected call %q after failure; calls: %v", c, ops.calls)
+				}
+			}
+		})
+	}
+}
+
+func TestEnsureUser_RecoversAfterConfigFixed(t *testing.T) {
+	ops := newFakeOps()
+	m := testManager(t, t.TempDir(), ops, false)
+	ops.fail["groups"] = errors.New("group 'dokcer' does not exist")
+	if err := m.EnsureUser("alice", "alice", adminPerms); err == nil {
+		t.Fatal("want rejection while config is broken")
+	}
+	delete(ops.fail, "groups")
+	if err := m.EnsureUser("alice", "alice", adminPerms); err != nil {
+		t.Fatalf("connection still rejected after config fixed: %v", err)
+	}
+	if m.sessions["alice"] != 1 {
+		t.Errorf("session count = %d, want 1", m.sessions["alice"])
+	}
+}
+
+func TestReleaseUser_ClearsGroupsAndSudoersWhenKeepingAccount(t *testing.T) {
+	ops := newFakeOps()
+	m := testManager(t, t.TempDir(), ops, false) // cleanup off: account kept
+	if err := m.EnsureUser("alice", "alice", adminPerms); err != nil {
+		t.Fatal(err)
+	}
+	ops.calls = nil
+	if err := m.ReleaseUser("alice"); err != nil {
+		t.Fatal(err)
+	}
+	if !ops.called("groups:alice:") || ops.called("groups:alice:sudo") {
+		t.Errorf("supplementary groups not cleared on last release: %v", ops.calls)
+	}
+	if !ops.called("rmsudoers:alice") {
+		t.Errorf("sudoers not removed on last release: %v", ops.calls)
+	}
+	if ops.called("delete:") {
+		t.Errorf("account deleted with cleanup disabled: %v", ops.calls)
+	}
+}
+
+func TestCleanupOrphans_ClearsGroupsWhenKeepingAccounts(t *testing.T) {
+	dir := t.TempDir()
+	ops := newFakeOps()
+	m := testManager(t, dir, ops, false)
+	if err := m.EnsureUser("alice", "alice", adminPerms); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a crash: state file still lists alice; a new manager starts.
+	m2 := testManager(t, dir, ops, false)
+	ops.calls = nil
+	if err := m2.CleanupOrphans(); err != nil {
+		t.Fatal(err)
+	}
+	if !ops.called("groups:alice:") || !ops.called("rmsudoers:alice") {
+		t.Errorf("orphan privileges not dropped after restart: %v", ops.calls)
 	}
 }

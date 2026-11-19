@@ -327,9 +327,9 @@ Example: `Alice` → `alice`, `dba-Alice` → `dba-alice`, `123bot` → `z123bot
 
 **Ephemeral user lifecycle:**
 - `ziti-ssh-host run` creates the user with `useradd -m -s /bin/bash -- <username>` on the first connection from that identity and records it in the ownership registry.
-- Permissions are resolved (config entry → global fallback) and applied on every connect: `usermod -G <groups>` (replaces supplementary groups) for group membership, `/etc/sudoers.d/ziti-ssh-host-<username>` for sudoers (validated with `visudo -c` before installation). Group failures are non-fatal and logged.
+- Permissions are resolved (config entry → global fallback) and applied on every connect: `usermod -G <groups>` (replaces supplementary groups) for group membership, `/etc/sudoers.d/ziti-ssh-host-<username>` for sudoers (validated with `visudo -c` before installation). If setting the groups, writing or removing the sudoers file, or removing a legacy sudoers file fails, the connection is **rejected** (fail closed); if a new sudoers rule cannot be installed, any existing sudoers file is removed first so an older rule cannot stay in force. The session is counted only after permissions are applied.
 - A reference count tracks concurrent sessions for the same identity.
-- When the last session closes, the sudoers file is removed; with `ZITI_USER_CLEANUP=true` the cleanup sequence then runs: `loginctl terminate-user`, process poll by UID with SIGTERM/SIGKILL escalation, `userdel -r`, and the registry record is removed.
+- When the last session closes, the sudoers file is removed and supplementary groups are cleared; with `ZITI_USER_CLEANUP=true` the cleanup sequence then runs: `loginctl terminate-user`, process poll by UID with SIGTERM/SIGKILL escalation, `userdel -r`, and the registry record is removed.
 - The set of usernames with active sessions is persisted to `/var/lib/ziti-ssh-host/managed-users` (one username per line). On startup, `CleanupOrphans` reads this file and, in cleanup mode, deletes listed accounts that are still registered (they had active sessions when the process was killed).
 - By default the Linux account is kept after disconnect. Set `ZITI_USER_CLEANUP=true` to delete the account when the last session closes (useful when ephemeral-only accounts are required). The sudoers file is still removed on disconnect.
 
