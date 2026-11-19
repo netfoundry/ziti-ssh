@@ -475,6 +475,12 @@ func runSCP(p scpParams) error {
 	if _, ok := zitiCtx.GetService(remoteHost); ok {
 		dialService = remoteHost
 		terminatorAddr = ""
+		fmt.Fprintf(os.Stderr, "Dialing service %q directly: any host bound to it may answer.\n", dialService)
+	}
+
+	hostKeyCallback, err := client.NewHostKeyCallback(dialService, terminatorAddr)
+	if err != nil {
+		return err
 	}
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), p.zitiTimeout)
@@ -508,7 +514,7 @@ func runSCP(p scpParams) error {
 		slog.Info("uploading", "user", remoteUser, "host", remoteHost, "remote_path", dstRemote.path, "local_paths", localPaths)
 		return client.RunSFTP(netConn, remoteUser, remoteHost, signer,
 			true, localPaths, dstRemote.path,
-			p.recursive, p.preserve, p.quiet)
+			p.recursive, p.preserve, p.quiet, hostKeyCallback)
 	}
 
 	// Download: srcs are remote, dst is local.
@@ -519,7 +525,7 @@ func runSCP(p scpParams) error {
 	slog.Info("downloading", "user", remoteUser, "host", remoteHost, "remote_paths", remotePaths, "local_dst", dstLocal)
 	return client.RunSFTP(netConn, remoteUser, remoteHost, signer,
 		false, remotePaths, dstLocal,
-		p.recursive, p.preserve, p.quiet)
+		p.recursive, p.preserve, p.quiet, hostKeyCallback)
 }
 
 // version is set at build time via -ldflags "-X main.version=<ver>".

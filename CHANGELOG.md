@@ -21,6 +21,13 @@ See security advisory GHSA-TBD for details.
 - An entry exceeding the policy rejects the connection (`rejecting connection: permissions refused by host grant policy`); violations are logged at config load/reload; `ziti-ssh-host inspect` shows the policy and refused entries. Invalid policy settings stop `run` in per-identity mode.
 - **Action:** configs that grant `sudoers_rule` or privileged groups are refused until each host opts the service in. Run `ziti-ssh-host inspect --service <name>` before upgrading.
 
+#### Host keys checked on every connection (trust on first use)
+
+- `ziti-ssh` and `ziti-scp` no longer accept any SSH host key. They remember the key(s) seen for each Ziti address in `$XDG_CONFIG_HOME/ziti-ssh/known_hosts` (0600). A host dialed by name (`<host>@<service>`) with a changed key is refused; for a service dialed directly, where any bound host may answer, the user is asked before an additional key is trusted (refused without a terminal). OpenZiti does not tell the dialer which identity answered, so this detects impersonation after the first connection.
+- New `ziti-ssh known-hosts list|remove <address>`.
+- Dialing a service directly now prints `Dialing service "…" directly: any host bound to it may answer.` (`ziti-ssh`, `ziti-scp`, `ziti-ssh proxy`).
+- **Action:** after rebuilding a host, users run `ziti-ssh known-hosts remove <host>@<service>`.
+
 #### Certificate-only login for Ziti-managed accounts
 
 - The sshd drop-in now contains `Match Group ziti-ssh-managed` with `AuthorizedKeysFile none` and `AuthorizedKeysCommand none`, so members of that group can only log in with a CA certificate; a key added to their own `authorized_keys` can no longer outlive their certificate or identity. Other accounts are unaffected.

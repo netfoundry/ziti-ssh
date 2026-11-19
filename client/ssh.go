@@ -252,15 +252,14 @@ func CertNeedsRefresh(certPath string) bool {
 // restored on return (even on error).
 //
 // Host key verification is intentionally skipped. The connection arrives over
-// a Ziti overlay that enforces mutual TLS using the controller's PKI — the
-// host's Ziti identity is cryptographically proven before any SSH bytes are
-// exchanged. A traditional known-hosts check would be redundant and weaker
-// than the guarantee Ziti already provides.
-func RunSession(conn net.Conn, user, host string, signer ssh.Signer, forwardAgent bool) error {
+// a Ziti overlay, but OpenZiti does not tell the dialer which identity
+// answered, so hostKeyCallback (normally HostKeyCallback) checks the host key
+// against keys seen before for that Ziti address.
+func RunSession(conn net.Conn, user, host string, signer ssh.Signer, forwardAgent bool, hostKeyCallback ssh.HostKeyCallback) error {
 	cfg := &ssh.ClientConfig{
 		User:            user,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec
+		HostKeyCallback: hostKeyCallback,
 	}
 
 	clientConn, chans, reqs, err := ssh.NewClientConn(conn, host, cfg)
@@ -399,14 +398,12 @@ func ForwardAgent(sshClient *ssh.Client, session *ssh.Session) error {
 // behaviour of standard ssh(1). Other errors (handshake failure, session
 // open failure, etc.) are returned normally so the caller can log them.
 //
-// Host key verification is intentionally skipped for the same reason as
-// RunSession — the Ziti overlay enforces mutual TLS before any SSH bytes are
-// exchanged.
-func RunCommand(conn net.Conn, user, host, command string, signer ssh.Signer) error {
+// The host key is checked by hostKeyCallback (see RunSession).
+func RunCommand(conn net.Conn, user, host, command string, signer ssh.Signer, hostKeyCallback ssh.HostKeyCallback) error {
 	cfg := &ssh.ClientConfig{
 		User:            user,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec
+		HostKeyCallback: hostKeyCallback,
 	}
 
 	clientConn, chans, reqs, err := ssh.NewClientConn(conn, host, cfg)
@@ -444,12 +441,12 @@ func RunCommand(conn net.Conn, user, host, command string, signer ssh.Signer) er
 // port forwards independently. The caller is responsible for calling
 // client.Close() when done.
 //
-// Host key verification is intentionally skipped (see RunSession for rationale).
-func NewSSHClient(conn net.Conn, user, host string, signer ssh.Signer) (*ssh.Client, error) {
+// The host key is checked by hostKeyCallback (see RunSession).
+func NewSSHClient(conn net.Conn, user, host string, signer ssh.Signer, hostKeyCallback ssh.HostKeyCallback) (*ssh.Client, error) {
 	cfg := &ssh.ClientConfig{
 		User:            user,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec
+		HostKeyCallback: hostKeyCallback,
 	}
 	clientConn, chans, reqs, err := ssh.NewClientConn(conn, host, cfg)
 	if err != nil {

@@ -61,16 +61,14 @@ func RunSFTP(
 	recursive bool,
 	preserve bool,
 	quiet bool,
+	hostKeyCallback ssh.HostKeyCallback,
 ) error {
 	cfg := &ssh.ClientConfig{
-		User:            user,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		// Host key verification is intentionally skipped. The connection arrives
-		// over a Ziti overlay that enforces mutual TLS using the controller's
-		// PKI — the host's Ziti identity is cryptographically proven before any
-		// SSH bytes are exchanged. A traditional known-hosts check would be
-		// redundant and weaker than the guarantee Ziti already provides.
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec
+		User: user,
+		Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		// OpenZiti does not tell the dialer which identity answered, so the
+		// host key is checked against keys seen before (see HostKeyCallback).
+		HostKeyCallback: hostKeyCallback,
 	}
 
 	clientConn, chans, reqs, err := ssh.NewClientConn(conn, host, cfg)

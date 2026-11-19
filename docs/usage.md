@@ -83,6 +83,26 @@ The remote process exit code is propagated: if the remote command exits non-zero
 
 ---
 
+### Host keys (trust on first use)
+
+OpenZiti does not tell `ziti-ssh` which identity answered on a host's address, so `ziti-ssh` and `ziti-scp` remember the SSH host key(s) they have seen for each Ziti address in `$XDG_CONFIG_HOME/ziti-ssh/known_hosts` (default under `~/.config/ziti-ssh/`, mode 0600) and check them on every connection:
+
+| You connect to | First connection | Same key later | Different key later |
+|---|---|---|---|
+| A host by name (`ziggy@web-server-prod`; address `web-server-prod@ssh`) | Key saved; `Permanently added host key …` printed | Connects | **Refused** with a warning showing both fingerprints |
+| A service directly (`ziggy@ssh-db-pool`, when `ssh-db-pool` is a service; address `ssh-db-pool`) — any host bound to it may answer | Key saved | Connects | Warning, then **asked** `Trust this additional key for ssh-db-pool? [y/N]`. Yes adds it, so each member of a pool is accepted once. Without a terminal (scripts, pipes) it is refused — connect interactively once. |
+
+When a target is a service name, `ziti-ssh` prints `Dialing service "…" directly: any host bound to it may answer.`
+
+After a host was legitimately rebuilt (new host key):
+
+```sh
+ziti-ssh known-hosts list                       # address, key type, SHA256 fingerprint
+ziti-ssh known-hosts remove web-server-prod@ssh # then reconnect to save the new key
+```
+
+This catches a host being impersonated **after** you have connected to it once; it cannot verify the very first connection. `ziti-ssh proxy` (OpenSSH `ProxyCommand`) is not affected: OpenSSH applies its own known_hosts checks, keyed by the `Host` name.
+
 ## Port forwarding
 
 `ziti-ssh connect` supports the same `-L`, `-R`, and `-D` forwarding flags as `ssh(1)`. All forwards run over the Ziti overlay — no port 22 exposure required.

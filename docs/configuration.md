@@ -65,6 +65,15 @@ All binaries resolve each setting in the same order: CLI flag > environment vari
 
 ---
 
+### `ziti-ssh known-hosts`
+
+| Subcommand | Description |
+|---|---|
+| `list` | List remembered host keys: Ziti address, key type, SHA256 fingerprint |
+| `remove <address>` | Forget the key(s) for an address (`<host>@<service>` or `<service>`), e.g. after a host was rebuilt |
+
+Host keys are stored in `$XDG_CONFIG_HOME/ziti-ssh/known_hosts` (default under `~/.config/ziti-ssh/`). See [usage.md](usage.md#host-keys-trust-on-first-use).
+
 ## `ziti-ssh-ca`
 
 | Flag | Environment variable | Default | Required | Description |

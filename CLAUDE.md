@@ -117,6 +117,8 @@ Seven subcommands:
 
 **`list`**: Calls `ctx.GetServices()` and prints each service name and permissions.
 
+**`known-hosts list|remove <address>`**: shows or forgets remembered SSH host keys (`client.KnownHosts`).
+
 **`mfa enable/verify/remove`**: Uses `zitiCtx.EnrollZitiMfa`, `VerifyZitiMfa`, `RemoveZitiMfa` with `AddMfaTotpCodeListener` / `AddAuthenticationStateFullListener` event hooks.
 
 **OIDC authentication**: When `--oidc-issuer` is set (or `oidc.issuer` in the config file), `connect`, `sign`, and `proxy` perform a browser-based OIDC authorization code flow (PKCE when no client secret) before authenticating with Ziti. The resulting JWT is added to the Ziti context via `AddJWT()`, satisfying ext-jwt-signer policies on the controller. Flow times out after 2 minutes. The callback port is claimed on loopback only (`127.0.0.1` and `::1`) before the IdP is contacted, and the flow aborts if either address is already in use (`listenLoopback`); the login URL is printed to stderr before a non-fatal browser launch. Implemented in `cmd/ziti-ssh/oidc.go` and `internal/oidc/oidc.go`.
@@ -128,14 +130,15 @@ Config file at `~/.config/ziti-ssh/config.yaml` (XDG_CONFIG_HOME respected). Fie
 - `NewCertSigner(keyPath string) (ssh.Signer, error)` — loads key and cert; returns `ssh.CertSigner` if cert present.
 - `CertNeedsRefresh(certPath string) bool` — true if cert absent or less than 20% of its lifetime remains (between 30 s and 5 min — 1 minute for the default 5-minute certificate).
 - `ReadCAResponse(r) (string, error)` / `ValidateSignedCert(line, pubKeyLine) ([]byte, error)` (`client/certs.go`) — bounded read of the CA reply; returns `*CARejectedError` for `error: …` replies and rejects anything but a user cert for the caller's key, so a bad reply never overwrites a valid cert.
-- `NewSSHClient(conn net.Conn, user, host string, signer ssh.Signer) (*ssh.Client, error)` — performs the SSH handshake and returns a raw `*ssh.Client` for forwarding use cases.
-- `RunSession(conn net.Conn, user, host string, signer ssh.Signer, forwardAgent bool) error` — PTY SSH session over an existing `net.Conn`; when `forwardAgent` is true, calls `ForwardAgent` before `session.Shell()`.
+- `NewSSHClient(conn net.Conn, user, host string, signer ssh.Signer, hostKeyCallback ssh.HostKeyCallback) (*ssh.Client, error)` — performs the SSH handshake and returns a raw `*ssh.Client` for forwarding use cases.
+- `RunSession(conn net.Conn, user, host string, signer ssh.Signer, forwardAgent bool, hostKeyCallback ssh.HostKeyCallback) error` — PTY SSH session over an existing `net.Conn`; when `forwardAgent` is true, calls `ForwardAgent` before `session.Shell()`.
 - `ForwardAgent(sshClient *ssh.Client, session *ssh.Session) error` — connects to `SSH_AUTH_SOCK`, calls `agent.ForwardToAgent` on the client and `agent.RequestAgentForwarding` on the session; returns an error (non-fatal by convention) if `SSH_AUTH_SOCK` is unset or agent is unreachable.
-- `RunCommand(conn net.Conn, user, host, cmd string, signer ssh.Signer) error` — non-interactive command execution; propagates remote exit code via `os.Exit`.
+- `RunCommand(conn net.Conn, user, host, cmd string, signer ssh.Signer, hostKeyCallback ssh.HostKeyCallback) error` — non-interactive command execution; propagates remote exit code via `os.Exit`.
 - `RunLocalForward(ctx, sshClient, LocalForwardSpec) error` — local port forward (-L); listens locally, tunnels via `direct-tcpip`; runs until ctx cancelled.
 - `RunRemoteForward(ctx, sshClient, RemoteForwardSpec) error` — remote port forward (-R); uses `sshClient.Listen`; runs until ctx cancelled.
 - `RunDynamicProxy(ctx, sshClient, DynamicForwardSpec) error` — SOCKS5 proxy (-D); implements RFC 1928 CONNECT with no-auth; runs until ctx cancelled.
-- `RunSFTP(conn, user, host, signer, isUpload, localPaths, remotePath, recursive, preserve, quiet) error` — SFTP file copy over an existing `net.Conn`; uses `github.com/pkg/sftp`.
+- `NewHostKeyCallback(service, terminator string) (ssh.HostKeyCallback, error)` (`client/hostkeys.go`) — trust-on-first-use host keys in `~/.config/ziti-ssh/known_hosts`, keyed by Ziti address (`<terminator>@<service>`, or `<service>` for a direct service dial). Terminator address: a changed key is refused. Direct service dial (any bound host may answer): the user is asked to trust an additional key (refused without a terminal). Replaces `InsecureIgnoreHostKey`; OpenZiti cannot tell the dialer which identity answered (H8).
+- `RunSFTP(conn, user, host, signer, isUpload, localPaths, remotePath, recursive, preserve, quiet, hostKeyCallback) error` — SFTP file copy over an existing `net.Conn`; uses `github.com/pkg/sftp`.
 
 ### File Copy Tool (`ziti-scp`)
 

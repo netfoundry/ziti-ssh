@@ -213,7 +213,7 @@ For accounts that are **not** registered, a file of that shape is never removed 
 
 ## Host identity (terminator names)
 
-`ziti-ssh connect web-server-prod` asks the Ziti network for the terminator **named** `web-server-prod` on the `ssh` service. In OpenZiti, a terminator name is an address chosen by whoever binds the service (`ziti-ssh-host` uses its own identity name), not a verified identity. The controller only ensures that, at any moment, all terminators with one name belong to the same identity. When the real host is offline, **any identity with Bind on the service** can register that name, and clients cannot tell — OpenZiti does not tell the dialer which identity answered, and `ziti-ssh` does not yet verify SSH host keys.
+`ziti-ssh connect web-server-prod` asks the Ziti network for the terminator **named** `web-server-prod` on the `ssh` service. In OpenZiti, a terminator name is an address chosen by whoever binds the service (`ziti-ssh-host` uses its own identity name), not a verified identity. The controller only ensures that, at any moment, all terminators with one name belong to the same identity. When the real host is offline, **any identity with Bind on the service** can register that name — OpenZiti does not tell the dialer which identity answered. `ziti-ssh` and `ziti-scp` mitigate this by remembering each address's SSH host key on first use and refusing a changed key (or, for a service dialed directly, asking before trusting an additional pool member's key) — see [Host keys](usage.md#host-keys-trust-on-first-use). That detects impersonation after a first connection, not on it.
 
 What this means in practice:
 

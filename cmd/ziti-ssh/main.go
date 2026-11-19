@@ -551,10 +551,16 @@ func runConnect(p connectParams) error {
 		// Target matches a known service name: dial it directly.
 		dialService = host
 		terminatorAddr = ""
+		fmt.Fprintf(os.Stderr, "Dialing service %q directly: any host bound to it may answer.\n", dialService)
 	}
 
 	if p.verbose {
 		fmt.Fprintf(os.Stderr, "%-12s %s @ %s\n", "Connecting:", username, host)
+	}
+
+	hostKeyCallback, err := client.NewHostKeyCallback(dialService, terminatorAddr)
+	if err != nil {
+		return err
 	}
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), p.zitiTimeout)
@@ -586,14 +592,14 @@ func runConnect(p connectParams) error {
 	if !hasForwards {
 		if p.command != "" {
 			slog.Debug("running remote command", "user", username, "host", host, "command", p.command)
-			return client.RunCommand(netConn, username, host, p.command, signer)
+			return client.RunCommand(netConn, username, host, p.command, signer, hostKeyCallback)
 		}
 		slog.Debug("SSH session starting", "user", username, "host", host)
-		return client.RunSession(netConn, username, host, signer, p.forwardAgent)
+		return client.RunSession(netConn, username, host, signer, p.forwardAgent, hostKeyCallback)
 	}
 
 	// Build an *ssh.Client for forwarding (and optionally a shell session).
-	sshClient, err := client.NewSSHClient(netConn, username, host, signer)
+	sshClient, err := client.NewSSHClient(netConn, username, host, signer, hostKeyCallback)
 	if err != nil {
 		return err
 	}
@@ -840,6 +846,7 @@ func runProxy(p proxyParams) error {
 	} else if _, ok := zitiCtx.GetService(host); ok {
 		dialService = host
 		terminatorAddr = ""
+		fmt.Fprintf(os.Stderr, "Dialing service %q directly: any host bound to it may answer.\n", dialService)
 	}
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), p.zitiTimeout)
@@ -1566,6 +1573,7 @@ Example:
 		},
 	}
 	root.AddCommand(versionCmd)
+	root.AddCommand(newKnownHostsCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -1586,4 +1594,57 @@ func checkAgentForwarding(forward, unverified bool) error {
 			"To forward anyway, add --forward-agent-unverified (the CA must also grant permit-agent-forwarding)")
 	}
 	return nil
+}
+
+// newKnownHostsCmd builds "ziti-ssh known-hosts list|remove".
+func newKnownHostsCmd() *cobra.Command {
+	store := func() (client.KnownHosts, error) {
+		path, err := client.DefaultKnownHostsPath()
+		return client.KnownHosts{Path: path}, err
+	}
+	khCmd := &cobra.Command{
+		Use:   "known-hosts",
+		Short: "Show or remove remembered SSH host keys",
+		Long: `ziti-ssh remembers the SSH host key(s) seen for each Ziti address and refuses
+a changed key ("<host>@<service>" addresses) or asks before trusting an
+additional key (services dialed directly, where any bound host may answer).
+
+Addresses are "<host>@<service>" for hosts dialed by name, or "<service>" for
+services dialed directly.`,
+	}
+	khCmd.AddCommand(&cobra.Command{
+		Use:          "list",
+		Short:        "List remembered host keys",
+		Args:         cobra.NoArgs,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			kh, err := store()
+			if err != nil {
+				return err
+			}
+			return kh.List(os.Stdout)
+		},
+	})
+	khCmd.AddCommand(&cobra.Command{
+		Use:          "remove <address>",
+		Short:        "Forget the host key(s) for an address, e.g. after a host was rebuilt",
+		Args:         cobra.ExactArgs(1),
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			kh, err := store()
+			if err != nil {
+				return err
+			}
+			n, err := kh.Remove(args[0])
+			if err != nil {
+				return err
+			}
+			if n == 0 {
+				return fmt.Errorf("no host keys remembered for %q (see: ziti-ssh known-hosts list)", args[0])
+			}
+			fmt.Printf("Removed %d host key(s) for %s\n", n, args[0])
+			return nil
+		},
+	})
+	return khCmd
 }
