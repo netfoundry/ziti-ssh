@@ -24,6 +24,25 @@ curl -sSL https://get.netfoundry.io/linux-install.bash | sudo bash -s ziti-scp
 
 The install script configures the repository and installs the latest stable package. Subsequent upgrades are handled by the system package manager (`apt upgrade` / `yum update`).
 
+### Verifying packages
+
+Packages from the repository are verified automatically by `apt` / `dnf`: the repository index is GPG-signed and lists each package's checksum. The packages themselves are not individually signed.
+
+Each release built from a tag also publishes:
+
+- **`SHA256SUMS`** — attached to the GitHub release; the checksums of every `.deb` and `.rpm` the release workflow built.
+- **Build provenance attestations** — signed by GitHub Actions, linking each package to the commit and workflow run that built it.
+
+To check a package file (for example one fetched with `apt-get download ziti-ssh` or `dnf download ziti-ssh`):
+
+```sh
+# Checksum (run in the directory holding the package and SHA256SUMS)
+sha256sum --check --ignore-missing SHA256SUMS
+
+# Provenance (needs a GitHub CLI that has the `attestation` command)
+gh attestation verify ziti-ssh_<version>-1_amd64.deb --repo netfoundry/ziti-ssh
+```
+
 ---
 
 ## Build packages locally

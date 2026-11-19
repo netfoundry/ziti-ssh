@@ -168,6 +168,10 @@ See security advisory GHSA-TBD for details.
 - `ziti-ssh-ca` and `ziti-ssh-host` stop and disable their service on removal (not on upgrade).
 - `apt purge ziti-ssh-host` removes the sshd drop-in and `/etc/ssh/ziti_ca.pub` and reloads sshd, so the host stops trusting the CA; identities, env files, the ownership registry and Linux accounts are kept. `apt purge ziti-ssh-ca` removes its managed systemd drop-in. rpm has no purge — see `docs/provisioning.md` (Uninstalling).
 
+#### Release checksums and build provenance
+
+- Tagged releases attach `SHA256SUMS` (every `.deb` and `.rpm`) to the GitHub release and publish a GitHub build provenance attestation for each package (`actions/attest-build-provenance`). Verify with `sha256sum --check` or `gh attestation verify <package> --repo netfoundry/ziti-ssh`; see `docs/building.md` (Verifying packages). Repository installs are unchanged (signed repository index).
+
 #### Docker package build
 
 - Added `.dockerignore` so the build context excludes `.git`, `dist/`, local binaries, `*.jwt`, `*.json` (identity files), key material and local security notes (previously `COPY . .` could copy an enrollment JWT into the image).
