@@ -45,6 +45,7 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -124,78 +125,149 @@ func orDefault(val, fallback string) string {
 // Port-forward spec parsing
 // ---------------------------------------------------------------------------
 
+// splitForwardSpec splits a forwarding spec on ':' like ssh(1), except that
+// an IPv6 address may be written in brackets ("[::1]", "[2001:db8::1]"); the
+// brackets are removed from the returned field.
+func splitForwardSpec(s string) ([]string, error) {
+	var fields []string
+	for {
+		var field string
+		if strings.HasPrefix(s, "[") {
+			end := strings.IndexByte(s, ']')
+			if end < 0 {
+				return nil, fmt.Errorf("unterminated '[' in %q", s)
+			}
+			field, s = s[1:end], s[end+1:]
+			if s != "" && s[0] != ':' {
+				return nil, fmt.Errorf("expected ':' after ']' in %q", s)
+			}
+		} else if i := strings.IndexByte(s, ':'); i >= 0 {
+			field, s = s[:i], s[i:]
+		} else {
+			field, s = s, ""
+		}
+		fields = append(fields, field)
+		if s == "" {
+			return fields, nil
+		}
+		s = s[1:] // skip ':'
+	}
+}
+
+// validPort reports whether p is a TCP port number 1–65535.
+func validPort(p string) error {
+	n, err := strconv.Atoi(p)
+	if err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("invalid port %q", p)
+	}
+	return nil
+}
+
+// isLoopbackBind reports whether a local bind address only accepts
+// connections from this machine.
+func isLoopbackBind(bind string) bool {
+	if bind == "" || bind == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(bind)
+	return ip != nil && ip.IsLoopback()
+}
+
+// warnNonLoopbackBind prints a warning when a local forward or SOCKS listener
+// is reachable from other machines: it has no authentication of its own.
+func warnNonLoopbackBind(flag, bind string) {
+	if !isLoopbackBind(bind) {
+		fmt.Fprintf(os.Stderr, "Warning: %s listener on %q is reachable from other machines and has no authentication;\n"+
+			"anyone who can connect to it can use your session.\n", flag, bind)
+	}
+}
+
 // parseLocalForward parses a -L spec of the form:
 //
 //	[bind:]localport:remotehost:remoteport
 //
 // A bare 3-part form (localport:remotehost:remoteport) binds to 127.0.0.1.
+// IPv6 addresses are written in brackets: [::1]:8080:[2001:db8::1]:80.
 func parseLocalForward(s string) (client.LocalForwardSpec, error) {
-	parts := strings.Split(s, ":")
+	usage := fmt.Errorf("invalid -L spec %q: expected [bind:]localport:remotehost:remoteport", s)
+	parts, err := splitForwardSpec(s)
+	if err != nil {
+		return client.LocalForwardSpec{}, fmt.Errorf("invalid -L spec: %w", err)
+	}
+	var spec client.LocalForwardSpec
 	switch len(parts) {
 	case 3:
-		// localport:remotehost:remoteport
-		return client.LocalForwardSpec{
-			Bind:       "127.0.0.1",
-			LocalPort:  parts[0],
-			RemoteHost: parts[1],
-			RemotePort: parts[2],
-		}, nil
+		spec = client.LocalForwardSpec{Bind: "127.0.0.1", LocalPort: parts[0], RemoteHost: parts[1], RemotePort: parts[2]}
 	case 4:
-		// bind:localport:remotehost:remoteport
-		return client.LocalForwardSpec{
-			Bind:       parts[0],
-			LocalPort:  parts[1],
-			RemoteHost: parts[2],
-			RemotePort: parts[3],
-		}, nil
+		spec = client.LocalForwardSpec{Bind: parts[0], LocalPort: parts[1], RemoteHost: parts[2], RemotePort: parts[3]}
 	default:
-		return client.LocalForwardSpec{}, fmt.Errorf(
-			"invalid -L spec %q: expected [bind:]localport:remotehost:remoteport", s)
+		return client.LocalForwardSpec{}, usage
 	}
+	if spec.RemoteHost == "" {
+		return client.LocalForwardSpec{}, usage
+	}
+	for _, p := range []string{spec.LocalPort, spec.RemotePort} {
+		if err := validPort(p); err != nil {
+			return client.LocalForwardSpec{}, fmt.Errorf("invalid -L spec %q: %w", s, err)
+		}
+	}
+	return spec, nil
 }
 
 // parseRemoteForward parses a -R spec of the form:
 //
 //	[bind:]remoteport:localhost:localport
+//
+// IPv6 addresses are written in brackets.
 func parseRemoteForward(s string) (client.RemoteForwardSpec, error) {
-	parts := strings.Split(s, ":")
+	usage := fmt.Errorf("invalid -R spec %q: expected [bind:]remoteport:localhost:localport", s)
+	parts, err := splitForwardSpec(s)
+	if err != nil {
+		return client.RemoteForwardSpec{}, fmt.Errorf("invalid -R spec: %w", err)
+	}
+	var spec client.RemoteForwardSpec
 	switch len(parts) {
 	case 3:
-		// remoteport:localhost:localport
-		return client.RemoteForwardSpec{
-			Bind:       "",
-			RemotePort: parts[0],
-			LocalHost:  parts[1],
-			LocalPort:  parts[2],
-		}, nil
+		spec = client.RemoteForwardSpec{RemotePort: parts[0], LocalHost: parts[1], LocalPort: parts[2]}
 	case 4:
-		// bind:remoteport:localhost:localport
-		return client.RemoteForwardSpec{
-			Bind:       parts[0],
-			RemotePort: parts[1],
-			LocalHost:  parts[2],
-			LocalPort:  parts[3],
-		}, nil
+		spec = client.RemoteForwardSpec{Bind: parts[0], RemotePort: parts[1], LocalHost: parts[2], LocalPort: parts[3]}
 	default:
-		return client.RemoteForwardSpec{}, fmt.Errorf(
-			"invalid -R spec %q: expected [bind:]remoteport:localhost:localport", s)
+		return client.RemoteForwardSpec{}, usage
 	}
+	if spec.LocalHost == "" {
+		return client.RemoteForwardSpec{}, usage
+	}
+	for _, p := range []string{spec.RemotePort, spec.LocalPort} {
+		if err := validPort(p); err != nil {
+			return client.RemoteForwardSpec{}, fmt.Errorf("invalid -R spec %q: %w", s, err)
+		}
+	}
+	return spec, nil
 }
 
 // parseDynamicForward parses a -D spec of the form:
 //
 //	[bind:]port
+//
+// IPv6 bind addresses are written in brackets: [::1]:1080.
 func parseDynamicForward(s string) (client.DynamicForwardSpec, error) {
-	parts := strings.Split(s, ":")
+	parts, err := splitForwardSpec(s)
+	if err != nil {
+		return client.DynamicForwardSpec{}, fmt.Errorf("invalid -D spec: %w", err)
+	}
+	var spec client.DynamicForwardSpec
 	switch len(parts) {
 	case 1:
-		return client.DynamicForwardSpec{Bind: "127.0.0.1", LocalPort: parts[0]}, nil
+		spec = client.DynamicForwardSpec{Bind: "127.0.0.1", LocalPort: parts[0]}
 	case 2:
-		return client.DynamicForwardSpec{Bind: parts[0], LocalPort: parts[1]}, nil
+		spec = client.DynamicForwardSpec{Bind: parts[0], LocalPort: parts[1]}
 	default:
-		return client.DynamicForwardSpec{}, fmt.Errorf(
-			"invalid -D spec %q: expected [bind:]port", s)
+		return client.DynamicForwardSpec{}, fmt.Errorf("invalid -D spec %q: expected [bind:]port", s)
 	}
+	if err := validPort(spec.LocalPort); err != nil {
+		return client.DynamicForwardSpec{}, fmt.Errorf("invalid -D spec %q: %w", s, err)
+	}
+	return spec, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1300,6 +1372,7 @@ Examples:
 				if err != nil {
 					return err
 				}
+				warnNonLoopbackBind("-L", spec.Bind)
 				localFwds = append(localFwds, spec)
 			}
 			var remoteFwds []client.RemoteForwardSpec
@@ -1316,6 +1389,7 @@ Examples:
 				if err != nil {
 					return err
 				}
+				warnNonLoopbackBind("-D", spec.Bind)
 				dynFwds = append(dynFwds, spec)
 			}
 

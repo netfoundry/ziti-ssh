@@ -130,6 +130,7 @@ See security advisory GHSA-TBD for details.
 
 - `ziti-ssh` and `ziti-scp` split `[user@]target` at the last `@` (as OpenSSH does), so per-identity user names such as `alice@corp.com` work (`ziti-ssh alice@corp.com@web1`). Previously the target became `corp.com@web1`.
 - `ziti-scp` treats an argument as remote only if it contains `:` with no `/` before it, matching `scp`. Previously `/data/a:b`, `./a:b` and `dir/a:b` were taken as remote host specifications.
+- `ziti-ssh -L/-R/-D` accept bracketed IPv6 addresses (`-L [::1]:8080:[2001:db8::1]:80`) and reject ports outside 1–65535; previously IPv6 specs were mis-split on `:`. A warning is printed when a `-L` or `-D` listener binds to a non-loopback address, since the listener has no authentication of its own.
 - `ziti-scp --service <name>` (as in `ziti-ssh`) treats the remote host as a terminator address on `<name>` even when the host name is also a service name.
 
 

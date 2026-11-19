@@ -109,6 +109,10 @@ This catches a host being impersonated **after** you have connected to it once; 
 
 `ziti-ssh connect` supports the same `-L`, `-R`, and `-D` forwarding flags as `ssh(1)`. All forwards run over the Ziti overlay — no port 22 exposure required.
 
+Write IPv6 addresses in brackets, as with `ssh`: `-L [::1]:8080:[2001:db8::1]:80`, `-D [::1]:1080`. Ports must be 1–65535.
+
+Local listeners (`-L`, `-D`) bind to `127.0.0.1` by default. They have no authentication of their own: when you bind them to any other address, `ziti-ssh` prints a warning, because anyone who can reach that address can use your session.
+
 ### Local port forward (`-L`)
 
 Listens on a local port and forwards each connection to a remote host:port through the SSH tunnel.
@@ -117,7 +121,8 @@ Listens on a local port and forwards each connection to a remote host:port throu
 # Forward localhost:8080 → db.internal:5432 on the remote network
 ziti-ssh connect ziggy@web-server-prod -L 8080:db.internal:5432
 
-# Bind on all interfaces (e.g. for container-to-host forwarding)
+# Bind on all interfaces (e.g. for container-to-host forwarding) — prints a warning:
+# anyone who can reach this machine on port 8080 can use the tunnel
 ziti-ssh connect ziggy@web-server-prod -L 0.0.0.0:8080:db.internal:5432
 ```
 

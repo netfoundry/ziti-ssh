@@ -71,3 +71,43 @@ func TestParseTarget_SplitsAtLastAt(t *testing.T) {
 		t.Errorf("parseTarget(web1) = %q, %v", h, err)
 	}
 }
+
+func TestParseForwardSpecs(t *testing.T) {
+	l, err := parseLocalForward("[::1]:8080:[2001:db8::1]:80")
+	if err != nil || l.Bind != "::1" || l.LocalPort != "8080" || l.RemoteHost != "2001:db8::1" || l.RemotePort != "80" {
+		t.Errorf("IPv6 -L: %+v, %v", l, err)
+	}
+	l, err = parseLocalForward("8080:db:5432")
+	if err != nil || l.Bind != "127.0.0.1" || l.RemoteHost != "db" {
+		t.Errorf("3-part -L: %+v, %v", l, err)
+	}
+	r, err := parseRemoteForward("[::]:9000:localhost:3000")
+	if err != nil || r.Bind != "::" || r.RemotePort != "9000" || r.LocalHost != "localhost" || r.LocalPort != "3000" {
+		t.Errorf("IPv6 -R: %+v, %v", r, err)
+	}
+	d, err := parseDynamicForward("[::1]:1080")
+	if err != nil || d.Bind != "::1" || d.LocalPort != "1080" {
+		t.Errorf("IPv6 -D: %+v, %v", d, err)
+	}
+	for _, bad := range []string{"0:db:80", "8080:db:65536", "x:db:80", "8080::80", "[::1:8080:db:80", "[::1]x:8080:db:80"} {
+		if _, err := parseLocalForward(bad); err == nil {
+			t.Errorf("-L %q accepted", bad)
+		}
+	}
+	if _, err := parseDynamicForward("99999"); err == nil {
+		t.Error("-D 99999 accepted")
+	}
+}
+
+func TestIsLoopbackBind(t *testing.T) {
+	for _, b := range []string{"", "localhost", "127.0.0.1", "127.0.0.2", "::1"} {
+		if !isLoopbackBind(b) {
+			t.Errorf("%q not loopback", b)
+		}
+	}
+	for _, b := range []string{"0.0.0.0", "::", "*", "192.168.1.5", "example.com"} {
+		if isLoopbackBind(b) {
+			t.Errorf("%q treated as loopback", b)
+		}
+	}
+}

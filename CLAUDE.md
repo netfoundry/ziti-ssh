@@ -98,7 +98,7 @@ Seven subcommands:
 - Runs a full interactive PTY session via `client.RunSession` (no forwards) or via `client.NewSSHClient` + `runSSHClientSession` when `-L`/`-R`/`-D` forwards are active.
 - `-A` / `--forward-agent` — forward the local SSH agent to the remote session; refused unless `--forward-agent-unverified` is also given (`checkAgentForwarding`: hosts cannot yet be verified, see H8) and the CA grants `permit-agent-forwarding`; calls `client.ForwardAgent(sshClient, session)` before `session.Shell()`; non-fatal if `SSH_AUTH_SOCK` is unset or agent unreachable.
 - Accepts a trailing command (after `--`) for non-interactive execution via `client.RunCommand`; the remote exit code is propagated.
-- `-L [bind:]localport:remotehost:remoteport` — local port forward; may be repeated; calls `client.RunLocalForward` in a goroutine.
+- `-L [bind:]localport:remotehost:remoteport` — local port forward; may be repeated; calls `client.RunLocalForward` in a goroutine. Specs are split by `splitForwardSpec` (bracketed IPv6, ports 1–65535); non-loopback `-L`/`-D` binds print a warning (`warnNonLoopbackBind`).
 - `-R [bind:]remoteport:localhost:localport` — remote port forward; calls `client.RunRemoteForward` in a goroutine.
 - `-D [bind:]port` — dynamic SOCKS5 proxy; calls `client.RunDynamicProxy` in a goroutine.
 - `-N` / `--no-shell` — block without opening a shell; only runs the requested forwards until SIGINT/SIGTERM.
