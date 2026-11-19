@@ -15,6 +15,12 @@ See security advisory GHSA-TBD for details.
 - New flag `--cert-source-address` / `ZITI_CERT_SOURCE_ADDRESS` (comma-separated IPs or CIDRs, or `none` to omit the option). Invalid values stop the CA at startup.
 - If something other than the local `ziti-ssh-host` delivers connections to sshd, set this accordingly.
 
+#### OIDC callback server listens on loopback only and refuses an occupied port
+
+- The temporary OIDC callback server now binds only `127.0.0.1` and `::1` (previously all interfaces), and claims the port before contacting the identity provider. If either address is already in use the flow stops with an error instead of opening the browser. The redirect URI (`http://localhost:<callback_port>/auth/callback`) and default port are unchanged; no identity-provider changes are needed.
+- The login URL is printed to stderr before the browser is opened, and failing to launch a browser is no longer fatal (previously `ziti-ssh` exited on headless machines without showing the URL).
+- Only the first authorization callback is used; the callback server has a read-header timeout.
+
 #### Caller identity taken from the edge router (BREAKING)
 
 `ziti-ssh-ca` and `ziti-ssh-host` now identify each caller only by the dialer identity name that the caller's edge router attaches to the connection (`GetDialerIdentityName()`). The client-supplied caller ID header is no longer used for any decision; if it differs, a warning is logged (`client-supplied caller id does not match router-verified dialer identity`).

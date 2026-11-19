@@ -119,7 +119,7 @@ Seven subcommands:
 
 **`mfa enable/verify/remove`**: Uses `zitiCtx.EnrollZitiMfa`, `VerifyZitiMfa`, `RemoveZitiMfa` with `AddMfaTotpCodeListener` / `AddAuthenticationStateFullListener` event hooks.
 
-**OIDC authentication**: When `--oidc-issuer` is set (or `oidc.issuer` in the config file), `connect`, `sign`, and `proxy` perform a browser-based OIDC authorization code flow (PKCE when no client secret) before authenticating with Ziti. The resulting JWT is added to the Ziti context via `AddJWT()`, satisfying ext-jwt-signer policies on the controller. Flow times out after 2 minutes. Implemented in `cmd/ziti-ssh/oidc.go` and `internal/oidc/oidc.go`.
+**OIDC authentication**: When `--oidc-issuer` is set (or `oidc.issuer` in the config file), `connect`, `sign`, and `proxy` perform a browser-based OIDC authorization code flow (PKCE when no client secret) before authenticating with Ziti. The resulting JWT is added to the Ziti context via `AddJWT()`, satisfying ext-jwt-signer policies on the controller. Flow times out after 2 minutes. The callback port is claimed on loopback only (`127.0.0.1` and `::1`) before the IdP is contacted, and the flow aborts if either address is already in use (`listenLoopback`); the login URL is printed to stderr before a non-fatal browser launch. Implemented in `cmd/ziti-ssh/oidc.go` and `internal/oidc/oidc.go`.
 
 Config file at `~/.config/ziti-ssh/config.yaml` (XDG_CONFIG_HOME respected). Fields: `identity`, `ca_service`, `ssh_service`, `ssh_key_path`, `mode`, `oidc.*`. Three-tier precedence: CLI flag > config file > default.
 

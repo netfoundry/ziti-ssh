@@ -278,8 +278,24 @@ OIDC authentication is entirely optional. When no issuer is configured the behav
 
 When an OIDC issuer is configured:
 
-1. Before dialling any Ziti service, `ziti-ssh connect` (and `ziti-ssh sign`) starts a temporary HTTP server on `localhost:<callback_port>` and opens your browser to the authorization URL.
-2. You log in through your identity provider's normal web UI.
+```mermaid
+sequenceDiagram
+    participant C as ziti-ssh / ziti-scp
+    participant B as Browser
+    participant I as Identity provider
+    participant Z as Ziti controller
+    C->>C: Bind callback port on 127.0.0.1 and ::1<br/>(abort if either is already in use)
+    C->>B: Print login URL, then open browser
+    B->>I: Sign in
+    I->>B: Redirect to localhost:<callback_port>/auth/callback?code=…
+    B->>C: Authorization code
+    C->>I: Exchange code (PKCE when no client secret)
+    I-->>C: Access token
+    C->>Z: Authenticate (mTLS identity + JWT)
+```
+
+1. Before dialling any Ziti service, `ziti-ssh connect` (and `sign`, `proxy`, and `ziti-scp`) claims the callback port on the loopback addresses `127.0.0.1` and `::1` (or `127.0.0.1` only on hosts without IPv6). It never listens on a network-facing address. If either loopback address is already in use, it **refuses to continue** — another process holding the port, for example another user on a shared machine, would otherwise receive your login — and tells you to stop that process or choose another `callback_port`.
+2. It prints the login URL to stderr and tries to open it in your browser. On a headless machine, or if no browser can be launched, open the printed URL yourself (for example on a machine that can reach this one's `localhost`, via SSH port forwarding). Then log in through your identity provider's normal web UI.
 3. The provider redirects to the local callback server with an authorization code.
 4. `ziti-ssh` exchanges the code for an access token and adds it to the Ziti context via `GetCredentials().AddJWT()` before calling `Authenticate()`.
 5. The Ziti controller validates the JWT against the configured ext-jwt-signer. If the JWT is accepted, the controller grants the session additional permissions beyond what the mTLS identity alone would receive.
@@ -311,7 +327,7 @@ ziti edge update identity alice --auth-policy ssh-oidc-policy
 
 Consult the [OpenZiti ext-jwt-signer documentation](https://openziti.io/docs/reference/configuration/conventions#external-jwt-signers) for the full list of options.
 
-Your OIDC provider must have `http://localhost:<callback_port>/auth/callback` registered as an allowed redirect URI. The default callback port is `63275`.
+Your OIDC provider must have `http://localhost:<callback_port>/auth/callback` registered as an allowed redirect URI. The default callback port is `63275`. If you change `callback_port` (for example because another user on a shared machine holds the default), register the new URI too.
 
 ### Configuring `ziti-ssh` to use OIDC
 

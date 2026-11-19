@@ -18,8 +18,10 @@
 // by ziti-ssh and ziti-scp to satisfy ext-jwt-signer policies on a Ziti
 // controller.
 //
-// When an OIDC issuer is configured, the flow opens a temporary localhost HTTP
-// server, opens the browser to the authorization URL, and waits for the
+// When an OIDC issuer is configured, the flow first claims the callback port on
+// both loopback addresses (127.0.0.1 and ::1) — refusing to continue if
+// another process already holds it, since that process would receive the
+// login — then opens the browser to the authorization URL and waits for the
 // identity provider to redirect back with an authorization code. The code is
 // exchanged for an access token which is added to the Ziti context credentials
 // before Authenticate() is called.
@@ -32,15 +34,19 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/gorilla/securecookie"
 	ziti "github.com/openziti/sdk-golang/ziti"
 	"github.com/zitadel/oidc/v3/pkg/client/rp"
-	"github.com/zitadel/oidc/v3/pkg/client/rp/cli"
 	httphelper "github.com/zitadel/oidc/v3/pkg/http"
 	"github.com/zitadel/oidc/v3/pkg/oidc"
 )
@@ -102,6 +108,19 @@ func runFlow(ctx context.Context, p FlowParams) (string, error) {
 		p.CallbackPort = DefaultCallbackPort
 	}
 
+	// Claim the callback port before contacting the identity provider or
+	// opening the browser. If another process (e.g. another local user) held
+	// it, the browser would deliver the login to that process.
+	listeners, err := listenLoopback(p.CallbackPort)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		for _, l := range listeners {
+			_ = l.Close()
+		}
+	}()
+
 	redirectURL := fmt.Sprintf("http://localhost:%s%s", p.CallbackPort, callbackPath)
 
 	cookieHandler := httphelper.NewCookieHandler(
@@ -144,7 +163,8 @@ func runFlow(ctx context.Context, p FlowParams) (string, error) {
 		state string,
 		party rp.RelyingParty,
 	) {
-		tokenChan <- tokens
+		// Only the first callback is used; later ones must not block.
+		offer(tokenChan, tokens)
 		_, _ = w.Write([]byte(
 			"<script>window.close()</script>" +
 				"<body onload=\"window.close()\">" +
@@ -156,24 +176,22 @@ func runFlow(ctx context.Context, p FlowParams) (string, error) {
 
 	mux := http.NewServeMux()
 	mux.Handle("/login", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		rp.AuthURLHandler(func() string {
-			b := make([]byte, 16)
-			_, _ = rand.Read(b)
-			return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
-		}, relyingParty)(w, r)
+		rp.AuthURLHandler(rand.Text, relyingParty)(w, r)
 	}))
 	mux.Handle(callbackPath, rp.CodeExchangeHandler(callback, relyingParty))
 
 	server := &http.Server{
-		Addr:    ":" + p.CallbackPort,
-		Handler: mux,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	go func() {
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("OIDC callback server error", "err", err)
-		}
-	}()
+	for _, l := range listeners {
+		go func(l net.Listener) {
+			if err := server.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("OIDC callback server error", "addr", l.Addr(), "err", err)
+			}
+		}(l)
+	}
 
 	go func() {
 		<-flowCtx.Done()
@@ -189,7 +207,7 @@ func runFlow(ctx context.Context, p FlowParams) (string, error) {
 		"callback_port", p.CallbackPort,
 		"timeout", flowTimeout,
 	)
-	cli.OpenBrowser("http://localhost:" + p.CallbackPort + "/login")
+	openBrowser("http://localhost:"+p.CallbackPort+"/login", os.Stderr, startCommand)
 
 	select {
 	case tokens := <-tokenChan:
@@ -197,5 +215,85 @@ func runFlow(ctx context.Context, p FlowParams) (string, error) {
 		return tokens.AccessToken, nil
 	case <-flowCtx.Done():
 		return "", fmt.Errorf("OIDC authentication timed out after %s", flowTimeout)
+	}
+}
+
+// listenLoopback binds the callback port on 127.0.0.1 and, when the host has
+// an IPv6 loopback, on ::1. Browsers may resolve "localhost" to either, so
+// both must be held by this process. It fails if either address is already in
+// use. It never binds a non-loopback address.
+func listenLoopback(port string) ([]net.Listener, error) {
+	l4, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", port))
+	if err != nil {
+		return nil, callbackPortError(port, "127.0.0.1", err)
+	}
+	if !ipv6LoopbackAvailable() {
+		slog.Debug("IPv6 loopback unavailable; OIDC callback listening on 127.0.0.1 only")
+		return []net.Listener{l4}, nil
+	}
+	l6, err := net.Listen("tcp6", net.JoinHostPort("::1", port))
+	if err != nil {
+		_ = l4.Close()
+		return nil, callbackPortError(port, "::1", err)
+	}
+	return []net.Listener{l4, l6}, nil
+}
+
+// ipv6LoopbackAvailable reports whether ::1 can be bound at all. If it cannot,
+// no other process can bind it either, so listening on IPv4 only is safe.
+func ipv6LoopbackAvailable() bool {
+	l, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		return false
+	}
+	_ = l.Close()
+	return true
+}
+
+func callbackPortError(port, addr string, err error) error {
+	return fmt.Errorf("OIDC callback port %s on %s is unavailable (%v); refusing to continue because "+
+		"another process holding it would receive the login. Stop that process or set a different "+
+		"callback port (oidc.callback_port) that is also registered with the identity provider", port, addr, err)
+}
+
+// startCommand starts an external program without waiting for it to finish.
+func startCommand(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() { _ = cmd.Wait() }()
+	return nil
+}
+
+// openBrowser prints the login URL to w first, so it is always available on
+// headless machines, then tries to open it in the user's browser. Failure to
+// launch a browser is reported but is not fatal.
+func openBrowser(url string, w io.Writer, start func(name string, args ...string) error) {
+	_, _ = fmt.Fprintf(w, "To sign in, open this URL in a browser (attempting to open it for you):\n  %s\n", url)
+
+	var err error
+	switch runtime.GOOS {
+	case "linux", "freebsd", "openbsd", "netbsd":
+		err = start("xdg-open", url)
+	case "darwin":
+		err = start("open", url)
+	case "windows":
+		err = start("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		err = fmt.Errorf("unsupported platform %s", runtime.GOOS)
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "Could not open a browser (%v); open the URL above manually.\n", err)
+	}
+}
+
+// offer sends v on ch without blocking and reports whether it was delivered.
+func offer[T any](ch chan T, v T) bool {
+	select {
+	case ch <- v:
+		return true
+	default:
+		return false
 	}
 }
