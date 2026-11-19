@@ -41,6 +41,15 @@ if [ ! -f /etc/ziti-ssh-host/env ]; then
 # keeping the account and home directory. Needed for revoked identities to lose
 # running processes. No effect when USER_CLEANUP=true (deletion already ends them).
 #ZITI_TERMINATE_ON_DISCONNECT=false
+
+# Host grant policy — what each service's ziti-ssh-host.v1 config may grant here.
+# ALLOW_SUDOERS: services whose config may set sudoers_rule (comma list, or *).
+#ZITI_ALLOW_SUDOERS=ssh-ops
+# ALLOW_GROUPS: privileged groups (root, sudo, admin, wheel, docker, lxd, disk,
+# shadow, libvirt) a service's config may grant, as <service>:<group> or *:<group>.
+#ZITI_ALLOW_GROUPS=ssh-ops:sudo
+# RESTRICT_GROUPS: true = config may grant only groups listed in ALLOW_GROUPS.
+#ZITI_RESTRICT_GROUPS=false
 ENVEOF
     chmod 640 /etc/ziti-ssh-host/env
 fi

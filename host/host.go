@@ -71,10 +71,18 @@ type PermissionsConfig struct {
 // In all matching cases the matched entry is returned as-is; global
 // fallbacks are not merged in.
 func (pc *PermissionsConfig) Resolve(zitiIdentity string, globalGroups []string, globalSudoersRule string) IdentityPermissions {
+	perms, _ := pc.ResolveWithSource(zitiIdentity, globalGroups, globalSudoersRule)
+	return perms
+}
+
+// ResolveWithSource is Resolve, also reporting whether the result came from a
+// ziti-ssh-host.v1 config entry (true) or from the host's own global fallbacks
+// (false). Only config entries are subject to the host's GrantPolicy.
+func (pc *PermissionsConfig) ResolveWithSource(zitiIdentity string, globalGroups []string, globalSudoersRule string) (IdentityPermissions, bool) {
 	if pc != nil {
 		// Step 1: exact match.
 		if entry, ok := pc.Permissions[zitiIdentity]; ok {
-			return entry
+			return entry, true
 		}
 
 		// Step 2: glob match — find the most specific pattern that matches.
@@ -105,7 +113,7 @@ func (pc *PermissionsConfig) Resolve(zitiIdentity string, globalGroups []string,
 			}
 		}
 		if bestPrefixLen >= 0 {
-			return bestEntry
+			return bestEntry, true
 		}
 	}
 
@@ -113,7 +121,7 @@ func (pc *PermissionsConfig) Resolve(zitiIdentity string, globalGroups []string,
 	return IdentityPermissions{
 		Groups:      globalGroups,
 		SudoersRule: globalSudoersRule,
-	}
+	}, false
 }
 
 // patternSpecificity returns two counts for a glob pattern:

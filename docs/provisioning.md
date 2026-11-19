@@ -314,6 +314,8 @@ ZITI_SSH_MODE=shared
 # ZITI_SUDOERS_RULE=ALL=(ALL) NOPASSWD:ALL   # per-identity mode only; global fallback sudoers
 # ZITI_USER_CLEANUP=true                      # per-identity mode only; set to true to delete accounts on disconnect
 # ZITI_TERMINATE_ON_DISCONNECT=true           # per-identity mode only; end a kept account's processes on disconnect
+# ZITI_ALLOW_SUDOERS=ssh-ops                  # per-identity mode only; services whose config may set sudoers_rule
+# ZITI_ALLOW_GROUPS=ssh-ops:sudo              # per-identity mode only; privileged groups a service's config may grant
 ```
 
 `ZITI_SSH_MODE` must match the value set on `ziti-ssh-ca`. See [Modes](operations.md#modes) for a full explanation.
@@ -427,6 +429,8 @@ Edit the config object in the controller to add, change, or remove identity entr
 ziti edge update config ssh-permissions \
   '{"permissions":{"*":{"groups":["developers"]},"ops-*":{"groups":["developers","docker"]},"ops-alice":{"groups":["sudo","developers"]},"ops-automation":{"sudoers_rule":"ALL=(ALL) NOPASSWD: ALL"}}}'
 ```
+
+> **Host opt-in required:** the `docker` group and `sudoers_rule` entries in this example are only applied on hosts that allow them for this service — e.g. `ZITI_ALLOW_SUDOERS=ssh` and `ZITI_ALLOW_GROUPS=ssh:docker` in `/etc/ziti-ssh-host/env`. Otherwise those identities are refused. See [Host grant policy](operations.md#host-grant-policy).
 
 Run `ziti-ssh-host inspect --service ssh` on the host to confirm what the running daemon sees after the update. See [Inspecting per-identity permissions](operations.md#inspecting-per-identity-permissions) in the operations guide for details.
 

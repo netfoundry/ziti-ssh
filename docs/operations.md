@@ -96,6 +96,31 @@ An entry that omits a field means that field gets nothing — globals are not me
 
 When a `ziti-ssh-host.v1` config is updated in the Ziti controller, the change propagates to all running `ziti-ssh-host` instances bound to that service within seconds via the service-changed event. Already-open sessions are not affected — the updated permissions apply only to connections established after the reload. No restart of `ziti-ssh-host` is required.
 
+### Host grant policy
+
+A `ziti-ssh-host.v1` config is written on the Ziti controller, by whoever can edit configs there. Each host's owner decides, **per service**, what such a config is allowed to grant on that host. Without an opt-in, a config cannot grant root.
+
+| Setting (`/etc/ziti-ssh-host/env`) | Default | Effect |
+|---|---|---|
+| `ZITI_ALLOW_SUDOERS` | none | Services (comma-separated, or `*`) whose config may set `sudoers_rule`. |
+| `ZITI_ALLOW_GROUPS` | none | Privileged groups a service's config may grant: `<service>:<group>`, or `*:<group>` for every service. Privileged groups are `root`, `sudo`, `admin`, `wheel`, `docker`, `lxd`, `disk`, `shadow`, `libvirt`; any other group may be granted by default. |
+| `ZITI_RESTRICT_GROUPS` | `false` | `true`: a config may grant only groups listed in `ZITI_ALLOW_GROUPS` — use this if custom groups on the host carry sudo rights the built-in list cannot know about. |
+
+A config entry that asks for more than the policy allows **rejects the connection** for that identity on that service (log: `rejecting connection: permissions refused by host grant policy`). Violations are also logged when the config is loaded or reloaded, and `ziti-ssh-host inspect` prints the policy and lists refused entries. The host's own fallbacks (`ZITI_SSH_GROUPS`, `ZITI_SUDOERS_RULE`) are set by the host owner and are never refused.
+
+**Granting root deliberately** — the role-tier example below, where only the ops service may grant root:
+
+```sh
+# /etc/ziti-ssh-host/env on the DB server
+ZITI_SSH_SERVICE=ssh-ops,ssh-db
+ZITI_ALLOW_SUDOERS=ssh-ops
+ZITI_ALLOW_GROUPS=ssh-ops:sudo,ssh-ops:docker
+```
+
+The `ssh-ops` config can now give `ops-alice` the `sudo` group or a `sudoers_rule`; nothing in the `ssh-db` config can, even on the same host.
+
+**Upgrading:** entries that already grant `sudoers_rule` or a privileged group are refused until the host opts in. Run `ziti-ssh-host inspect --service <name>` before upgrading to list them.
+
 ### Multi-service binding
 
 `--ssh-service` accepts multiple values (the flag can be repeated, or the `ZITI_SSH_SERVICE` env var can be set to a comma-separated list). Each service gets its own Ziti listener and its own independent in-memory permissions map. The service a connection arrived on determines which permissions are applied to that identity.

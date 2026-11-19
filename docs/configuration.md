@@ -131,6 +131,9 @@ The `run` subcommand also accepts:
 | — | `ZITI_SSH_GROUPS` | — | Comma-separated Linux groups set as the user's supplementary groups (via `usermod -G`, replacing existing membership) for users not matched by a `ziti-ssh-host.v1` config entry. Global fallback; per-identity mode only. Groups must already exist on the host; if setting them fails, the connection is rejected. |
 | — | `ZITI_SUDOERS_RULE` | — | If set, a sudoers rule `<username> <value>` is written to `/etc/sudoers.d/ziti-ssh-host-<username>` on connect. Global fallback applied to users not matched by a `ziti-ssh-host.v1` config entry; per-identity mode only. |
 | — | `ZITI_USER_CLEANUP` | `false` | Set to `true` to delete the Linux account after the last session closes via `userdel -r` (per-identity mode only) |
+| — | `ZITI_ALLOW_SUDOERS` | — | Services whose `ziti-ssh-host.v1` config may set `sudoers_rule`: comma-separated service names, or `*` for all. A config `sudoers_rule` from any other service is refused and the connection rejected. Does not affect `ZITI_SUDOERS_RULE`. |
+| — | `ZITI_ALLOW_GROUPS` | — | Privileged groups a service's config may grant, as `<service>:<group>` (or `*:<group>` for all services), comma-separated. By default a config may grant any group except `root`, `sudo`, `admin`, `wheel`, `docker`, `lxd`, `disk`, `shadow`, `libvirt`. |
+| — | `ZITI_RESTRICT_GROUPS` | `false` | `true`: a config may grant **only** groups listed in `ZITI_ALLOW_GROUPS` (for hosts where custom groups carry sudo rights). Does not affect `ZITI_SSH_GROUPS`. |
 | — | `ZITI_TERMINATE_ON_DISCONNECT` | `false` | Set to `true` to end all of the account's processes when the last session closes, keeping the account and home directory (per-identity mode with `ZITI_USER_CLEANUP=false`; no effect when cleanup is on, which already ends them). Without it, background processes (`nohup`, `tmux`, systemd user services) survive disconnect and revocation. |
 
 `enroll` also requires `--jwt <path>` (no environment variable equivalent).
@@ -210,8 +213,8 @@ This config is only consulted in `per-identity` mode. It has no effect in `share
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `permissions` | object | yes | Map of Ziti identity name (or pattern) → permission entry. Keys may be exact identity names, glob patterns (using `*` and `?`), or the `"*"` catch-all. All matches are case-sensitive. |
-| `permissions.<key>.groups` | array of strings | no | The user's exact supplementary Linux groups, set via `usermod -G` on every connect. Groups must already exist on the host; if setting them fails, the connection is rejected. |
-| `permissions.<key>.sudoers_rule` | string | no | The rule fragment placed after the username in `/etc/sudoers.d/ziti-ssh-host-<username>`. Validated with `visudo -c` before installation. Omit to grant no sudo access. |
+| `permissions.<key>.groups` | array of strings | no | The user's exact supplementary Linux groups, set via `usermod -G` on every connect. Groups must already exist on the host; if setting them fails, the connection is rejected. Privileged groups (`root`, `sudo`, `admin`, `wheel`, `docker`, `lxd`, `disk`, `shadow`, `libvirt`) are refused unless the host allows them for this service (`ZITI_ALLOW_GROUPS`). |
+| `permissions.<key>.sudoers_rule` | string | no | The rule fragment placed after the username in `/etc/sudoers.d/ziti-ssh-host-<username>`. Validated with `visudo -c` before installation. Omit to grant no sudo access. Refused unless the host lists this service in `ZITI_ALLOW_SUDOERS`. |
 
 ### Example
 
@@ -225,6 +228,8 @@ This config is only consulted in `per-identity` mode. It has no effect in `share
   }
 }
 ```
+
+> **Host opt-in required:** the `docker` group and `sudoers_rule` entries in this example are only applied on hosts that allow them for this service — e.g. `ZITI_ALLOW_SUDOERS=ssh` and `ZITI_ALLOW_GROUPS=ssh:docker` in `/etc/ziti-ssh-host/env`. Otherwise those identities are refused. See [Host grant policy](operations.md#host-grant-policy).
 
 Identity keys are the **Ziti identity names** as they appear in the controller — not the derived Linux usernames. `ziti-ssh-host` applies `DeriveUsername` internally to obtain the Linux username for `useradd`, `usermod`, and the sudoers filename.
 

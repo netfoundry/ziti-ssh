@@ -856,6 +856,10 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 	globalGroups := parseGlobalGroups()
 	cleanupOnDisconnect := os.Getenv("ZITI_USER_CLEANUP") == "true"
 	terminateOnDisconnect := os.Getenv("ZITI_TERMINATE_ON_DISCONNECT") == "true"
+	grantPolicy, err := grantPolicyFromEnv()
+	if err != nil && mode == "per-identity" {
+		return fmt.Errorf("per-identity mode: %w", err)
+	}
 
 	listenOpts := &ziti.ListenOptions{
 		BindUsingEdgeIdentity: true,
@@ -894,6 +898,8 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 				slog.Warn("could not load permissions config, using global fallbacks only",
 					"service", svcName, "err", err)
 			}
+			slog.Info("host grant policy", "service", svcName, "policy", grantPolicy.Describe(svcName))
+			warnPolicyViolations(svcName, pc, grantPolicy)
 			state.set(pc)
 		}
 
@@ -975,6 +981,7 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 				slog.Error("failed to reload permissions config", "service", svcName, "err", err)
 				return
 			}
+			warnPolicyViolations(svcName, pc, grantPolicy)
 			st.set(pc)
 			slog.Info("permissions config reloaded", "service", svcName)
 		})
@@ -994,7 +1001,14 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 					if username == "" {
 						return fmt.Errorf("derived empty username from identity %q", zitiIdentity)
 					}
-					perms := st.get().Resolve(zitiIdentity, globalGroups, globalSudoersRule)
+					perms, fromConfig := st.get().ResolveWithSource(zitiIdentity, globalGroups, globalSudoersRule)
+					// The host owner's per-service limit on what the
+					// controller-side config may grant (fail closed).
+					if err := grantPolicy.Enforce(svcName, perms, fromConfig); err != nil {
+						slog.Error("rejecting connection: permissions refused by host grant policy",
+							"service", svcName, "identity", zitiIdentity, "err", err)
+						return fmt.Errorf("identity %q on service %q: %w", zitiIdentity, svcName, err)
+					}
 					slog.Info("per-identity connect",
 						"service", svcName,
 						"identity", zitiIdentity,
@@ -1089,6 +1103,10 @@ func runInspect(identityFile string, serviceNames []string, zitiTimeout time.Dur
 
 	globalSudoersRule := os.Getenv("ZITI_SUDOERS_RULE")
 	globalGroups := parseGlobalGroups()
+	policy, policyErr := grantPolicyFromEnv()
+	if policyErr != nil {
+		fmt.Printf("WARNING: invalid host grant policy (ziti-ssh-host run would refuse to start in per-identity mode): %v\n\n", policyErr)
+	}
 
 	for _, svcName := range serviceNames {
 		_, ok := zitiCtx.GetService(svcName)
@@ -1107,8 +1125,15 @@ func runInspect(identityFile string, serviceNames []string, zitiTimeout time.Dur
 		if pc == nil {
 			fmt.Printf("  Config type %s: not attached\n\n", zitiSSHHostConfigType)
 		} else {
-			fmt.Printf("  Config type %s: present\n\n", zitiSSHHostConfigType)
+			fmt.Printf("  Config type %s: present\n", zitiSSHHostConfigType)
+			if policyErr == nil {
+				fmt.Printf("  Host grant policy: %s\n", policy.Describe(svcName))
+			}
+			fmt.Println()
 			printPermissionsTable(pc)
+			if policyErr == nil {
+				printPolicyRefusals(svcName, pc, policy)
+			}
 		}
 		printGlobalFallbacks(globalGroups, globalSudoersRule)
 		fmt.Println()
@@ -1203,3 +1228,49 @@ func sortStrings(ss []string) {
 // interface that host.proxyConn uses to extract the caller's Ziti identity
 // name. This keeps the zitiEdge import live and verifies SDK compatibility.
 var _ interface{ GetDialerIdentityName() string } = (zitiEdge.Conn)(nil)
+
+// grantPolicyFromEnv reads the host grant policy settings.
+func grantPolicyFromEnv() (host.GrantPolicy, error) {
+	return host.ParseGrantPolicy(
+		os.Getenv("ZITI_ALLOW_SUDOERS"),
+		os.Getenv("ZITI_ALLOW_GROUPS"),
+		os.Getenv("ZITI_RESTRICT_GROUPS"),
+	)
+}
+
+// warnPolicyViolations logs every entry of pc that the host grant policy
+// would refuse for service, so operators see the problem when a config is
+// loaded rather than only when the identity connects.
+func warnPolicyViolations(service string, pc *host.PermissionsConfig, policy host.GrantPolicy) {
+	if pc == nil {
+		return
+	}
+	for key, perms := range pc.Permissions {
+		if err := policy.Check(service, perms); err != nil {
+			slog.Warn("ziti-ssh-host.v1 entry will be refused by host grant policy",
+				"service", service, "entry", key, "err", err)
+		}
+	}
+}
+
+// printPolicyRefusals lists config entries the host grant policy refuses.
+func printPolicyRefusals(service string, pc *host.PermissionsConfig, policy host.GrantPolicy) {
+	keys := make([]string, 0, len(pc.Permissions))
+	for k := range pc.Permissions {
+		keys = append(keys, k)
+	}
+	sortStrings(keys)
+	refused := 0
+	for _, k := range keys {
+		if err := policy.Check(service, pc.Permissions[k]); err != nil {
+			if refused == 0 {
+				fmt.Println("  Entries REFUSED by host policy (these identities cannot connect via this service):")
+			}
+			refused++
+			fmt.Printf("    %s: %v\n", k, err)
+		}
+	}
+	if refused > 0 {
+		fmt.Println()
+	}
+}

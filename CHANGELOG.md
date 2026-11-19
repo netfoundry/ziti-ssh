@@ -15,6 +15,12 @@ See security advisory GHSA-TBD for details.
 - New flag `--cert-source-address` / `ZITI_CERT_SOURCE_ADDRESS` (comma-separated IPs or CIDRs, or `none` to omit the option). Invalid values stop the CA at startup.
 - If something other than the local `ziti-ssh-host` delivers connections to sshd, set this accordingly.
 
+#### Host grant policy for `ziti-ssh-host.v1` configs (BREAKING)
+
+- `ziti-ssh-host` now limits, per Ziti service, what a `ziti-ssh-host.v1` config may grant: `sudoers_rule` only from services listed in `ZITI_ALLOW_SUDOERS` (default: none); privileged groups (`root`, `sudo`, `admin`, `wheel`, `docker`, `lxd`, `disk`, `shadow`, `libvirt`) only when opted in via `ZITI_ALLOW_GROUPS` (`<service>:<group>` or `*:<group>`); optionally only listed groups (`ZITI_RESTRICT_GROUPS=true`). The host's own `ZITI_SSH_GROUPS` / `ZITI_SUDOERS_RULE` fallbacks are unaffected.
+- An entry exceeding the policy rejects the connection (`rejecting connection: permissions refused by host grant policy`); violations are logged at config load/reload; `ziti-ssh-host inspect` shows the policy and refused entries. Invalid policy settings stop `run` in per-identity mode.
+- **Action:** configs that grant `sudoers_rule` or privileged groups are refused until each host opts the service in. Run `ziti-ssh-host inspect --service <name>` before upgrading.
+
 #### CA connection limits
 
 - `ziti-ssh-ca` caps concurrent connections (`--max-connections` / `ZITI_MAX_CONNECTIONS`, default 64); connections beyond the cap are closed immediately.

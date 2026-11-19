@@ -219,6 +219,8 @@ In `per-identity` mode, Linux permissions for each connecting identity are resol
 }
 ```
 
+   The `docker` group and the `sudoers_rule` entries above are applied only if the host opts the service in (`ZITI_ALLOW_GROUPS=<svc>:docker`, `ZITI_ALLOW_SUDOERS=<svc>`); see **Host grant policy** below.
+
 2. **Global fallbacks** (apply when no config is attached, or when no config key matches the identity):
    - `ZITI_SSH_GROUPS` — comma-separated Linux group names
    - `ZITI_SUDOERS_RULE` — sudoers rule fragment
@@ -232,7 +234,11 @@ DB server running:  ziti-ssh-host run --ssh-service ssh-ops --ssh-service ssh-db
 
 ssh-ops config: ops-alice → [sudo, adm]    ← ops team, OS-level access
 ssh-db  config: dba-carol → [mysql]        ← DBA team, database-level access
+
+host env: ZITI_ALLOW_GROUPS=ssh-ops:sudo   ← host owner lets only ssh-ops grant sudo
 ```
+
+**Host grant policy (`host.GrantPolicy`, `host/grant.go`):** the host owner limits, per service, what a config may grant: `ZITI_ALLOW_SUDOERS` (services whose config may set `sudoers_rule`; default none), `ZITI_ALLOW_GROUPS` (`<service>:<group>` opt-ins for privileged groups `root`, `sudo`, `admin`, `wheel`, `docker`, `lxd`, `disk`, `shadow`, `libvirt`; any other group is allowed by default), `ZITI_RESTRICT_GROUPS=true` (only listed groups). Refused entries reject the connection (`GrantPolicy.Enforce` in the connect hook), are logged at config load/reload, and are flagged by `inspect`. The host's own fallbacks (`ZITI_SSH_GROUPS`, `ZITI_SUDOERS_RULE`) are not subject to it (`ResolveWithSource`). Controller config write access alone therefore cannot grant root.
 
 **Config type registration:** `ziti-ssh-ca config apply` registers the `ziti-ssh-host.v1` schema on the controller as a one-time setup step. Subsequent `ziti edge update config` commands update individual permission configs; changes propagate live to all running `ziti-ssh-host` instances within seconds.
 
@@ -305,6 +311,9 @@ Persistent flags (accepted by all subcommands):
 | — | `ZITI_SUDOERS_RULE` | — | Global fallback sudoers rule (per-identity mode only) |
 | — | `ZITI_SSH_GROUPS` | — | Global fallback Linux groups, comma-separated (per-identity mode only) |
 | — | `ZITI_USER_CLEANUP` | `false` | Set to `true` to delete Linux accounts after the last session closes |
+| — | `ZITI_ALLOW_SUDOERS` | — | Services (comma-separated, or `*`) whose config may set `sudoers_rule`; others are refused (connection rejected) |
+| — | `ZITI_ALLOW_GROUPS` | — | `<service>:<group>` / `*:<group>` list of privileged groups (`root`, `sudo`, `admin`, `wheel`, `docker`, `lxd`, `disk`, `shadow`, `libvirt`) a service's config may grant |
+| — | `ZITI_RESTRICT_GROUPS` | `false` | `true`: config may grant only groups listed in `ZITI_ALLOW_GROUPS` |
 | — | `ZITI_TERMINATE_ON_DISCONNECT` | `false` | With cleanup off: set to `true` to end all of the account's processes (lingering disabled, `loginctl terminate-user`, SIGTERM/SIGKILL by UID) when the last session closes, keeping the account. Needed for revoked identities to lose background processes. |
 
 **Important:** `--mode` must be set consistently on both `ziti-ssh-ca` and `ziti-ssh-host run`. If the CA issues certs with per-identity principals but the host is in shared mode (or vice versa), SSH authentication will fail.
