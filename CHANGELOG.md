@@ -18,6 +18,23 @@ See security advisory GHSA-TBD for details.
 
 **Updated docs:** `ARCHITECTURE.md` §6 (identity flow, with diagram) and §12; `README.md` prerequisites; `docs/provisioning.md` version requirement; `docs/operations.md` new "Caller identity verification" section.
 
+#### Per-identity account ownership registry
+
+`ziti-ssh-host` now records the Linux accounts it creates in `/var/lib/ziti-ssh-host/owned-users.json` (username → Ziti identity, UID; mode 0600) and only creates, modifies, or deletes accounts recorded there for the connecting identity with a matching UID ≥ 1000.
+
+- Existing accounts that `ziti-ssh-host` did not create are not managed; connections deriving their names are rejected. A corrupt registry stops `run` in per-identity mode.
+- Two identities that derive the same username are detected across disconnects and restarts.
+- Reserved names (`root`, common system accounts, `ubuntu`, `admin`, `ziti`) and names starting with `-` are refused.
+- Sudoers files moved to `/etc/sudoers.d/ziti-ssh-host-<username>`; a legacy `/etc/sudoers.d/<username>` is removed only if it contains the single line `ziti-ssh-host` wrote.
+- The session count is re-checked before account cleanup when a session is released.
+- With cleanup disabled, sudoers files left by sessions open during a crash are removed on restart.
+- `ziti-ssh-ca` refuses to sign a per-identity certificate whose derived principal is `root` or starts with `-`.
+- New `ziti-ssh-host users list` and `ziti-ssh-host users claim --username <u> --identity <id>` (root).
+
+**Upgrade action required (per-identity hosts with persistent accounts):** accounts created by earlier releases are not in the registry, so their identities are rejected (`refusing to manage pre-existing account`) until claimed with `sudo ziti-ssh-host users claim --username <u> --identity <id>`. This mainly affects hosts with `ZITI_USER_CLEANUP=false` (the default), where accounts persist. With cleanup enabled, accounts are normally deleted at disconnect; an account whose session was still open during the upgrade is left in place (not deleted, since it is unregistered) and must be claimed or removed with `userdel -r` by an administrator.
+
+**Updated docs:** `docs/operations.md` (account ownership flow diagram, lifecycle, new "Managing account ownership" section, files-written table), `docs/configuration.md` (`users` subcommands, sudoers path), `ARCHITECTURE.md` (`UserManager`, `deleteUser`, §12 account ownership boundary), `CLAUDE.md`.
+
 ### Changed
 
 #### Dependency, toolchain, and CI refresh

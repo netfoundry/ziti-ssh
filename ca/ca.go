@@ -128,3 +128,20 @@ func DeriveUsername(identity string) string {
 
 	return result
 }
+
+// ValidatePerIdentityPrincipal rejects derived per-identity principals that
+// must never appear in a certificate: empty, "root", or starting with '-'
+// (which command-line tools would parse as an option). This is defence in
+// depth for a Ziti identity that happens to be named "root"; ziti-ssh-host
+// separately refuses to manage any account it did not create.
+func ValidatePerIdentityPrincipal(principal string) error {
+	switch {
+	case principal == "":
+		return fmt.Errorf("derived principal is empty")
+	case principal == "root":
+		return fmt.Errorf("derived principal %q is not allowed", principal)
+	case strings.HasPrefix(principal, "-"):
+		return fmt.Errorf("derived principal %q must not start with '-'", principal)
+	}
+	return nil
+}

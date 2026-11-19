@@ -277,3 +277,16 @@ func TestPublicKeyBytes(t *testing.T) {
 		t.Errorf("PublicKeyBytes = %q, want prefix %q", string(b), "ssh-ed25519 ")
 	}
 }
+
+func TestValidatePerIdentityPrincipal(t *testing.T) {
+	for _, p := range []string{"", "root", "-ou0"} {
+		if err := ca.ValidatePerIdentityPrincipal(p); err == nil {
+			t.Errorf("ValidatePerIdentityPrincipal(%q) = nil, want error", p)
+		}
+	}
+	for _, p := range []string{"alice", "dba-alice", "z123bot"} {
+		if err := ca.ValidatePerIdentityPrincipal(p); err != nil {
+			t.Errorf("ValidatePerIdentityPrincipal(%q) = %v, want nil", p, err)
+		}
+	}
+}

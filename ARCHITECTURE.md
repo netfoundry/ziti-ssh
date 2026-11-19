@@ -110,10 +110,10 @@ After enrollment, `cfg.ID.CA` contains the PEM chain (root CA + intermediate CA)
    b. Call `zitiCtx.GetService(svcName)` and `zitiEdge.ParseServiceConfig` to load and parse the `ziti-ssh-host.v1` config into a `*host.PermissionsConfig` (nil if no config attached).
    c. Store the config in a `serviceState` (RWMutex-protected pointer) for atomic live reload.
 5. If `mode == "per-identity"`:
-   a. Create a single shared `host.UserManager` backed by `/var/lib/ziti-ssh-host/managed-users`.
-   b. Call `manager.CleanupOrphans()` to remove users left over from a previous crash.
+   a. Create a single shared `host.UserManager` backed by `/var/lib/ziti-ssh-host/managed-users` (active sessions) and `/var/lib/ziti-ssh-host/owned-users.json` (ownership registry).
+   b. Call `manager.CleanupOrphans()` to remove registered users left over from a previous crash.
    c. For each service, build a `host.ProxyHooks` struct that closes over that service's `serviceState`:
-      - `OnConnect`: calls `ca.DeriveUsername(identity)`, resolves `host.IdentityPermissions` from the service's `PermissionsConfig` (falling back to global env vars), then calls `manager.EnsureUser(username, perms)`.
+      - `OnConnect`: calls `ca.DeriveUsername(identity)`, resolves `host.IdentityPermissions` from the service's `PermissionsConfig` (falling back to global env vars), then calls `manager.EnsureUser(identity, username, perms)`.
       - `OnDisconnect`: calls `manager.ReleaseUser(username)`.
 6. For each service, launch `host.Proxy(listener, "127.0.0.1:22", hooks, &connWg)` in a goroutine. All services share one `connWg` for graceful drain.
 7. Subscribe to service-changed events via `zitiCtx.Events().AddServiceChangedListener`. When a changed event arrives for a bound service, reload its `ziti-ssh-host.v1` config and swap the `serviceState` pointer atomically.
@@ -189,13 +189,19 @@ type IdentityPermissions struct {
 
 Safe on a nil receiver — returns the global fallbacks when no config is attached.
 
-**`host.NewUserManager(stateFile string, cleanupOnDisconnect bool)`** returns a concurrent-safe reference counter. It no longer accepts a global `sudoersRule` — permissions are passed per-call instead, enabling each service to supply different values through the same shared manager.
+**`host.NewUserManager(stateFile string, cleanupOnDisconnect bool) (*UserManager, error)`** returns a concurrent-safe session counter and account manager. Account ownership is persisted in a `host.OwnerRegistry` at `owned-users.json` next to `stateFile`; the constructor fails (and `run` exits) if that file exists but cannot be parsed, so accounts are never managed without it.
 
-**`host.UserManager`** tracks how many sessions are open for each derived username:
+**`host.UserManager`** tracks how many sessions are open for each derived username and decides which accounts may be touched:
 
-- `EnsureUser(username string, perms IdentityPermissions) error` — increments the session count. If the count was 0: runs `useradd -m -s /bin/bash <username>` (exit code 9 treated as success); if `perms.Groups` is non-empty, runs `usermod -aG <groups> <username>` (failure is non-fatal, logged); if `perms.SudoersRule` is non-empty, writes and validates a sudoers file at `/etc/sudoers.d/<username>` via `visudo -c`. The username is appended to the state file.
-- `ReleaseUser(username string) error` — decrements the session count. If the count reaches 0 and `cleanupOnDisconnect` is true, calls `deleteUser(username)` and removes the username from the state file. If `cleanupOnDisconnect` is false, the account is kept but the sudoers file is still removed (group membership is implicitly removed when the account is eventually deleted).
-- `CleanupOrphans()` — reads the state file and calls `deleteUser` on each entry. Called once at startup before accepting connections.
+- `EnsureUser(zitiIdentity, username string, perms IdentityPermissions) error` — rejects reserved names, names starting with `-`, and names outside `[a-z0-9_-]` (`ValidateManagedUsername`). Under a per-user lock it then looks the account up with `getent passwd`:
+  - **absent** → `useradd -m -s /bin/bash -- <username>`, verify the assigned UID is ≥ `MinManagedUID` (1000), record `{identity, uid}` in the registry;
+  - **present** → proceed only if the registry records it for the same identity with the same UID and the UID is ≥ 1000; otherwise reject without touching it (pre-existing system or admin account, identity collision, or replaced account). `useradd` exit 9 (created concurrently by someone else) is a rejection, not success.
+
+  On success it sets supplementary groups with `usermod -G <groups> -- <username>` (non-fatal on failure), writes or removes `/etc/sudoers.d/ziti-ssh-host-<username>`, and removes a legacy `/etc/sudoers.d/<username>` only if it holds the single line this tool used to write.
+- `ReleaseUser(username string) error` — decrements the session count. At zero it re-checks the count after taking the per-user lock (a new session may have started), then acts only on a registered account whose UID still matches: removes the sudoers file, or — with `cleanupOnDisconnect` — deletes the account and its registry record.
+- `CleanupOrphans()` — reads the state file at startup. With cleanup enabled, deletes each listed account that is still registered with a matching UID; otherwise removes their leftover sudoers files. Unregistered accounts are skipped.
+
+**`ziti-ssh-host users list|claim`** read and extend the registry. `claim` is the migration path for accounts created before the registry existed; see [operations.md](docs/operations.md#managing-account-ownership).
 
 **Global fallback env vars** (per-identity mode only):
 
@@ -203,12 +209,12 @@ Safe on a nil receiver — returns the global fallbacks when no config is attach
 - `ZITI_SSH_GROUPS` — comma-separated Linux group names applied to any identity not matched by a config entry.
 - `ZITI_USER_CLEANUP` — set to `true` to delete Linux accounts after the last session closes (default: `false`).
 
-**`host.deleteUser(username)`** — the internal cleanup sequence:
+**`host.deleteUser(username, uid)`** — the internal cleanup sequence, called only for registered accounts with a verified UID (it also refuses any UID below 1000):
 
-1. Remove `/etc/sudoers.d/<username>` if present.
-2. Run `loginctl terminate-user <username>` to drain the systemd user session (errors are logged but ignored — the session may already be gone).
-3. Poll with `pgrep -u <username>` until no processes remain or a 5-second timeout elapses.
-4. Run `userdel -r <username>` to remove the account and home directory.
+1. Remove `/etc/sudoers.d/ziti-ssh-host-<username>` if present.
+2. Run `loginctl terminate-user -- <username>` to drain the systemd user session (errors are logged but ignored — the session may already be gone).
+3. Poll with `pgrep -u <uid>` until no processes remain (5 s), then `pkill -TERM -u <uid>` (10 s), then `pkill -KILL -u <uid>` (5 s).
+4. Run `userdel -r -- <username>` to remove the account and home directory.
 
 **`host.ProxyHooks`** wires `UserManager` into the proxy loop:
 
@@ -221,7 +227,7 @@ type ProxyHooks struct {
 
 `proxyConn` extracts the caller's Ziti identity name via the `dialerNamer` interface (same pattern as `ziti-ssh-ca`), then calls `OnConnect` before proxying and `OnDisconnect` in a deferred call after the connection closes. If `OnConnect` returns an error, the connection is closed without proxying.
 
-In `per-identity` mode, the `OnConnect` closure for each service: (1) derives the Linux username with `ca.DeriveUsername`; (2) calls `serviceState.get()` to read the current `*PermissionsConfig` under a read lock; (3) calls `config.Resolve(identity, globalGroups, globalSudoersRule)` to obtain the `IdentityPermissions` for this connection; (4) calls `manager.EnsureUser(username, perms)`. The `serviceState` pointer may be swapped by the service-changed listener at any time; the read lock ensures a consistent view per connection.
+In `per-identity` mode, the `OnConnect` closure for each service: (1) derives the Linux username with `ca.DeriveUsername`; (2) calls `serviceState.get()` to read the current `*PermissionsConfig` under a read lock; (3) calls `config.Resolve(identity, globalGroups, globalSudoersRule)` to obtain the `IdentityPermissions` for this connection; (4) calls `manager.EnsureUser(identity, username, perms)`. The `serviceState` pointer may be swapped by the service-changed listener at any time; the read lock ensures a consistent view per connection.
 
 **Multi-service binding:** all services share one `UserManager`. If the same Ziti identity connects through two different services simultaneously, the Linux user is created once on the first connection (with that service's permissions) and the second connection reuses the existing account. This first-connection-wins behaviour is logged at info level.
 
@@ -643,10 +649,12 @@ This is possible because `ziti-ssh-ca` runs on the same host as the Ziti control
 
 **Identity validation:** `callerIdentity` trusts only the router-set `DialerIdentityName` header (`GetDialerIdentityName()`), never the client-set `CallerId` header (`SourceIdentifier()`). It returns `""` when the router supplied no dialer identity, and `handleConn` rejects such connections before reading any data from them. `ziti-ssh-host` applies the same rule in `per-identity` mode. This requires every edge router to run OpenZiti v2.0.0 or later.
 
-**Principal derivation:** In `shared` mode, `ValidPrincipals` is set from the operator-configured `--principal` flag — a client cannot influence which Linux user they get. In `per-identity` mode, the principal is derived deterministically from the router-verified identity name via `ca.DeriveUsername`. The name comes from the dialer's edge router, which authenticated the client over mTLS, so the client cannot substitute another name. The derivation function (lowercase, replace non-`[a-z0-9_-]` with `_`, prefix `z` if digit-leading, truncate to 32) is purely defensive — it sanitizes the identity name for use as a POSIX username and is not a security boundary.
+**Principal derivation:** In `shared` mode, `ValidPrincipals` is set from the operator-configured `--principal` flag — a client cannot influence which Linux user they get. In `per-identity` mode, the principal is derived deterministically from the router-verified identity name via `ca.DeriveUsername`. The name comes from the dialer's edge router, which authenticated the client over mTLS, so the client cannot substitute another name. The derivation function (lowercase, replace non-`[a-z0-9_-]` with `_`, prefix `z` if digit-leading, truncate to 32) is purely defensive — it sanitizes the identity name for use as a POSIX username and is not a security boundary. Because it is lossy (`Alice` and `alice`, or `a.b` and `a_b`, derive the same name), `ziti-ssh-host` binds each account to the first identity that created it in its ownership registry and rejects any other identity deriving the same username. `ziti-ssh-ca` refuses to sign a per-identity certificate whose derived principal is `root` or starts with `-`.
 
 **Ziti as the authorization boundary:** Any identity that can dial `ssh-ca` receives a certificate. Any identity that can dial `ssh` with a given terminator address reaches that host. Access control is managed entirely in Ziti service policies (dial policies, service policies). This is intentional — the CA is a dumb signing service; the access control lives in Ziti.
 
 **No credentials on hosts:** The only file written to each SSH host is the CA public key (`/etc/ssh/ziti_ca.pub`). This is not a credential. An attacker who reads it gains nothing — it is the CA's public key and is not secret.
+
+**Account ownership boundary (per-identity mode):** `ziti-ssh-host` runs as root and creates, modifies, and deletes Linux accounts, so it must never act on an account it does not own. It manages an account only if it is recorded in `/var/lib/ziti-ssh-host/owned-users.json` for the connecting identity with the account's current UID, and the UID is at least 1000. Accounts that already exist but are not registered — `root`, the distribution's default user, administrator accounts — are refused before any `usermod`, sudoers write, process signal, or `userdel`. A short list of reserved names is refused even if absent. Sudoers files are written under a `ziti-ssh-host-` prefix so they cannot overwrite administrator files in `/etc/sudoers.d`. Accounts created by earlier releases are adopted only through an explicit `ziti-ssh-host users claim`.
 
 **Per-identity permissions trust boundary:** The `ziti-ssh-host.v1` config is fetched from the Ziti controller over the same mTLS-authenticated data plane channel used for service subscription. The hosting identity must have a config policy granting it access to the `ziti-ssh-host.v1` config type — config data is not delivered to arbitrary identities. Permission entries are keyed by Ziti identity name; the name used for lookup is the router-verified dialer identity (see [§6](#6-ziti-identity-flow)), so the connecting client cannot substitute another identity's entry. Linux groups referenced in a config entry must already exist on the host — `ziti-ssh-host` does not create groups. A missing group causes `usermod` to fail for that group; the failure is non-fatal (logged, session continues) so a misconfigured group name silently reduces the permissions applied rather than blocking access. Operators should use `ziti-ssh-host inspect` to verify the effective permissions before and after config changes.

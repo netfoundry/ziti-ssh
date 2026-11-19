@@ -26,6 +26,9 @@
 //
 //	inspect               Show the resolved ziti-ssh-host.v1 config for one or
 //	                      more services. Exits without opening any listeners.
+//
+//	users list|claim      Show or extend the per-identity account ownership
+//	                      registry (/var/lib/ziti-ssh-host/owned-users.json).
 package main
 
 import (
@@ -169,7 +172,7 @@ func main() {
 		},
 	}
 
-	root.AddCommand(enrollCmd, runCmd, inspectCmd, versionCmd)
+	root.AddCommand(enrollCmd, runCmd, inspectCmd, newUsersCmd(), versionCmd)
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -924,7 +927,11 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 	)
 
 	if mode == "per-identity" {
-		mgr = host.NewUserManager(userManagerStateFile, cleanupOnDisconnect)
+		var err error
+		mgr, err = host.NewUserManager(userManagerStateFile, cleanupOnDisconnect)
+		if err != nil {
+			return fmt.Errorf("per-identity mode: %w", err)
+		}
 
 		slog.Info("running orphan user cleanup")
 		if err := mgr.CleanupOrphans(); err != nil {

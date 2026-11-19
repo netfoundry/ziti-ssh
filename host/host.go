@@ -21,6 +21,7 @@ package host
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -37,13 +38,13 @@ import (
 // IdentityPermissions holds the resolved Linux permissions for a single
 // connecting Ziti identity on a specific service.
 type IdentityPermissions struct {
-	// Groups is a list of existing Linux groups to add the ephemeral user to
-	// via "usermod -aG" after account creation. Groups must already exist on
-	// the host; a missing group causes a non-fatal logged error.
+	// Groups is the exact list of supplementary Linux groups for the user, set
+	// via "usermod -G" on every connect. Groups must already exist on the host;
+	// a missing group causes a non-fatal logged error.
 	Groups []string
 
 	// SudoersRule is the rule fragment written after the username in
-	// /etc/sudoers.d/<username>. An empty string means no sudoers file is
+	// SudoersPath(username). An empty string means no sudoers file is
 	// created for this user.
 	SudoersRule string
 }
@@ -423,71 +424,86 @@ func childEnv() []string {
 	return filtered
 }
 
-// UserManager tracks reference counts for per-identity Linux users and
-// persists the set of managed usernames to a state file so that orphaned
-// users created before a crash can be cleaned up on the next startup.
+// UserManager tracks reference counts for per-identity Linux users and decides
+// which accounts ziti-ssh-host is allowed to create, modify, and delete.
+//
+// Ownership is recorded in a persistent OwnerRegistry (owned-users.json, next
+// to the state file). An account is managed only if it is in the registry for
+// the connecting Ziti identity with a matching UID. Pre-existing accounts that
+// ziti-ssh-host did not create — root, the distribution's default user, any
+// administrator account — are never adopted, modified, or deleted.
+//
+// The managed-users state file separately lists accounts with active sessions
+// so that CleanupOrphans can delete them after a crash (cleanup mode only).
 //
 // All exported methods are safe for concurrent use.
 type UserManager struct {
 	mu                  sync.Mutex
-	sessions            map[string]int    // username → active session count
-	owners              map[string]string // username → Ziti identity that created the account
+	sessions            map[string]int         // username → active session count
 	userLocks           map[string]*sync.Mutex // username → per-user lock for slow OS ops
 	stateFile           string
-	cleanupOnDisconnect bool // if false, skip deleteUser on ReleaseUser
+	registry            *OwnerRegistry
+	ops                 accountOps
+	cleanupOnDisconnect bool // if false, keep the account on ReleaseUser
 }
 
-// NewUserManager returns a UserManager that persists state to stateFile.
-// The state file and its parent directories are created on first write.
+// NewUserManager returns a UserManager that persists active sessions to
+// stateFile and account ownership to OwnedUsersFileName in the same directory.
 //
 // cleanupOnDisconnect controls whether the Linux user is deleted when the last
 // session closes. When false, the account persists across disconnects; the
 // sudoers file is still removed if one was written.
-func NewUserManager(stateFile string, cleanupOnDisconnect bool) *UserManager {
+//
+// It returns an error if the ownership registry exists but cannot be read, so
+// the daemon fails closed rather than managing accounts without it.
+func NewUserManager(stateFile string, cleanupOnDisconnect bool) (*UserManager, error) {
+	reg := NewOwnerRegistry(filepath.Join(filepath.Dir(stateFile), OwnedUsersFileName))
+	if _, _, err := reg.List(); err != nil {
+		return nil, err
+	}
+	return newUserManager(stateFile, reg, osAccountOps{}, cleanupOnDisconnect), nil
+}
+
+func newUserManager(stateFile string, reg *OwnerRegistry, ops accountOps, cleanupOnDisconnect bool) *UserManager {
 	return &UserManager{
 		sessions:            make(map[string]int),
-		owners:              make(map[string]string),
 		userLocks:           make(map[string]*sync.Mutex),
 		stateFile:           stateFile,
+		registry:            reg,
+		ops:                 ops,
 		cleanupOnDisconnect: cleanupOnDisconnect,
 	}
 }
 
-// EnsureUser creates the Linux user if this is the first session for that
-// username. zitiIdentity is the caller's Ziti identity name; username is its
-// derived Linux username (from ca.DeriveUsername). The pair is recorded so
-// that if a different Ziti identity later derives the same Linux username the
-// connection is rejected rather than silently inheriting the first caller's
-// permissions.
+// Registry returns the manager's ownership registry.
+func (m *UserManager) Registry() *OwnerRegistry { return m.registry }
+
+// EnsureUser prepares the Linux account for a new session of zitiIdentity,
+// whose derived Linux username is username, and applies perms.
 //
-// useradd is called with "-m -s /bin/bash <username>". If useradd reports
-// that the user already exists (exit code 9) the error is ignored so that
-// concurrent connections that race to create the same user are handled
-// gracefully.
+// The account is used only if one of the following holds:
+//   - it does not exist: it is created with useradd, its UID is verified to be
+//     >= MinManagedUID, and ownership is recorded in the registry; or
+//   - it exists and the registry records it as owned by zitiIdentity with the
+//     same UID.
 //
-// perms carries the resolved per-identity permissions for this connection.
-// Groups and sudoers are only applied on the first session for a username
-// (when the account is actually created). Subsequent sessions for the same
-// username log a message and return immediately.
+// Every other case is rejected without touching the account: a pre-existing
+// account not created by ziti-ssh-host, an account owned by a different Ziti
+// identity (derived-username collision), an account deleted and recreated
+// with a different UID, a UID below MinManagedUID, or a reserved/invalid name.
 //
-// The username is recorded in the state file so that CleanupOrphans can
-// remove it after a crash.
+// On success, supplementary groups are set to exactly perms.Groups and the
+// sudoers file is written (or removed if perms.SudoersRule is empty). The
+// session is counted and the username recorded in the state file.
 func (m *UserManager) EnsureUser(zitiIdentity, username string, perms IdentityPermissions) error {
-	// Phase 1 (global lock, fast): ownership check, session bookkeeping, and
-	// per-user lock acquisition. No blocking OS calls are made here.
-	m.mu.Lock()
-	if owner, owned := m.owners[username]; owned && owner != zitiIdentity {
-		m.mu.Unlock()
-		return fmt.Errorf("username %q (derived from %q) is already in use by Ziti identity %q: connection rejected to prevent privilege collision",
-			username, zitiIdentity, owner)
+	if err := ValidateManagedUsername(username); err != nil {
+		return fmt.Errorf("identity %q: %w", zitiIdentity, err)
 	}
+
+	// Phase 1 (global lock, fast): session bookkeeping and per-user lock.
+	m.mu.Lock()
 	m.sessions[username]++
 	isFirst := m.sessions[username] == 1
-	if isFirst {
-		// Record ownership atomically with the session increment so there is no
-		// window where the account exists without a recorded owner.
-		m.owners[username] = zitiIdentity
-	}
 	ul, ok := m.userLocks[username]
 	if !ok {
 		ul = &sync.Mutex{}
@@ -495,107 +511,116 @@ func (m *UserManager) EnsureUser(zitiIdentity, username string, perms IdentityPe
 	}
 	m.mu.Unlock()
 
-	if !isFirst {
-		// Acquire the per-user lock to:
-		//   (a) wait for the first caller to finish useradd before proceeding
-		//       (H5 barrier — prevents SSH login before /etc/passwd is written), and
-		//   (b) re-apply permissions idempotently, so a config change takes effect
-		//       on the next concurrent session without waiting for all sessions to
-		//       close (C2 fix — "regardless of session count").
-		//
-		// Invariant: by the time EnsureUser returns nil, the Linux user exists in
-		// /etc/passwd (or useradd reported it already existed).
-		ul.Lock()
-		defer ul.Unlock()
-
-		slog.Info("user already exists, re-applying permissions", "username", username, "sessions", m.sessions[username])
-
-		groupList := strings.Join(perms.Groups, ",")
-		slog.Info("setting user supplementary groups", "username", username, "groups", groupList)
-		usermod := exec.Command("usermod", "-G", groupList, username)
-		usermod.Env = childEnv()
-		if out, err := usermod.CombinedOutput(); err != nil {
-			slog.Error("usermod -G failed", "username", username, "groups", groupList, "err", err, "output", strings.TrimSpace(string(out)))
-		}
-
-		if perms.SudoersRule != "" {
-			if err := createSudoers(username, perms.SudoersRule); err != nil {
-				slog.Error("failed to update sudoers file", "username", username, "err", err)
-			}
-		} else {
-			// Config no longer specifies a sudoers rule — remove any stale file.
-			if err := removeSudoers(username); err != nil {
-				slog.Error("failed to remove stale sudoers file", "username", username, "err", err)
-			}
-		}
-
-		return nil
-	}
-
-	// Phase 2 (per-user lock only): slow OS operations. The global lock is not
-	// held here, so other usernames proceed concurrently.
+	// Phase 2 (per-user lock): ownership verification and OS operations.
 	ul.Lock()
 	defer ul.Unlock()
 
-	slog.Info("creating Linux user", "username", username)
-	cmd := exec.Command("useradd", "-m", "-s", "/bin/bash", username)
-	cmd.Env = childEnv()
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		// useradd exits with code 9 when the user already exists.
-		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 9 {
-			slog.Info("user already exists, treating as success", "username", username, "ziti_identity", zitiIdentity)
-		} else {
-			// Rollback: undo the session increment and ownership record.
-			m.mu.Lock()
-			m.sessions[username]--
-			if m.sessions[username] == 0 {
-				delete(m.sessions, username)
-				delete(m.owners, username)
-			}
-			m.mu.Unlock()
-			return fmt.Errorf("useradd %q: %w (output: %s)", username, err, out)
-		}
+	if err := m.ensureOwnedAccount(zitiIdentity, username); err != nil {
+		m.rollbackSession(username)
+		return err
 	}
 
-	// Set the user's supplementary groups to exactly the configured list.
-	// -G replaces the full supplementary group membership rather than
-	// appending (-aG), so revocations take effect on the next reconnect
-	// without needing to delete and recreate the account. An empty list
-	// clears all supplementary groups.
-	groupList := strings.Join(perms.Groups, ",")
-	slog.Info("setting user supplementary groups", "username", username, "groups", groupList)
-	usermod := exec.Command("usermod", "-G", groupList, username)
-	usermod.Env = childEnv()
-	if out, err := usermod.CombinedOutput(); err != nil {
-		// Non-fatal: the user was created successfully; group membership
-		// failure (e.g. group does not exist) is logged but does not abort
-		// the session.
-		slog.Error("usermod -G failed", "username", username, "groups", groupList, "err", err, "output", strings.TrimSpace(string(out)))
+	if err := m.ops.SetGroups(username, perms.Groups); err != nil {
+		// Non-fatal: a missing group reduces permissions rather than blocking.
+		slog.Error("setting supplementary groups failed", "username", username, "groups", perms.Groups, "err", err)
 	}
-
-	// Write sudoers file if a rule is configured.
+	if err := m.ops.RemoveLegacySudoers(username); err != nil {
+		slog.Error("failed to remove legacy sudoers file", "username", username, "err", err)
+	}
 	if perms.SudoersRule != "" {
-		if err := createSudoers(username, perms.SudoersRule); err != nil {
-			// Non-fatal: the user was created successfully; sudoers failure
-			// should not block the session, but it must be visible in logs.
-			slog.Error("failed to create sudoers file", "username", username, "err", err)
+		if err := m.ops.InstallSudoers(username, perms.SudoersRule); err != nil {
+			slog.Error("failed to write sudoers file", "username", username, "err", err)
+		}
+	} else if err := m.ops.RemoveSudoers(username); err != nil {
+		slog.Error("failed to remove stale sudoers file", "username", username, "err", err)
+	}
+
+	if isFirst {
+		if err := m.syncStateFile(); err != nil {
+			slog.Error("failed to write state file", "username", username, "err", err)
 		}
 	}
-
-	// Persist the username so orphan cleanup can find it after a restart.
-	if err := m.syncStateFile(); err != nil {
-		slog.Error("failed to write state file", "username", username, "err", err)
-		// Non-fatal: the user was created; orphan cleanup may miss it after a
-		// crash, but the session ref-count is correct for this run.
-	}
-
 	return nil
 }
 
+// ensureOwnedAccount verifies or establishes ownership of username for
+// zitiIdentity. Must be called with the per-user lock held.
+func (m *UserManager) ensureOwnedAccount(zitiIdentity, username string) error {
+	rec, owned, err := m.registry.Get(username)
+	if err != nil {
+		return fmt.Errorf("ownership registry: %w", err)
+	}
+	if owned && rec.Identity != zitiIdentity {
+		return fmt.Errorf("username %q (derived from %q) is already in use by Ziti identity %q: connection rejected to prevent privilege collision",
+			username, zitiIdentity, rec.Identity)
+	}
+
+	uid, exists, err := m.ops.LookupUID(username)
+	if err != nil {
+		return err
+	}
+
+	if exists {
+		if !owned {
+			return fmt.Errorf("refusing to manage pre-existing account %q (identity %q): it was not created by ziti-ssh-host; if it should be, run \"ziti-ssh-host users claim\"",
+				username, zitiIdentity)
+		}
+		if uid != rec.UID {
+			return fmt.Errorf("refusing to manage account %q: uid %d does not match registered uid %d (account was replaced outside ziti-ssh-host)",
+				username, uid, rec.UID)
+		}
+		if uid < MinManagedUID {
+			return fmt.Errorf("refusing to manage account %q: uid %d is below %d", username, uid, MinManagedUID)
+		}
+		return nil
+	}
+
+	// Account does not exist. A registry record for it is stale (the account
+	// was deleted outside ziti-ssh-host); it is replaced below.
+	slog.Info("creating Linux user", "username", username, "ziti_identity", zitiIdentity)
+	if err := m.ops.CreateUser(username); err != nil {
+		if errors.Is(err, errUserExists) {
+			// Created by someone else between lookup and useradd.
+			return fmt.Errorf("refusing to manage account %q: it was created concurrently outside ziti-ssh-host", username)
+		}
+		return err
+	}
+	uid, exists, err = m.ops.LookupUID(username)
+	if err != nil || !exists {
+		return fmt.Errorf("account %q not found after useradd (err: %v)", username, err)
+	}
+	if uid < MinManagedUID {
+		// Not registered, so it will never be used or modified. Left for the
+		// administrator to remove: deleteUser refuses UIDs below the floor.
+		slog.Error("useradd assigned a uid below the managed floor; account not registered and will not be used",
+			"username", username, "uid", uid)
+		return fmt.Errorf("useradd assigned uid %d below %d to %q; check UID_MIN in /etc/login.defs", uid, MinManagedUID, username)
+	}
+	if owned {
+		if err := m.registry.Remove(username); err != nil {
+			return fmt.Errorf("ownership registry: %w", err)
+		}
+	}
+	if err := m.registry.Put(username, OwnerRecord{Identity: zitiIdentity, UID: uid, Created: time.Now().UTC()}); err != nil {
+		return fmt.Errorf("ownership registry: %w", err)
+	}
+	return nil
+}
+
+// rollbackSession undoes the session increment from EnsureUser phase 1.
+func (m *UserManager) rollbackSession(username string) {
+	m.mu.Lock()
+	m.sessions[username]--
+	if m.sessions[username] <= 0 {
+		delete(m.sessions, username)
+	}
+	m.mu.Unlock()
+}
+
 // ReleaseUser decrements the session count for username. When the count
-// reaches zero, the Linux user is deleted with "userdel -r <username>" and
-// the username is removed from the state file.
+// reaches zero, the sudoers file is removed and — in cleanup mode — the Linux
+// user is deleted. Nothing is done to an account that is not in the registry
+// with a matching UID.
 func (m *UserManager) ReleaseUser(username string) error {
 	// Phase 1 (global lock, fast): session bookkeeping only.
 	m.mu.Lock()
@@ -611,22 +636,33 @@ func (m *UserManager) ReleaseUser(username string) error {
 		return nil
 	}
 	delete(m.sessions, username)
-	delete(m.owners, username)
 	ul := m.userLocks[username]
 	m.mu.Unlock()
 
-	// Phase 2 (per-user lock only): slow OS operations. The global lock is not
-	// held here, so other usernames proceed concurrently.
+	// Phase 2 (per-user lock): slow OS operations.
 	if ul != nil {
 		ul.Lock()
 		defer ul.Unlock()
 	}
 
+	// A new session may have started between phase 1 and acquiring the
+	// per-user lock; it now owns the account, so do not tear anything down.
+	m.mu.Lock()
+	reacquired := m.sessions[username] > 0
+	m.mu.Unlock()
+	if reacquired {
+		slog.Info("new session started during release; keeping user", "username", username)
+		return nil
+	}
+
+	uid, ok := m.verifiedOwnedUID(username)
+	if !ok {
+		return m.syncStateFile()
+	}
+
 	if !m.cleanupOnDisconnect {
 		slog.Info("last session closed, cleanup disabled — keeping Linux user", "username", username)
-		// Always attempt to remove the sudoers file (it may or may not exist).
-		// removeSudoers is a no-op if the file is absent.
-		if err := removeSudoers(username); err != nil {
+		if err := m.ops.RemoveSudoers(username); err != nil {
 			slog.Error("failed to remove sudoers file", "username", username, "err", err)
 		}
 		if err := m.syncStateFile(); err != nil {
@@ -636,31 +672,63 @@ func (m *UserManager) ReleaseUser(username string) error {
 	}
 
 	slog.Info("last session closed, deleting Linux user", "username", username)
-	if err := deleteUser(username); err != nil {
+	if err := m.ops.DeleteUser(username, uid); err != nil {
 		return err
 	}
-
+	if err := m.registry.Remove(username); err != nil {
+		slog.Error("failed to remove ownership record after deletion", "username", username, "err", err)
+	}
 	if err := m.syncStateFile(); err != nil {
 		slog.Error("failed to update state file after deletion", "username", username, "err", err)
-		// Non-fatal.
 	}
-
 	return nil
 }
 
-// CleanupOrphans reads the state file and calls userdel -r on each listed
-// username. It is intended to be called at startup, before accepting any
-// connections, to remove users that were not cleaned up after a crash.
+// verifiedOwnedUID returns the account's UID if it is in the registry, still
+// exists with the registered UID, and is at or above MinManagedUID. Any other
+// state is logged and reported as not owned. A registry record whose account
+// no longer exists is removed.
+func (m *UserManager) verifiedOwnedUID(username string) (int, bool) {
+	rec, owned, err := m.registry.Get(username)
+	if err != nil {
+		slog.Error("ownership registry unreadable; not touching account", "username", username, "err", err)
+		return 0, false
+	}
+	if !owned {
+		slog.Warn("account not in ownership registry; not touching it", "username", username)
+		return 0, false
+	}
+	uid, exists, err := m.ops.LookupUID(username)
+	if err != nil {
+		slog.Error("account lookup failed; not touching it", "username", username, "err", err)
+		return 0, false
+	}
+	if !exists {
+		slog.Info("registered account no longer exists; removing ownership record", "username", username)
+		if err := m.registry.Remove(username); err != nil {
+			slog.Error("failed to remove stale ownership record", "username", username, "err", err)
+		}
+		return 0, false
+	}
+	if uid != rec.UID || uid < MinManagedUID {
+		slog.Warn("account uid does not match ownership record or is below floor; not touching it",
+			"username", username, "uid", uid, "registered_uid", rec.UID)
+		return 0, false
+	}
+	return uid, true
+}
+
+// CleanupOrphans reads the state file and, in cleanup mode, deletes each
+// listed account that is still owned per the registry. It is intended to be
+// called at startup, before accepting any connections, to remove users that
+// were not cleaned up after a crash. Unowned accounts are dropped from the
+// state file without being touched.
 //
 // Errors deleting individual users are logged but do not stop cleanup of the
 // remaining users.
 func (m *UserManager) CleanupOrphans() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	data, err := os.ReadFile(m.stateFile)
 	if os.IsNotExist(err) {
-		// No state file — nothing to clean up.
 		return nil
 	}
 	if err != nil {
@@ -676,28 +744,36 @@ func (m *UserManager) CleanupOrphans() error {
 			continue
 		}
 		if !m.cleanupOnDisconnect {
-			// Users are intentionally persistent; do not delete them on
-			// restart. Clear the state file so they are no longer tracked
-			// by this process instance — they will not be cleaned up on the
-			// next restart either, which is the correct behaviour.
-			slog.Info("cleanup disabled; skipping orphan user deletion on restart", "username", username)
+			// Accounts are intentionally persistent. Remove any sudoers file
+			// left by a crash, but keep the account.
+			slog.Info("cleanup disabled; keeping account after restart", "username", username)
+			if _, ok := m.verifiedOwnedUID(username); ok {
+				if err := m.ops.RemoveSudoers(username); err != nil {
+					slog.Error("failed to remove orphan sudoers file", "username", username, "err", err)
+				}
+			}
+			continue
+		}
+		uid, ok := m.verifiedOwnedUID(username)
+		if !ok {
 			continue
 		}
 		slog.Info("cleaning up orphan user", "username", username)
-		if err := deleteUser(username); err != nil {
+		if err := m.ops.DeleteUser(username, uid); err != nil {
 			slog.Error("failed to delete orphan user", "username", username, "err", err)
-			// Keep in remaining so we try again on the next restart.
 			remaining = append(remaining, username)
+			continue
+		}
+		if err := m.registry.Remove(username); err != nil {
+			slog.Error("failed to remove ownership record after orphan deletion", "username", username, "err", err)
 		}
 	}
-
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("scan state file: %w", err)
 	}
-
-	// Rewrite the state file with only the users we failed to delete.
 	return m.writeStateFile(remaining)
 }
+
 
 // ValidateSudoersRule checks that rule is safe to embed in a sudoers file as
 // the fragment following a username:
@@ -735,7 +811,20 @@ func ValidateSudoersRule(rule string) error {
 // /etc/sudoers.d guarantees the final os.Rename is atomic (same filesystem).
 const sudoersStagingDir = "/etc/sudoers.d/.ziti-ssh-host-staging"
 
-// createSudoers writes a validated sudoers file to /etc/sudoers.d/<username>.
+// SudoersPath returns the sudoers file ziti-ssh-host manages for username:
+// /etc/sudoers.d/ziti-ssh-host-<username>. The prefix keeps it from colliding
+// with administrator-created files. Usernames are limited to [a-z0-9_-], so
+// the name never contains '.' or ends in '~' (which sudo's #includedir skips).
+func SudoersPath(username string) string {
+	return "/etc/sudoers.d/ziti-ssh-host-" + username
+}
+
+// legacySudoersPath is the pre-rename location, /etc/sudoers.d/<username>.
+func legacySudoersPath(username string) string {
+	return "/etc/sudoers.d/" + username
+}
+
+// createSudoers writes a validated sudoers file to SudoersPath(username).
 //
 // The file content is "<username> <rule>\n". It is staged in sudoersStagingDir
 // (a hidden subdirectory of /etc/sudoers.d that sudo ignores), validated with
@@ -778,7 +867,7 @@ func createSudoers(username, rule string) error {
 	}
 
 	// Atomic rename — same filesystem as the staging dir.
-	dest := "/etc/sudoers.d/" + username
+	dest := SudoersPath(username)
 	if err := os.Rename(tmpPath, dest); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("install sudoers file to %q: %w", dest, err)
@@ -788,115 +877,19 @@ func createSudoers(username, rule string) error {
 	return nil
 }
 
-// removeSudoers removes /etc/sudoers.d/<username> if it exists.
+// removeSudoers removes SudoersPath(username) if it exists.
 // A missing file is not treated as an error.
 func removeSudoers(username string) error {
-	path := "/etc/sudoers.d/" + username
+	path := SudoersPath(username)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove sudoers file %q: %w", path, err)
 	}
 	return nil
 }
 
-// deleteUser drains the user's systemd session, waits for all owned processes
-// to exit, then removes the user and their home directory with userdel -r.
-// userProcessesGone polls pgrep until no processes owned by username remain or
-// the timeout elapses. Returns true when the user has no remaining processes.
-func userProcessesGone(username string, timeout time.Duration) bool {
-	const pollInterval = 200 * time.Millisecond
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		pgrep := exec.Command("pgrep", "-u", username)
-		pgrep.Env = childEnv()
-		err := pgrep.Run()
-		if err != nil {
-			// pgrep exits 1 when no processes match — user is clear.
-			if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-				return true
-			}
-			// Unexpected pgrep error (e.g. command not found) — stop polling.
-			slog.Warn("pgrep error while waiting for user processes to exit",
-				"username", username, "err", err)
-			return false
-		}
-		time.Sleep(pollInterval)
-	}
-	return false
-}
-
-func deleteUser(username string) error {
-	// Remove the sudoers file before tearing down the account.
-	if err := removeSudoers(username); err != nil {
-		slog.Error("failed to remove sudoers file during deleteUser", "username", username, "err", err)
-		// Non-fatal: proceed with userdel regardless.
-	}
-
-	// Step 1: ask loginctl to terminate the user session (systemd --user,
-	// sd-pam, etc.).  Ignore errors — the session may already be gone.
-	loginctl := exec.Command("loginctl", "terminate-user", username)
-	loginctl.Env = childEnv()
-	if out, err := loginctl.CombinedOutput(); err != nil {
-		slog.Info("loginctl terminate-user returned non-zero (ignored)",
-			"username", username, "err", err, "output", strings.TrimSpace(string(out)))
-	}
-
-	// Step 2: wait up to 5 s for session processes to exit naturally.
-	if !userProcessesGone(username, 5*time.Second) {
-		// Step 3: escalate to SIGTERM for detached processes (nohup, screen,
-		// tmux) that loginctl does not reach.
-		slog.Info("user processes still running after loginctl; sending SIGTERM", "username", username)
-		pkillTerm := exec.Command("pkill", "-TERM", "-u", username)
-		pkillTerm.Env = childEnv()
-		if out, err := pkillTerm.CombinedOutput(); err != nil {
-			slog.Info("pkill -TERM returned non-zero (ignored)",
-				"username", username, "err", err, "output", strings.TrimSpace(string(out)))
-		}
-
-		// Step 4: wait up to 10 s for SIGTERM to take effect.
-		if !userProcessesGone(username, 10*time.Second) {
-			// Step 5: escalate to SIGKILL — cannot be caught or ignored.
-			slog.Warn("user processes still running after SIGTERM; sending SIGKILL", "username", username)
-			pkillKill := exec.Command("pkill", "-KILL", "-u", username)
-			pkillKill.Env = childEnv()
-			if out, err := pkillKill.CombinedOutput(); err != nil {
-				slog.Info("pkill -KILL returned non-zero (ignored)",
-					"username", username, "err", err, "output", strings.TrimSpace(string(out)))
-			}
-
-			// Step 6: wait up to 5 s for the kernel to reap SIGKILL'd processes.
-			if !userProcessesGone(username, 5*time.Second) {
-				slog.Warn("user processes still running after SIGKILL; proceeding with userdel",
-					"username", username)
-			}
-		}
-	}
-
-	// Step 7: remove the user and their home directory.
-	cmd := exec.Command("userdel", "-r", username)
-	cmd.Env = childEnv()
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 8 {
-			// Exit code 8: user still has running processes. The account and
-			// home directory were NOT deleted. The caller should retry after
-			// the processes exit.
-			return fmt.Errorf("userdel %q: user still has running processes; account not deleted (exit 8): %s",
-				username, strings.TrimSpace(string(out)))
-		}
-		return fmt.Errorf("userdel -r %q: %w (output: %s)", username, err, out)
-	}
-	slog.Info("deleted Linux user", "username", username)
-	return nil
-}
-
 // syncStateFile atomically rewrites the state file from the current contents
 // of m.sessions. It briefly acquires m.mu to take a consistent snapshot, then
 // releases it before performing file I/O — so callers must not hold m.mu.
-//
-// This replaces both the old addToStateFile (append) and removeFromStateFile
-// (read-filter-rewrite) with a single always-correct snapshot: the in-memory
-// sessions map is the source of truth, so there is no need to read the file
-// and no risk of divergence between the file and the map.
 func (m *UserManager) syncStateFile() error {
 	m.mu.Lock()
 	lines := make([]string, 0, len(m.sessions))
@@ -908,50 +901,10 @@ func (m *UserManager) syncStateFile() error {
 }
 
 // writeStateFile atomically replaces the state file with lines.
-// It writes to a temp file in the same directory, fsyncs, renames, then
-// fsyncs the parent directory — so a crash at any point leaves either the old
-// or the new file fully intact, never a zero-length or partially-written file.
 func (m *UserManager) writeStateFile(lines []string) error {
-	dir := filepath.Dir(m.stateFile)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("create state file dir: %w", err)
-	}
 	content := strings.Join(lines, "\n")
 	if len(lines) > 0 {
 		content += "\n"
 	}
-	tmp, err := os.CreateTemp(dir, ".managed-users-tmp-*")
-	if err != nil {
-		return fmt.Errorf("create state file temp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	if _, err := tmp.WriteString(content); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return fmt.Errorf("write state file temp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return fmt.Errorf("sync state file temp: %w", err)
-	}
-	if err := tmp.Chmod(0600); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return fmt.Errorf("chmod state file temp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("close state file temp: %w", err)
-	}
-	if err := os.Rename(tmpPath, m.stateFile); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("rename state file: %w", err)
-	}
-	// Fsync the parent directory to make the rename durable across power loss.
-	if dirF, err := os.Open(dir); err == nil {
-		_ = dirF.Sync()
-		dirF.Close()
-	}
-	return nil
+	return writeFileAtomic(m.stateFile, []byte(content), 0600)
 }

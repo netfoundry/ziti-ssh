@@ -60,7 +60,7 @@ const configTypeSchema = `{
           },
           "sudoers_rule": {
             "type": "string",
-            "description": "Rule fragment written after the username in /etc/sudoers.d/<username>"
+            "description": "Rule fragment written after the username in /etc/sudoers.d/ziti-ssh-host-<username>"
           }
         }
       }
@@ -85,7 +85,7 @@ Fields:
 
       sudoers_rule  (string)
         Rule fragment appended after the username in
-        /etc/sudoers.d/<username>. Example: "ALL=(ALL) NOPASSWD: /usr/bin/apt"
+        /etc/sudoers.d/ziti-ssh-host-<username>. Example: "ALL=(ALL) NOPASSWD: /usr/bin/apt"
 
 Example config value:
   {

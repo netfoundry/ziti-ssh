@@ -34,14 +34,33 @@ The CA derives a Linux username from each caller's Ziti identity name and places
 
 Examples: `Alice` → `alice`, `dba-Alice` → `dba-alice`, `123bot` → `z123bot`
 
+**Account ownership:** `ziti-ssh-host` only creates, modifies, or deletes Linux accounts that it created itself (or that an administrator has explicitly claimed, see [Managing account ownership](#managing-account-ownership)). Ownership is recorded in `/var/lib/ziti-ssh-host/owned-users.json` (username → Ziti identity and UID). On each connection:
+
+```mermaid
+flowchart TD
+    A[Connection from identity] --> B{Username valid?<br/>not reserved, no leading '-'}
+    B -- no --> X[Reject]
+    B -- yes --> C{Account exists?<br/>getent passwd}
+    C -- no --> D["useradd -m -s /bin/bash -- &lt;username&gt;"]
+    D --> E{UID >= 1000?}
+    E -- no --> X
+    E -- yes --> F[Record in owned-users.json]
+    F --> G[Apply groups and sudoers]
+    C -- yes --> H{Registered to this identity<br/>with the same UID, UID >= 1000?}
+    H -- no --> X
+    H -- yes --> G
+```
+
+The connection is rejected — and the account left untouched — when the account already exists but was not created by `ziti-ssh-host` (for example `ubuntu` or an administrator account), when it is registered to a different Ziti identity (two identities deriving the same username), when it was deleted and recreated with a different UID, or when its UID is below 1000. Reserved names (`root`, common system accounts, `ubuntu`, `admin`, `ziti`) are always refused. Separately, `ziti-ssh-ca` refuses to sign a per-identity certificate whose derived principal is `root` or starts with `-`.
+
 **Ephemeral user lifecycle:**
-- On first connection from an identity, `useradd -m -s /bin/bash <username>` runs.
-- If `ZITI_SSH_GROUPS` is set, `usermod -aG <groups> <username>` is run immediately after account creation. Groups must already exist on the host; failure is non-fatal and logged.
-- If `ZITI_SUDOERS_RULE` is set, a sudoers file is written to `/etc/sudoers.d/<username>` (validated with `visudo -c` before installation).
+- On first connection from an identity, `useradd -m -s /bin/bash -- <username>` runs and the account is recorded in the ownership registry.
+- On every connection, supplementary groups are set to exactly the resolved list with `usermod -G <groups> -- <username>` (from the `ziti-ssh-host.v1` config entry, or `ZITI_SSH_GROUPS`). Groups must already exist on the host; failure is non-fatal and logged.
+- If a sudoers rule is resolved (config entry or `ZITI_SUDOERS_RULE`), it is written to `/etc/sudoers.d/ziti-ssh-host-<username>` (validated with `visudo -c` before installation); otherwise any existing file is removed.
 - Concurrent sessions from the same identity are reference-counted — `useradd` is only called once.
-- When the last session from an identity closes, the cleanup sequence runs: `loginctl terminate-user <username>` drains the systemd session, the process list is polled until the user's processes exit (up to 5 seconds), and then `userdel -r <username>` removes the account and home directory. The sudoers file is removed unconditionally at this point (group membership is implicit in account deletion).
-- By default the Linux account is kept after disconnect. Set `ZITI_USER_CLEANUP=true` to delete the account when the last session closes. The sudoers file is removed on disconnect regardless of this setting.
-- Active managed usernames are persisted to `/var/lib/ziti-ssh-host/managed-users`. On startup, `CleanupOrphans` reads this file and deletes any listed users (they had sessions open when the process was last killed), preventing accumulation of stale accounts after crashes.
+- When the last session from an identity closes, the sudoers file is removed. With `ZITI_USER_CLEANUP=true`, the cleanup sequence then runs: `loginctl terminate-user` drains the systemd session, the user's processes (matched by UID) are polled until they exit, escalating to SIGTERM and then SIGKILL, and `userdel -r` removes the account and home directory and its ownership record. Accounts not in the registry with a matching UID are never touched.
+- By default the Linux account is kept after disconnect. Set `ZITI_USER_CLEANUP=true` to delete the account when the last session closes.
+- Usernames with active sessions are persisted to `/var/lib/ziti-ssh-host/managed-users`. On startup, `CleanupOrphans` reads this file: with `ZITI_USER_CLEANUP=true` it deletes each listed account that is still registered (they had sessions open when the process was last killed); otherwise it removes their leftover sudoers files and keeps the accounts.
 
 **Connecting in per-identity mode:**
 ```sh
@@ -106,11 +125,59 @@ Each host has its own service (e.g., `ssh-web-01`, `ssh-web-02`) with a fully in
 
 ### Constraints
 
-- **Groups must exist on the host.** `ziti-ssh-host` does not create Linux groups. If a config entry references a group that does not exist, `usermod -aG` will fail. The failure is logged and the session proceeds with the user account created but without the requested group membership.
+- **Groups must exist on the host.** `ziti-ssh-host` does not create Linux groups. If a config entry references a group that does not exist, `usermod -G` will fail. The failure is logged and the session proceeds with the user account created but without the requested group membership.
 - **First-connection-wins for concurrent cross-service sessions.** If the same identity connects through two services simultaneously, the Linux account is created once with the permissions from the first connection. The second service's config is not applied retroactively.
 - **Any matched config entry suppresses global fallbacks entirely.** An identity matched by an exact key, a glob pattern, or the `"*"` catch-all receives only what that entry specifies — globals are not merged in.
 - **No config attached is not an error.** `ziti-ssh-host` logs a debug message and uses global fallbacks.
 - **`shared` mode is unaffected.** The `ziti-ssh-host.v1` config is consulted only in `per-identity` mode.
+
+---
+
+## Managing account ownership
+
+In `per-identity` mode, `ziti-ssh-host` manages only accounts recorded in its ownership registry, `/var/lib/ziti-ssh-host/owned-users.json`. Two admin subcommands read and extend it; both must run as root.
+
+### `ziti-ssh-host users list`
+
+Lists every registered account with its Ziti identity, UID, creation time, source (`created` by `ziti-ssh-host` or `claimed` by an administrator), and current status. A `UID MISMATCH` status means the account was deleted and recreated outside `ziti-ssh-host`; it will not be managed until the situation is resolved by an administrator.
+
+### `ziti-ssh-host users claim --username <username> --identity <identity>`
+
+Registers an existing account as owned by a Ziti identity. This is the **upgrade path** for accounts created by releases before the registry existed: those accounts are not in the registry, so connections from their identities are rejected with
+
+```
+refusing to manage pre-existing account "<username>" (identity "<identity>"): it was not created by ziti-ssh-host; if it should be, run "ziti-ssh-host users claim"
+```
+
+until claimed. The command refuses unless:
+
+- `--username` equals the username derived from `--identity` (same rules as `ca.DeriveUsername`);
+- the account exists and has a UID of at least 1000;
+- the name is not reserved; and
+- the account is not already registered to a different identity.
+
+Example, after upgrading a host whose identity `dba-alice` already has an account:
+
+```sh
+sudo ziti-ssh-host users claim --username dba-alice --identity dba-alice
+sudo ziti-ssh-host users list
+```
+
+Claims take effect on the next connection; no restart is needed. Only claim accounts you know were created for that identity — claiming hands the account, including its home directory and any sudoers rule the identity's config grants, to that identity.
+
+### Legacy sudoers files
+
+Earlier releases wrote sudoers rules to `/etc/sudoers.d/<username>`; they are now written to `/etc/sudoers.d/ziti-ssh-host-<username>`. On the next connection of a registered account, the old file is removed if — and only if — it contains the single `<username> <rule>` line that `ziti-ssh-host` wrote. Any other file at that path is left in place and a warning is logged.
+
+### Rejection log lines
+
+| Log message (prefix) | Meaning |
+|---|---|
+| `refusing to manage pre-existing account` | Account exists but is not registered. Claim it if it belongs to that identity; otherwise rename or remove the Ziti identity. |
+| `username "<u>" (derived from "<id>") is already in use by Ziti identity` | Two identities derive the same username. Rename one of the identities. |
+| `does not match registered uid` | Account was replaced outside `ziti-ssh-host`. |
+| `is reserved and will not be managed` / `must not start with '-'` | The identity's derived username is not allowed. Rename the identity. |
+| `rejected connection: invalid per-identity principal` (`ziti-ssh-ca`) | The CA refused to sign for a derived principal of `root` or one starting with `-`. |
 
 ---
 
@@ -379,4 +446,7 @@ See [provisioning.md](provisioning.md) for the full systemd unit file examples f
 
 | Path | Mode | Contents |
 |---|---|---|
-| `/var/lib/ziti-ssh-host/managed-users` | 0644 | One derived username per line — the set of Linux users currently managed by the daemon. Used for orphan cleanup on restart. |
+| `/var/lib/ziti-ssh-host/managed-users` | 0600 | One derived username per line — the Linux users with active sessions. Used for orphan cleanup on restart. |
+| `/var/lib/ziti-ssh-host/owned-users.json` | 0600 | Ownership registry: username → Ziti identity, UID, creation time, and whether it was claimed. The only authority for which accounts `ziti-ssh-host` may modify or delete. Never cleared on restart. |
+| `/var/lib/ziti-ssh-host/owned-users.json.lock` | 0600 | Lock file serialising registry access between the daemon and `ziti-ssh-host users`. |
+| `/etc/sudoers.d/ziti-ssh-host-<username>` | 0440 | Sudoers rule for a managed user, when one is resolved. Removed when the last session closes. |

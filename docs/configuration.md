@@ -126,8 +126,8 @@ The `run` subcommand also accepts:
 | Flag | Environment variable | Default | Description |
 |---|---|---|---|
 | `--mode` | `ZITI_SSH_MODE` | `shared` | Principal mode: `shared` or `per-identity` |
-| — | `ZITI_SSH_GROUPS` | — | Comma-separated Linux groups applied (via `usermod -aG`) to users not matched by a `ziti-ssh-host.v1` config entry. Global fallback; per-identity mode only. Groups must already exist on the host. |
-| — | `ZITI_SUDOERS_RULE` | — | If set, a sudoers rule `<username> <value>` is written to `/etc/sudoers.d/<username>` on first connect. Global fallback applied to users not matched by a `ziti-ssh-host.v1` config entry; per-identity mode only. |
+| — | `ZITI_SSH_GROUPS` | — | Comma-separated Linux groups set as the user's supplementary groups (via `usermod -G`, replacing existing membership) for users not matched by a `ziti-ssh-host.v1` config entry. Global fallback; per-identity mode only. Groups must already exist on the host. |
+| — | `ZITI_SUDOERS_RULE` | — | If set, a sudoers rule `<username> <value>` is written to `/etc/sudoers.d/ziti-ssh-host-<username>` on connect. Global fallback applied to users not matched by a `ziti-ssh-host.v1` config entry; per-identity mode only. |
 | — | `ZITI_USER_CLEANUP` | `false` | Set to `true` to delete the Linux account after the last session closes via `userdel -r` (per-identity mode only) |
 
 `enroll` also requires `--jwt <path>` (no environment variable equivalent).
@@ -139,6 +139,19 @@ The `run` subcommand also accepts:
 | `--service` | — | — | Ziti service name to inspect. Required; may be repeated to inspect multiple services. |
 
 Uses the same `--identity` flag (and `ZITI_IDENTITY` env var) as the other subcommands. See [Inspecting per-identity permissions](operations.md#inspecting-per-identity-permissions) in the operations guide for details and example output.
+
+### `ziti-ssh-host users list` / `users claim`
+
+Administer the per-identity account ownership registry (`/var/lib/ziti-ssh-host/owned-users.json`). Both must run as root; neither connects to the Ziti network.
+
+`users list` takes no flags. `users claim` flags:
+
+| Flag | Environment variable | Default | Description |
+|---|---|---|---|
+| `--username` | — | — | Existing Linux username to register. Must equal the username derived from `--identity`. Required. |
+| `--identity` | — | — | Ziti identity name that owns the account. Required. |
+
+See [Managing account ownership](operations.md#managing-account-ownership) for when and how to use them.
 
 ---
 
@@ -194,8 +207,8 @@ This config is only consulted in `per-identity` mode. It has no effect in `share
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `permissions` | object | yes | Map of Ziti identity name (or pattern) → permission entry. Keys may be exact identity names, glob patterns (using `*` and `?`), or the `"*"` catch-all. All matches are case-sensitive. |
-| `permissions.<key>.groups` | array of strings | no | Linux groups to add the ephemeral user to via `usermod -aG` after account creation. Groups must already exist on the host. |
-| `permissions.<key>.sudoers_rule` | string | no | The rule fragment placed after the username in `/etc/sudoers.d/<username>`. Validated with `visudo -c` before installation. Omit to grant no sudo access. |
+| `permissions.<key>.groups` | array of strings | no | The user's exact supplementary Linux groups, set via `usermod -G` on every connect. Groups must already exist on the host. |
+| `permissions.<key>.sudoers_rule` | string | no | The rule fragment placed after the username in `/etc/sudoers.d/ziti-ssh-host-<username>`. Validated with `visudo -c` before installation. Omit to grant no sudo access. |
 
 ### Example
 

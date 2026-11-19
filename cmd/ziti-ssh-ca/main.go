@@ -387,8 +387,8 @@ func handleConn(conn net.Conn, signer ssh.Signer, caPubBytes []byte, principal, 
 	effectivePrincipal := principal
 	if mode == "per-identity" {
 		effectivePrincipal = ca.DeriveUsername(identity)
-		if effectivePrincipal == "" {
-			log.Error("rejected connection: derived username is empty", "identity", identity)
+		if err := ca.ValidatePerIdentityPrincipal(effectivePrincipal); err != nil {
+			log.Error("rejected connection: invalid per-identity principal", "identity", identity, "err", err)
 			return
 		}
 		log = log.With("derived_principal", effectivePrincipal)

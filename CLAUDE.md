@@ -172,7 +172,7 @@ Flags: `--controller <host[:port]>` (default port 443), `--username`, `--passwor
 
 ### Host Daemon (`ziti-ssh-host`)
 
-Three subcommands:
+Four subcommands:
 
 **`enroll --jwt <path>`:**
 1. Enrolls the host Ziti identity from a JWT token
@@ -187,7 +187,7 @@ Three subcommands:
 3. Accepts one or more `--ssh-service` values (flag may be repeated; `ZITI_SSH_SERVICE` accepts comma-separated list; defaults to `ssh`)
 4. For each service: opens a separate Ziti listener, loads and parses the `ziti-ssh-host.v1` config, builds independent `ProxyHooks` carrying that service's permission map
 5. Proxies incoming connections to `127.0.0.1:22`
-6. In `per-identity` mode: on connect, creates an ephemeral Linux user and applies the resolved permissions (groups via `usermod -G`, sudoers rule via `/etc/sudoers.d/<username>`); on disconnect, decrements the session ref-count and deletes the user when the last session closes
+6. In `per-identity` mode: on connect, creates an ephemeral Linux user and applies the resolved permissions (groups via `usermod -G`, sudoers rule via `/etc/sudoers.d/ziti-ssh-host-<username>`); only accounts in the ownership registry are ever touched; on disconnect, decrements the session ref-count and deletes the user when the last session closes
 7. Subscribes to service-changed events and reloads each service's `ziti-ssh-host.v1` config atomically when it changes — no restart needed
 
 **`inspect [--service <name>]...`:**
@@ -195,6 +195,10 @@ Three subcommands:
 - For each named service: reports whether the service is visible, whether a `ziti-ssh-host.v1` config is attached, and prints the full permissions table (Ziti identity name → derived Linux username → groups → sudoers rule)
 - Also prints the global fallback values (`ZITI_SSH_GROUPS`, `ZITI_SUDOERS_RULE`) alongside each service block
 - Useful for verifying configuration before putting a host into service or after a config change
+
+**`users list` / `users claim --username <u> --identity <id>`** (root; no Ziti connection):
+- `list` prints the per-identity account ownership registry with each account's current status
+- `claim` registers an existing account (UID ≥ 1000, username == `ca.DeriveUsername(identity)`) as owned by an identity — the migration path for accounts created before the registry existed
 
 ## Per-Identity Permissions (`ziti-ssh-host.v1`)
 
@@ -316,12 +320,14 @@ The CA derives a Linux username from each caller's Ziti identity name using `ca.
 
 Example: `Alice` → `alice`, `dba-Alice` → `dba-alice`, `123bot` → `z123bot`
 
+**Account ownership (security boundary):** `ziti-ssh-host` only creates, modifies, or deletes accounts recorded in `/var/lib/ziti-ssh-host/owned-users.json` (`host.OwnerRegistry`: username → identity, UID) for the connecting identity with a matching UID ≥ 1000. Never adopt a pre-existing account: `useradd` exit 9 is a rejection, not success. Reserved names (`root`, system accounts, `ubuntu`, …) and names starting with `-` are refused. Accounts from releases before the registry are adopted only via `ziti-ssh-host users claim --username <u> --identity <id>`; `users list` shows the registry. OS calls go through the `accountOps` interface (`host/accounts.go`) so this logic is unit-tested with a fake.
+
 **Ephemeral user lifecycle:**
-- `ziti-ssh-host run` creates the user with `useradd -m -s /bin/bash <username>` on the first connection from that identity.
-- Permissions are resolved (config entry → global fallback) and applied: `usermod -G <groups>` (replaces supplementary groups) for group membership, `/etc/sudoers.d/<username>` for sudoers (validated with `visudo -c` before installation). Group failures are non-fatal and logged.
+- `ziti-ssh-host run` creates the user with `useradd -m -s /bin/bash -- <username>` on the first connection from that identity and records it in the ownership registry.
+- Permissions are resolved (config entry → global fallback) and applied on every connect: `usermod -G <groups>` (replaces supplementary groups) for group membership, `/etc/sudoers.d/ziti-ssh-host-<username>` for sudoers (validated with `visudo -c` before installation). Group failures are non-fatal and logged.
 - A reference count tracks concurrent sessions for the same identity.
-- When the last session closes, the cleanup sequence runs: `loginctl terminate-user`, process poll (up to 5 s), `userdel -r`. The sudoers file is removed unconditionally at this point; group membership is removed implicitly by account deletion.
-- The set of active managed usernames is persisted to `/var/lib/ziti-ssh-host/managed-users` (one username per line). On startup, `CleanupOrphans` reads this file and deletes any users still listed there (they had active sessions when the process was killed). This prevents accumulation of stale accounts after crashes.
+- When the last session closes, the sudoers file is removed; with `ZITI_USER_CLEANUP=true` the cleanup sequence then runs: `loginctl terminate-user`, process poll by UID with SIGTERM/SIGKILL escalation, `userdel -r`, and the registry record is removed.
+- The set of usernames with active sessions is persisted to `/var/lib/ziti-ssh-host/managed-users` (one username per line). On startup, `CleanupOrphans` reads this file and, in cleanup mode, deletes listed accounts that are still registered (they had active sessions when the process was killed).
 - By default the Linux account is kept after disconnect. Set `ZITI_USER_CLEANUP=true` to delete the account when the last session closes (useful when ephemeral-only accounts are required). The sudoers file is still removed on disconnect.
 
 **Connecting in per-identity mode:**
@@ -387,7 +393,8 @@ ziti-ssh/
 │   │   ├── main.go         # CA service entry point, run loop, enroll subcommand
 │   │   └── config.go       # config subcommand (print, apply, remove)
 │   └── ziti-ssh-host/
-│       └── main.go         # enroll, run (multi-service), inspect subcommands
+│       ├── main.go         # enroll, run (multi-service), inspect subcommands
+│       └── users.go        # users list / claim (ownership registry admin)
 ├── ca/
 │   ├── ca.go               # CA key loading, cert signing, DeriveUsername
 │   └── ca_test.go          # Unit tests for DeriveUsername
@@ -396,6 +403,11 @@ ziti-ssh/
 │   └── sftp.go             # RunSFTP — SFTP file copy over net.Conn
 ├── host/
 │   ├── host.go             # ProxyHooks, Proxy, UserManager, PermissionsConfig, sshd config
+│   ├── accounts.go         # accountOps (useradd/usermod/userdel/getent…), username validation, deleteUser
+│   ├── registry.go         # OwnerRegistry — persistent account ownership (owned-users.json)
+│   ├── claim.go            # ClaimAccount — adopt pre-registry accounts
+│   ├── accounts_test.go    # Account ownership tests using a fake accountOps
+│   ├── caller_test.go      # Router-verified caller identity tests
 │   └── host_test.go        # Unit tests for PermissionsConfig.Resolve and UserManager
 ├── config/
 │   ├── config.go           # Shared configuration (flags + env vars)
