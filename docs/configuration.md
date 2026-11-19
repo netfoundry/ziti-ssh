@@ -181,7 +181,7 @@ See [Managing account ownership](operations.md#managing-account-ownership) for w
 | `--ssh-service` | `ZITI_SSH_SERVICE` | `ssh` | SSH service name |
 | `--key` | — | auto-detect | SSH private key path |
 | `-r` / `--recursive` | — | false | Recursively copy entire directories |
-| `-p` / `--preserve` | — | false | Preserve file timestamps and permissions |
+| `-p` / `--preserve` | — | false | Preserve file timestamps and permissions (on download, never world-writable) |
 | `-q` / `--quiet` | — | false | Suppress per-file progress output |
 
 ### `ziti-scp enroll`

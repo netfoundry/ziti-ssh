@@ -33,6 +33,13 @@ See security advisory GHSA-TBD for details.
 - `ziti-ssh connect -A` is refused unless `--forward-agent-unverified` is also given: clients cannot yet verify which host answered on a terminator address (an OpenZiti limitation), and a forwarded agent can be used by that host while connected.
 - **Action:** to keep agent forwarding, add `permit-agent-forwarding` to `ZITI_CERT_EXTENSIONS` on the CA and use `-A --forward-agent-unverified`.
 
+#### `ziti-scp` download hardening
+
+- Refuses to write through an existing local symlink at a download destination.
+- Downloaded files take the remote file's permission bits reduced by the local umask (previously always 0644); with `-p` the mode is applied exactly except that files are never made world-writable. setuid/setgid/sticky are never applied.
+- Recursive copies stop at 64 directory levels (the remote host controls download depth).
+- Control characters in server-supplied file names are replaced before being printed in progress output.
+
 #### `ziti-ssh proxy` never prompts
 
 - In `ProxyCommand` mode, `ziti-ssh proxy` no longer offers to generate an SSH key when none is found (the prompt was written into the SSH data stream on stdout); it exits with an error asking for a key or `--key`.

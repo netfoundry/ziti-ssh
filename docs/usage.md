@@ -323,13 +323,15 @@ ziti-scp -r ziggy@web-server-prod:/remote/dir /local/dir/
 | Flag | Short | Default | Description |
 |---|---|---|---|
 | `--recursive` | `-r` | false | Recursively copy entire directories |
-| `--preserve` | `-p` | false | Preserve file timestamps and permissions |
+| `--preserve` | `-p` | false | Preserve file timestamps and permissions (on download, never world-writable) |
 | `--quiet` | `-q` | false | Suppress progress output |
 | `--identity` | — | `ZITI_IDENTITY` | Ziti identity file path |
 | `--key` | — | auto-detect | SSH private key path |
 | `--ca-service` | — | `ssh-ca` | CA service name |
 | `--ssh-service` | — | `ssh` | SSH service name |
 | `--config` | — | `~/.config/ziti-ssh/config.yaml` | Config file path |
+
+**Downloads are defensive about what the remote host sends:** a downloaded file takes the remote file's permission bits reduced by your umask (never setuid, setgid or sticky; with `-p`, never world-writable); `ziti-scp` refuses to write through an existing local symlink at the destination; remote entry names containing `/`, `\` or `..` are rejected; recursion stops at 64 directory levels; and control characters in file names are replaced before being printed.
 
 If the certificate is missing or less than 20% of its lifetime remains (between 30 s and 5 min — 1 minute for the default 5-minute certificate), `ziti-scp` automatically obtains a fresh certificate from the CA before connecting — the same auto-refresh behaviour as `ziti-ssh connect`.
 
