@@ -326,7 +326,7 @@ Persistent flags (accepted by all subcommands):
 | — | `ZITI_ALLOW_SUDOERS` | — | Services (comma-separated, or `*`) whose config may set `sudoers_rule`; others are refused (connection rejected) |
 | — | `ZITI_ALLOW_GROUPS` | — | `<service>:<group>` / `*:<group>` list of privileged groups (`root`, `sudo`, `admin`, `wheel`, `docker`, `lxd`, `disk`, `shadow`, `libvirt`) a service's config may grant |
 | — | `ZITI_RESTRICT_GROUPS` | `false` | `true`: config may grant only groups listed in `ZITI_ALLOW_GROUPS` |
-| — | `ZITI_TERMINATE_ON_DISCONNECT` | `false` | With cleanup off: set to `true` to end all of the account's processes (lingering disabled, `loginctl terminate-user`, SIGTERM/SIGKILL by UID) when the last session closes, keeping the account. Needed for revoked identities to lose background processes. |
+| — | `ZITI_TERMINATE_ON_DISCONNECT` | `false` | With cleanup off: set to `true` to end everything the account can run when the last session closes (account expired with `usermod -e 1`, crontab and `at` jobs removed, lingering disabled, `loginctl terminate-user`, SIGTERM/SIGKILL by UID), keeping the account; `accountOps.ReactivateAccount` (`usermod -e ""`) re-enables it on the next authorized connect (fail closed). Needed for revoked identities to lose background processes. |
 
 **Important:** `--mode` must be set consistently on both `ziti-ssh-ca` and `ziti-ssh-host run`. If the CA issues certs with per-identity principals but the host is in shared mode (or vice versa), SSH authentication will fail.
 

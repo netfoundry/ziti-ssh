@@ -82,7 +82,7 @@ See security advisory GHSA-TBD for details.
 
 #### Optional termination of a user's processes on disconnect
 
-- New `ziti-ssh-host` setting `ZITI_TERMINATE_ON_DISCONNECT` (default `false`, per-identity mode with `ZITI_USER_CLEANUP=false`). When `true`, all of an account's processes are ended when its last session closes — lingering disabled, `loginctl terminate-user`, then SIGTERM/SIGKILL to the account's UID — while the account and home directory are kept. Also applied at startup to accounts that still had sessions open when the daemon stopped.
+- New `ziti-ssh-host` setting `ZITI_TERMINATE_ON_DISCONNECT` (default `false`, per-identity mode with `ZITI_USER_CLEANUP=false`). When `true`, everything the account can run is stopped when its last session closes — the account is expired (`usermod -e 1`; re-enabled on the identity's next authorized connection, which is rejected if that fails), its crontab and `at` jobs are removed, lingering is disabled, `loginctl terminate-user`, then SIGTERM/SIGKILL to the account's UID — while the account and home directory are kept. With `ZITI_USER_CLEANUP=true` the same sequence runs before deletion. Also applied at startup to accounts that still had sessions open when the daemon stopped.
 - With both settings at their defaults, background processes survive disconnect and identity revocation; the daemon now logs a warning at startup in that configuration.
 - `docs/operations.md` revocation section now tabulates the behaviour of each combination.
 

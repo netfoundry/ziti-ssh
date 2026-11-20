@@ -37,8 +37,9 @@ if [ ! -f /etc/ziti-ssh-host/env ]; then
 #ZITI_USER_CLEANUP=false
 
 # TERMINATE_ON_DISCONNECT — with USER_CLEANUP=false, end all of the user's
-# processes (nohup, tmux, systemd user services) when the last session closes,
-# keeping the account and home directory. Needed for revoked identities to lose
+# processes (nohup, tmux, systemd user services), remove their crontab and at
+# jobs, and expire the account until its next authorized connection when the
+# last session closes, keeping the account and home directory. Needed for revoked identities to lose
 # running processes. No effect when USER_CLEANUP=true (deletion already ends them).
 #ZITI_TERMINATE_ON_DISCONNECT=false
 

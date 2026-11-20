@@ -98,6 +98,11 @@ func (f *fakeOps) RemoveLegacySudoers(u string) error {
 	f.record("rmlegacy:" + u)
 	return f.failure("rmlegacy")
 }
+func (f *fakeOps) ReactivateAccount(u string) error {
+	f.record("reactivate:" + u)
+	return f.failure("reactivate")
+}
+
 func (f *fakeOps) TerminateProcesses(u string, uid int) error {
 	f.record("terminate:" + u)
 	return nil
@@ -920,5 +925,64 @@ func TestRemoveOwnedFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(outside); err != nil {
 		t.Error("symlink target outside the root was removed")
+	}
+}
+
+// ---- revocation: scheduled jobs and account expiry (H12) ------------------
+
+func TestAtJobsOf(t *testing.T) {
+	atq := "12\tThu Nov 20 10:00:00 2026 a alice\n" +
+		"13\tThu Nov 20 11:00:00 2026 b bob\n" +
+		"14\tFri Nov 21 09:30:00 2026 a alice\n" +
+		"garbage line alice\n"
+	got := atJobsOf(atq, "alice")
+	if len(got) != 2 || got[0] != "12" || got[1] != "14" {
+		t.Fatalf("atJobsOf = %v, want [12 14]", got)
+	}
+	if got := atJobsOf(atq, "carol"); len(got) != 0 {
+		t.Fatalf("carol: %v", got)
+	}
+}
+
+func TestEnsureUser_ReactivatesOwnedAccount(t *testing.T) {
+	ops := newFakeOps()
+	m := testManager(t, t.TempDir(), ops, false)
+	// First connection creates the account: nothing to re-enable.
+	if err := m.EnsureUser("alice", "alice", IdentityPermissions{}); err != nil {
+		t.Fatal(err)
+	}
+	if ops.called("reactivate:") {
+		t.Error("new account re-enabled")
+	}
+	if err := m.ReleaseUser("alice"); err != nil {
+		t.Fatal(err)
+	}
+	// Reconnection to the kept account re-enables it (it may have been
+	// expired by TerminateProcesses at the last disconnect).
+	if err := m.EnsureUser("alice", "alice", IdentityPermissions{}); err != nil {
+		t.Fatal(err)
+	}
+	if !ops.called("reactivate:alice") {
+		t.Error("existing account not re-enabled on connect")
+	}
+}
+
+func TestEnsureUser_ReactivateFailureRejects(t *testing.T) {
+	ops := newFakeOps()
+	m := testManager(t, t.TempDir(), ops, false)
+	if err := m.EnsureUser("alice", "alice", IdentityPermissions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ReleaseUser("alice"); err != nil {
+		t.Fatal(err)
+	}
+	ops.mu.Lock()
+	ops.fail["reactivate"] = errors.New("usermod failed")
+	ops.mu.Unlock()
+	if err := m.EnsureUser("alice", "alice", adminPerms); err == nil {
+		t.Fatal("connection accepted although the account could not be re-enabled")
+	}
+	if ops.called("sudoers:alice") || ops.called("groups:alice:sudo") {
+		t.Error("permissions applied to an account that could not be re-enabled")
 	}
 }

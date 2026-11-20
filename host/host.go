@@ -890,6 +890,12 @@ func (m *UserManager) ensureOwnedAccount(zitiIdentity, username string) error {
 		if uid < MinManagedUID {
 			return fmt.Errorf("refusing to manage account %q: uid %d is below %d", username, uid, MinManagedUID)
 		}
+		// The account may have been expired when its last session ended
+		// (TerminateProcesses); this authorized connection re-enables it.
+		// Fail closed: an expired account would be refused by sshd anyway.
+		if err := m.ops.ReactivateAccount(username); err != nil {
+			return err
+		}
 		return nil
 	}
 

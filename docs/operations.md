@@ -60,7 +60,7 @@ The connection is rejected — and the account left untouched — when the accou
 - Every managed account is a member of the `ziti-ssh-managed` group (in addition to its configured groups, and also after its privileges are dropped). sshd ignores `authorized_keys` and any `AuthorizedKeysCommand` for this group, so users can only log in with a CA certificate.
 - Concurrent sessions from the same identity are reference-counted — `useradd` is only called once.
 - When the last session from an identity closes, the sudoers file is removed and the account's supplementary groups are cleared. With `ZITI_USER_CLEANUP=true`, the cleanup sequence then runs: `loginctl terminate-user` drains the systemd session, the user's processes (matched by UID) are polled until they exit, escalating to SIGTERM and then SIGKILL, and `userdel -r` removes the account and home directory and its ownership record. Accounts not in the registry with a matching UID are never touched.
-- By default the Linux account is kept after disconnect, together with any background processes the user started. Set `ZITI_TERMINATE_ON_DISCONNECT=true` to end those processes when the last session closes (the account and home directory are kept), or `ZITI_USER_CLEANUP=true` to delete the account when the last session closes.
+- By default the Linux account is kept after disconnect, together with any background processes the user started. Set `ZITI_TERMINATE_ON_DISCONNECT=true` to end those processes and remove the account's crontab and `at` jobs when the last session closes (the account and home directory are kept; the account is expired until its identity's next authorized connection), or `ZITI_USER_CLEANUP=true` to delete the account when the last session closes.
 - Usernames with active sessions are persisted to `/var/lib/ziti-ssh-host/managed-users`. On startup, `CleanupOrphans` reads this file: with `ZITI_USER_CLEANUP=true` it deletes each listed account that is still registered (they had sessions open when the process was last killed); otherwise it removes their leftover sudoers files, clears their supplementary groups, and keeps the accounts.
 
 **Connecting in per-identity mode:**
@@ -367,8 +367,8 @@ In every mode the account's supplementary groups are cleared at that point. What
 
 | `ZITI_USER_CLEANUP` | `ZITI_TERMINATE_ON_DISCONNECT` | Account and home | Background processes (`nohup`, `tmux`, systemd user services) |
 |---|---|---|---|
-| `false` (default) | `false` (default) | Kept | **Kept running** — a revoked identity's processes continue. The daemon logs a startup warning in this configuration. |
-| `false` | `true` | Kept | Ended: lingering disabled, `loginctl terminate-user`, then SIGTERM and SIGKILL to the account's UID |
+| `false` (default) | `false` (default) | Kept | **Kept running** — a revoked identity's processes, crontab and `at` jobs continue. The daemon logs a startup warning in this configuration. |
+| `false` | `true` | Kept (expired until the next authorized connection) | Ended: the account is expired (`usermod -e 1`, so neither sshd nor cron accepts it until the identity's next authorized connection re-enables it), its crontab and `at` jobs are removed, lingering is disabled, `loginctl terminate-user`, then SIGTERM and SIGKILL to the account's UID |
 | `true` | any | Deleted (`userdel -r`), and the user's files in `/tmp`, `/var/tmp` and `/dev/shm` removed | Ended (same sequence, before deletion) |
 
 The host cannot distinguish a revocation from an ordinary disconnect — it only sees the last session close — so for revocation to also stop running processes, enable `ZITI_TERMINATE_ON_DISCONNECT=true` or `ZITI_USER_CLEANUP=true`. Users then lose background jobs whenever their last session closes. Otherwise an administrator must end them manually on each host (`loginctl terminate-user <username>`, and `userdel -r <username>` to remove the account).

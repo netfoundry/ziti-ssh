@@ -82,6 +82,8 @@ type accountOps interface {
 	// TerminateProcesses ends every process owned by the account (disabling
 	// lingering first) but keeps the account. uid must be the verified UID.
 	TerminateProcesses(username string, uid int) error
+	// ReactivateAccount removes an account expiry set by TerminateProcesses.
+	ReactivateAccount(username string) error
 	// DeleteUser terminates the account's processes and removes it with its
 	// home directory. uid must be the verified UID of the account.
 	DeleteUser(username string, uid int) error
@@ -170,6 +172,8 @@ func (osAccountOps) TerminateProcesses(username string, uid int) error {
 	return terminateUserProcesses(username, uid)
 }
 
+func (osAccountOps) ReactivateAccount(username string) error { return reactivateAccount(username) }
+
 func (osAccountOps) DeleteUser(username string, uid int) error {
 	return deleteUser(username, uid)
 }
@@ -196,15 +200,26 @@ func userProcessesGone(uid int, timeout time.Duration) bool {
 	return false
 }
 
-// terminateUserProcesses ends every process owned by uid: it disables
-// lingering (so systemd user services are not restarted), asks loginctl to
-// terminate the user's sessions, waits up to 5 s, then escalates to SIGTERM
-// (10 s) and SIGKILL (5 s). Processes are matched by the verified UID, never
-// by name. The UID floor is re-checked as a last guard.
+// terminateUserProcesses ends everything the account can still run: it
+// first expires the account (so neither sshd nor cron accepts it until the
+// identity's next authorized connection, see reactivateAccount), removes its
+// crontab and at jobs, disables lingering (so systemd user services are not
+// restarted), asks loginctl to terminate the user's sessions, waits up to
+// 5 s, then escalates to SIGTERM (10 s) and SIGKILL (5 s). Processes are
+// matched by the verified UID, never by name. The UID floor is re-checked as
+// a last guard. A failure to expire the account is returned; the rest
+// continues regardless.
 func terminateUserProcesses(username string, uid int) error {
 	if uid < MinManagedUID {
 		return fmt.Errorf("refusing to terminate processes of %q: uid %d is below %d", username, uid, MinManagedUID)
 	}
+
+	var expireErr error
+	if out, err := runChild("usermod", "-e", "1", "--", username); err != nil {
+		expireErr = fmt.Errorf("expire account %q: %w (%s)", username, err, out)
+		slog.Error("could not expire account; cron jobs may still run", "username", username, "err", expireErr)
+	}
+	removeScheduledJobs(username)
 
 	linger := exec.Command("loginctl", "disable-linger", "--", username)
 	linger.Env = childEnv()
@@ -242,7 +257,64 @@ func terminateUserProcesses(username string, uid int) error {
 			"username", username, "err", err, "output", strings.TrimSpace(string(out)))
 	}
 	if !userProcessesGone(uid, 5*time.Second) {
-		return fmt.Errorf("processes of %q (uid %d) still running after SIGKILL", username, uid)
+		return errors.Join(expireErr, fmt.Errorf("processes of %q (uid %d) still running after SIGKILL", username, uid))
+	}
+	return expireErr
+}
+
+// runChild runs a command with the sanitised child environment and returns
+// its trimmed combined output.
+func runChild(name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Env = childEnv()
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+// removeScheduledJobs removes the account's crontab and its at jobs, so
+// nothing the user scheduled runs after their access ends. Missing tools or
+// "no crontab" are not errors.
+func removeScheduledJobs(username string) {
+	if out, err := runChild("crontab", "-u", username, "-r"); err != nil {
+		slog.Debug("crontab -r (ignored)", "username", username, "err", err, "output", out)
+	} else {
+		slog.Info("removed user's crontab", "username", username)
+	}
+	out, err := runChild("atq")
+	if err != nil {
+		slog.Debug("atq unavailable (ignored)", "err", err, "output", out)
+		return
+	}
+	if ids := atJobsOf(out, username); len(ids) > 0 {
+		if out, err := runChild("atrm", ids...); err != nil {
+			slog.Warn("atrm failed", "username", username, "jobs", ids, "err", err, "output", out)
+		} else {
+			slog.Info("removed user's at jobs", "username", username, "jobs", ids)
+		}
+	}
+}
+
+// atJobsOf returns the job numbers in atq output (as root: "<id>\t<date…>
+// <queue> <user>") that belong to username.
+func atJobsOf(atq, username string) []string {
+	var ids []string
+	for _, line := range strings.Split(atq, "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 2 && f[len(f)-1] == username {
+			if _, err := strconv.Atoi(f[0]); err == nil {
+				ids = append(ids, f[0])
+			}
+		}
+	}
+	return ids
+}
+
+// reactivateAccount removes the expiry set by terminateUserProcesses, so the
+// account can log in again. Called on every authorized connection of an
+// owned account; usermod -e "" is a no-op for an account that never expired.
+func reactivateAccount(username string) error {
+	if out, err := runChild("usermod", "-e", "", "--", username); err != nil {
+		return fmt.Errorf("re-enable account %q: %w (%s)", username, err, out)
 	}
 	return nil
 }
