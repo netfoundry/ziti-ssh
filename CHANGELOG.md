@@ -244,6 +244,7 @@ Details of each change follow.
 
 - Added `.dockerignore` so the build context excludes `.git`, `dist/`, local binaries, `*.jwt`, `*.json` (identity files), key material and local security notes (previously `COPY . .` could copy an enrollment JWT into the image).
 - `scripts/Dockerfile.packages` pins `golang:1.26-bookworm` by digest; Dependabot now also tracks the Docker base image.
+- `scripts/build-packages.sh` no longer installs nfpm with `go install` (nfpm v2.49.0 needs Go ≥ 1.27.4, so the Docker build and machines without nfpm failed); when nfpm is not on `PATH` it downloads the pinned release binary, verifies it against the release checksums, and uses it for that run only — as the release workflow does.
 
 #### Documentation and cleanup
 
