@@ -478,18 +478,42 @@ func runSign(p signParams) error {
 // ---------------------------------------------------------------------------
 
 // parseTarget splits "[user@]target" into (user, target) at the last "@" (as
-// OpenSSH does), so user names that contain "@" — Ziti identity names such as
-// "alice@corp.com" in per-identity mode — are kept whole. If no "@" is present
-// the current OS user is returned as the default username.
+// OpenSSH does). If no "@" is present
+// the current OS user is returned as the default username (proxy mode,
+// where the user is not used; connect uses splitTarget and defaultUser).
 func parseTarget(arg string) (username, target string, err error) {
-	if idx := strings.LastIndexByte(arg, '@'); idx >= 0 {
-		return arg[:idx], arg[idx+1:], nil
+	username, target, explicit := splitTarget(arg)
+	if explicit {
+		return username, target, nil
 	}
 	cur, err := user.Current()
 	if err != nil {
 		return "", "", fmt.Errorf("determine current user: %w", err)
 	}
-	return cur.Username, arg, nil
+	return cur.Username, target, nil
+}
+
+// splitTarget splits "[user@]target" at the last "@"; explicit reports
+// whether a user was given.
+func splitTarget(arg string) (username, target string, explicit bool) {
+	if idx := strings.LastIndexByte(arg, '@'); idx >= 0 {
+		return arg[:idx], arg[idx+1:], true
+	}
+	return "", arg, false
+}
+
+// defaultUser is the SSH user when the target names none: the certificate's
+// single principal if there is one (in per-identity mode, the identity's
+// derived Linux username), otherwise the current OS user.
+func defaultUser(certPath string) (string, error) {
+	if p, ok := client.CertPrincipal(certPath); ok {
+		return p, nil
+	}
+	cur, err := user.Current()
+	if err != nil {
+		return "", fmt.Errorf("determine current user: %w", err)
+	}
+	return cur.Username, nil
 }
 
 // connectParams holds all resolved settings for the connect command.
@@ -547,10 +571,7 @@ func runConnect(p connectParams) error {
 	if err := checkAgentForwarding(p.forwardAgent, p.forwardAgentUnverified); err != nil {
 		return err
 	}
-	username, host, err := parseTarget(p.target)
-	if err != nil {
-		return err
-	}
+	username, host, explicitUser := splitTarget(p.target)
 
 	// Resolve SSH key path before touching the network so we can check cert
 	// freshness without authenticating twice.
@@ -594,6 +615,12 @@ func runConnect(p connectParams) error {
 			fmt.Fprintf(os.Stderr, "%-12s valid, expires in %s\n", "Certificate:", remaining)
 		} else {
 			fmt.Fprintf(os.Stderr, "%-12s valid\n", "Certificate:")
+		}
+	}
+
+	if !explicitUser {
+		if username, err = defaultUser(certPath); err != nil {
+			return err
 		}
 	}
 
@@ -1324,7 +1351,8 @@ automatically refreshed via the ziti-ssh-ca service before connecting.
 
 The target may be given as:
   user@identity-name    — SSH as <user> to the host with Ziti identity <identity-name>
-  identity-name         — SSH as the current OS user
+  identity-name         — SSH as the certificate's principal (per-identity mode:
+                          your derived Linux username), else the current OS user
 
 If the target exactly matches a Ziti service name it is dialled directly. Otherwise
 it is used as a terminator address on the --ssh-service.

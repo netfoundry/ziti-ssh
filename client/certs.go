@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -128,4 +129,26 @@ func certNeedsRefreshAt(cert *ssh.Certificate, now time.Time) bool {
 	}
 	expiry := time.Unix(int64(cert.ValidBefore), 0)
 	return expiry.Sub(now) < certRefreshThreshold(cert)
+}
+
+// CertPrincipal returns the only principal of the SSH certificate at
+// certPath. ok is false if the file is missing, is not a certificate, or the
+// certificate has zero or several principals. Clients use it as the default
+// SSH user when none is given: in per-identity mode the CA issues each
+// identity a certificate for its derived Linux username, so the user does not
+// have to work that name out.
+func CertPrincipal(certPath string) (principal string, ok bool) {
+	data, err := os.ReadFile(certPath)
+	if err != nil {
+		return "", false
+	}
+	pub, _, _, _, err := ssh.ParseAuthorizedKey(data)
+	if err != nil {
+		return "", false
+	}
+	cert, isCert := pub.(*ssh.Certificate)
+	if !isCert || len(cert.ValidPrincipals) != 1 || cert.ValidPrincipals[0] == "" {
+		return "", false
+	}
+	return cert.ValidPrincipals[0], true
 }

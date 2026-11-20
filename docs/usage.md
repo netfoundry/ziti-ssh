@@ -54,7 +54,7 @@ ziti-ssh connect ziggy@web-server-prod
 
 `web-server-prod` is the Ziti identity name of the target host. `ziti-ssh` resolves this as a Ziti service terminator address on the `ssh` service — no DNS, no IP address required.
 
-The target is split at the **last** `@`, as with OpenSSH, so a user name that contains `@` works: `ziti-ssh alice@corp.com@web-server-prod` logs in as `alice@corp.com`. If the target name is also a Ziti service name, that service is dialed directly (see the host key table below); `--service <name>` always treats the target as a terminator address on `<name>`.
+Without a `user@`, the SSH user is the principal of your certificate when it has exactly one — in per-identity mode that is your derived Linux username, so `ziti-ssh web-server-prod` is enough — and otherwise your local user name. The target is split at the **last** `@`, as with OpenSSH. In per-identity mode an explicit user must be the derived Linux username (identity `alice@corp.com` → `alice_corp_com`), not the identity name. If the target name is also a Ziti service name, that service is dialed directly (see the host key table below); `--service <name>` always treats the target as a terminator address on `<name>`.
 
 If a certificate is missing or less than 20% of its lifetime remains (between 30 s and 5 min — 1 minute for the default 5-minute certificate), `ziti-ssh connect` automatically obtains a fresh one from the CA before opening the session. On first use it auto-detects your SSH key in `~/.ssh/` (tries `id_ed25519`, `id_ecdsa`, `id_rsa` in that order). If no key exists it offers to run `ssh-keygen -t ed25519` for you; `ssh-keygen` asks for a passphrase (recommended; press Enter for none).
 
@@ -322,7 +322,7 @@ The certificate expires after the TTL configured on the CA (default: 5 minutes).
 
 `ziti-scp` copies files to and from remote hosts over the same Ziti overlay, using the SFTP subsystem. It mirrors `scp(1)` behaviour. The same identity, SSH certificate, and `~/.config/ziti-ssh/config.yaml` config file are shared with `ziti-ssh` — no additional enrollment is needed.
 
-Remote specifications use the same `[user@]host:path` format as `scp`. The host name is resolved the same way `ziti-ssh` resolves it: first checked against the Ziti service list for a direct match, then used as a terminator address on `--ssh-service` (default: `ssh`); `--service <name>` skips the service-name check. As with `scp`, an argument is remote only if it contains `:` with no `/` before it — `/data/a:b`, `./a:b` and `dir/a:b` are local paths. The user part is split at the last `@` (`alice@corp.com@web1:/tmp`).
+Remote specifications use the same `[user@]host:path` format as `scp`. The host name is resolved the same way `ziti-ssh` resolves it: first checked against the Ziti service list for a direct match, then used as a terminator address on `--ssh-service` (default: `ssh`); `--service <name>` skips the service-name check. As with `scp`, an argument is remote only if it contains `:` with no `/` before it — `/data/a:b`, `./a:b` and `dir/a:b` are local paths. The user part is split at the last `@`; without one, the certificate's principal (or your local user name) is used, as in `ziti-ssh`.
 
 ### Upload (local to remote)
 

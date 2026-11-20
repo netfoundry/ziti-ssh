@@ -111,3 +111,27 @@ func TestIsLoopbackBind(t *testing.T) {
 		}
 	}
 }
+
+func TestSplitTarget(t *testing.T) {
+	cases := map[string]struct {
+		user, target string
+		explicit     bool
+	}{
+		"web1":                {"", "web1", false},
+		"bob@web1":            {"bob", "web1", true},
+		"alice@corp.com@web1": {"alice@corp.com", "web1", true},
+	}
+	for in, want := range cases {
+		u, h, ex := splitTarget(in)
+		if u != want.user || h != want.target || ex != want.explicit {
+			t.Errorf("splitTarget(%q) = %q, %q, %v; want %+v", in, u, h, ex, want)
+		}
+	}
+}
+
+func TestDefaultUser_FallsBackToOSUser(t *testing.T) {
+	u, err := defaultUser(t.TempDir() + "/missing-cert.pub")
+	if err != nil || u == "" {
+		t.Fatalf("defaultUser without a certificate: %q, %v", u, err)
+	}
+}

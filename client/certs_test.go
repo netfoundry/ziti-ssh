@@ -20,6 +20,8 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -143,5 +145,38 @@ func TestCertNeedsRefreshAt(t *testing.T) {
 	forever := &ssh.Certificate{ValidBefore: ssh.CertTimeInfinity}
 	if certNeedsRefreshAt(forever, now) {
 		t.Error("non-expiring certificate needs refresh")
+	}
+}
+
+func TestCertPrincipal(t *testing.T) {
+	dir := t.TempDir()
+	ca, user := newKey(t), newKey(t)
+	write := func(name string, principals ...string) string {
+		c := signCert(t, ca, user.PublicKey(), ssh.UserCert, 5*time.Minute)
+		c.ValidPrincipals = principals
+		if err := c.SignCert(rand.Reader, ca); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, ssh.MarshalAuthorizedKey(c), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	if p, ok := CertPrincipal(write("one", "alice_corp_com")); !ok || p != "alice_corp_com" {
+		t.Errorf("single principal: %q, %v", p, ok)
+	}
+	if _, ok := CertPrincipal(write("two", "a", "b")); ok {
+		t.Error("two principals: want no default")
+	}
+	if _, ok := CertPrincipal(filepath.Join(dir, "missing")); ok {
+		t.Error("missing file: want no default")
+	}
+	plain := filepath.Join(dir, "plain.pub")
+	if err := os.WriteFile(plain, ssh.MarshalAuthorizedKey(user.PublicKey()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := CertPrincipal(plain); ok {
+		t.Error("plain public key: want no default")
 	}
 }

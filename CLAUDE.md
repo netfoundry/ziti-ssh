@@ -360,9 +360,9 @@ Example: `Alice` → `alice`, `dba-Alice` → `dba-alice`, `123bot` → `z123bot
 
 **Connecting in per-identity mode:**
 ```sh
-ziti-ssh dba-alice@web-server-prod
+ziti-ssh web-server-prod
 ```
-The username before `@` is the Ziti identity name (which is also the derived Linux username when it contains only lowercase letters, digits, hyphens, and underscores).
+With no `user@`, `ziti-ssh` and `ziti-scp` use the certificate's principal — in per-identity mode the CA issues it for the identity's derived Linux username (`client.CertPrincipal`). An explicit user must be that derived name, not the Ziti identity name: identity `Alice@Corp.com` logs in as `alice_corp_com` (`ziti-ssh alice_corp_com@web-server-prod`); `alice@corp.com@web-server-prod` is refused by sshd because it does not match the certificate.
 
 ## SSH Host Configuration
 

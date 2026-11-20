@@ -159,18 +159,27 @@ func parseArg(arg string) (isRemote bool, remote remoteSpec, localPath string) {
 }
 
 // splitUserHost splits "user@host" into (user, host) at the last "@" (as
-// OpenSSH does), so user names that contain "@" — Ziti identity names such as
-// "alice@corp.com" — are kept whole. If no "@" is present the current OS
-// username is used.
+// OpenSSH does). If no "@" is present, u is empty and runSCP picks the
+// default user (defaultUser) once the certificate is known.
 func splitUserHost(hostPart string) (u, h string) {
 	if idx := strings.LastIndexByte(hostPart, '@'); idx >= 0 {
 		return hostPart[:idx], hostPart[idx+1:]
 	}
-	cur, err := user.Current()
-	if err == nil {
-		return cur.Username, hostPart
-	}
 	return "", hostPart
+}
+
+// defaultUser is the SSH user when the remote spec names none: the
+// certificate's single principal if there is one (in per-identity mode, the
+// identity's derived Linux username), otherwise the current OS user.
+func defaultUser(certPath string) (string, error) {
+	if p, ok := client.CertPrincipal(certPath); ok {
+		return p, nil
+	}
+	cur, err := user.Current()
+	if err != nil {
+		return "", fmt.Errorf("determine current user: %w", err)
+	}
+	return cur.Username, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -456,6 +465,12 @@ func runSCP(p scpParams) error {
 			zitiTimeout:  p.zitiTimeout,
 		}); err != nil {
 			return fmt.Errorf("auto-sign: %w", err)
+		}
+	}
+
+	if remoteUser == "" {
+		if remoteUser, err = defaultUser(certPath); err != nil {
+			return err
 		}
 	}
 
