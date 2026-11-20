@@ -58,8 +58,16 @@ const (
 
 	callbackPath      = "/auth/callback"
 	defaultAuthScopes = "openid profile email"
-	flowTimeout       = 2 * time.Minute
 )
+
+// flowTimeout bounds the whole browser flow. A callback that fails (bad state,
+// bad token) does not end the flow early, so a forged request from another
+// local process cannot abort a legitimate login. (A variable for tests.)
+var flowTimeout = 2 * time.Minute
+
+// browse opens the login URL for the user (a variable so tests can drive the
+// flow with an HTTP client instead of a browser).
+var browse = func(url string) { openBrowser(url, os.Stderr, startCommand) }
 
 // FlowParams holds all parameters required to run the OIDC browser flow.
 type FlowParams struct {
@@ -207,7 +215,7 @@ func runFlow(ctx context.Context, p FlowParams) (string, error) {
 		"callback_port", p.CallbackPort,
 		"timeout", flowTimeout,
 	)
-	openBrowser("http://localhost:"+p.CallbackPort+"/login", os.Stderr, startCommand)
+	browse("http://localhost:" + p.CallbackPort + "/login")
 
 	select {
 	case tokens := <-tokenChan:
