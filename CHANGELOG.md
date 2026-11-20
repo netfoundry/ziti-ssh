@@ -126,6 +126,10 @@ See security advisory GHSA-TBD for details.
 **Updated docs:** `docs/operations.md` (account ownership flow diagram, lifecycle, new "Managing account ownership" section, files-written table), `docs/configuration.md` (`users` subcommands, sudoers path), `ARCHITECTURE.md` (`UserManager`, `deleteUser`, §12 account ownership boundary), `CLAUDE.md`.
 
 ### Fixed
+#### Permission config changes apply within 30 seconds
+
+- `ziti-ssh-host run` checks the controller for service changes every 30 s (`ZITI_SERVICE_REFRESH`, minimum 5 s); previously it used the SDK default of 5 minutes, so a changed or reduced `ziti-ssh-host.v1` config could take up to 5 minutes to reach a host although the docs said "within seconds". Each check is a small "anything changed?" request.
+
 #### Host connection limit and cross-service permission conflicts
 
 - `ziti-ssh-host run --max-connections` / `ZITI_MAX_CONNECTIONS` (default 128) caps concurrent connections per service; further connections are closed immediately and logged at most every 10 s. Previously accepts were unbounded.

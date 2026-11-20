@@ -228,13 +228,45 @@ func parseGlobalGroups() []string {
 // appends configType to the context's declared config types before the first
 // Authenticate call. This is required for the SDK to deliver service config
 // data of that type.
-func newZitiContextWithConfigTypes(identityFile string, configTypes ...string) (ziti.Context, error) {
+//
+// serviceRefresh sets how often the SDK checks the controller for service
+// changes — and so how quickly a changed ziti-ssh-host.v1 config reaches this
+// host (0 = SDK default, 5 minutes). Each check is a small "anything
+// changed?" request; services are only re-fetched when something changed.
+func newZitiContextWithConfigTypes(identityFile string, serviceRefresh time.Duration, configTypes ...string) (ziti.Context, error) {
 	cfg, err := ziti.NewConfigFromFile(identityFile)
 	if err != nil {
 		return nil, fmt.Errorf("load Ziti config from %q: %w", identityFile, err)
 	}
 	cfg.ConfigTypes = append(cfg.ConfigTypes, configTypes...)
-	return ziti.NewContext(cfg)
+	opts := *ziti.DefaultOptions
+	if serviceRefresh > 0 {
+		opts.RefreshInterval = serviceRefresh
+	}
+	return ziti.NewContextWithOpts(cfg, &opts)
+}
+
+// Service refresh interval for ziti-ssh-host run (ZITI_SERVICE_REFRESH).
+const (
+	defaultServiceRefresh = 30 * time.Second
+	minServiceRefresh     = 5 * time.Second
+)
+
+// serviceRefreshFromEnv parses ZITI_SERVICE_REFRESH (a duration, at least
+// minServiceRefresh), defaulting to defaultServiceRefresh.
+func serviceRefreshFromEnv() (time.Duration, error) {
+	v := os.Getenv("ZITI_SERVICE_REFRESH")
+	if v == "" {
+		return defaultServiceRefresh, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("ZITI_SERVICE_REFRESH: invalid duration %q: %w", v, err)
+	}
+	if d < minServiceRefresh {
+		return 0, fmt.Errorf("ZITI_SERVICE_REFRESH must be at least %s, got %s", minServiceRefresh, d)
+	}
+	return d, nil
 }
 
 // runEnroll enrolls this host with the Ziti network, fetches the intermediate
@@ -835,10 +867,15 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 
 	// Use NewConfigFromFile + NewContext so we can inject ConfigTypes before
 	// the first Authenticate call.
-	zitiCtx, err := newZitiContextWithConfigTypes(identityFile, zitiSSHHostConfigType)
+	serviceRefresh, err := serviceRefreshFromEnv()
+	if err != nil {
+		return err
+	}
+	zitiCtx, err := newZitiContextWithConfigTypes(identityFile, serviceRefresh, zitiSSHHostConfigType)
 	if err != nil {
 		return fmt.Errorf("init Ziti context from %q: %w", identityFile, err)
 	}
+	slog.Info("service refresh interval (config changes reach this host within it)", "interval", serviceRefresh)
 	defer zitiCtx.Close()
 
 	// cachedCtrlURLs holds the most-recently-seen controller URL list so the
@@ -1181,7 +1218,7 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 // ziti-ssh-host.v1 config for each requested service, and prints a formatted
 // permissions table. Exits without opening any listeners.
 func runInspect(identityFile string, serviceNames []string, zitiTimeout time.Duration) error {
-	zitiCtx, err := newZitiContextWithConfigTypes(identityFile, zitiSSHHostConfigType)
+	zitiCtx, err := newZitiContextWithConfigTypes(identityFile, 0, zitiSSHHostConfigType)
 	if err != nil {
 		return fmt.Errorf("init Ziti context from %q: %w", identityFile, err)
 	}

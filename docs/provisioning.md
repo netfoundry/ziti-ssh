@@ -443,7 +443,7 @@ The `ziti-ssh-host` identity must have access to the `ziti-ssh-host.v1` config t
 
 ### 4. Update a config
 
-Edit the config object in the controller to add, change, or remove identity entries. Changes propagate to all running `ziti-ssh-host` instances bound to that service within seconds — no restart required.
+Edit the config object in the controller to add, change, or remove identity entries. Changes reach all running `ziti-ssh-host` instances bound to that service within their service refresh interval — 30 seconds by default, `ZITI_SERVICE_REFRESH` — with no restart required.
 
 ```sh
 ziti edge update config ssh-permissions \

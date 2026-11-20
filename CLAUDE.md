@@ -247,7 +247,7 @@ host env: ZITI_ALLOW_GROUPS=ssh-ops:sudo   ← host owner lets only ssh-ops gran
 
 **Host grant policy (`host.GrantPolicy`, `host/grant.go`):** the host owner limits, per service, what a config may grant: `ZITI_ALLOW_SUDOERS` (services whose config may set `sudoers_rule`; default none), `ZITI_ALLOW_GROUPS` (`<service>:<group>` opt-ins for privileged groups `root`, `sudo`, `admin`, `wheel`, `docker`, `lxd`, `disk`, `shadow`, `libvirt`; any other group is allowed by default), `ZITI_RESTRICT_GROUPS=true` (only listed groups). Refused entries reject the connection (`GrantPolicy.Enforce` in the connect hook), are logged at config load/reload, and are flagged by `inspect`. The host's own fallbacks (`ZITI_SSH_GROUPS`, `ZITI_SUDOERS_RULE`) are not subject to it (`ResolveWithSource`). Controller config write access alone therefore cannot grant root.
 
-**Config type registration:** `ziti-ssh-ca config apply` registers the `ziti-ssh-host.v1` schema on the controller as a one-time setup step. Subsequent `ziti edge update config` commands update individual permission configs; changes propagate live to all running `ziti-ssh-host` instances within seconds.
+**Config type registration:** `ziti-ssh-ca config apply` registers the `ziti-ssh-host.v1` schema on the controller as a one-time setup step. Subsequent `ziti edge update config` commands update individual permission configs; changes reach running `ziti-ssh-host` instances at their next service refresh (`ZITI_SERVICE_REFRESH`, default 30 s; the SDK default would be 5 min — `newZitiContextWithConfigTypes` sets `Options.RefreshInterval`).
 
 ## Wire Protocol
 
@@ -326,6 +326,7 @@ Persistent flags (accepted by all subcommands):
 | — | `ZITI_ALLOW_SUDOERS` | — | Services (comma-separated, or `*`) whose config may set `sudoers_rule`; others are refused (connection rejected) |
 | — | `ZITI_ALLOW_GROUPS` | — | `<service>:<group>` / `*:<group>` list of privileged groups (`root`, `sudo`, `admin`, `wheel`, `docker`, `lxd`, `disk`, `shadow`, `libvirt`) a service's config may grant |
 | — | `ZITI_RESTRICT_GROUPS` | `false` | `true`: config may grant only groups listed in `ZITI_ALLOW_GROUPS` |
+| — | `ZITI_SERVICE_REFRESH` | `30s` | How often `run` checks the controller for service changes (minimum `5s`); a changed `ziti-ssh-host.v1` config applies within this interval |
 | — | `ZITI_TERMINATE_ON_DISCONNECT` | `false` | With cleanup off: set to `true` to end everything the account can run when the last session closes (account expired with `usermod -e 1`, crontab and `at` jobs removed, lingering disabled, `loginctl terminate-user`, SIGTERM/SIGKILL by UID), keeping the account; `accountOps.ReactivateAccount` (`usermod -e ""`) re-enables it on the next authorized connect (fail closed). Needed for revoked identities to lose background processes. |
 
 **Important:** `--mode` must be set consistently on both `ziti-ssh-ca` and `ziti-ssh-host run`. If the CA issues certs with per-identity principals but the host is in shared mode (or vice versa), SSH authentication will fail.

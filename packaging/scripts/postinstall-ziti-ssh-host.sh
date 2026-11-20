@@ -43,6 +43,10 @@ if [ ! -f /etc/ziti-ssh-host/env ]; then
 # running processes. No effect when USER_CLEANUP=true (deletion already ends them).
 #ZITI_TERMINATE_ON_DISCONNECT=false
 
+# How often to check the controller for service/config changes (default 30s,
+# minimum 5s); a changed ziti-ssh-host.v1 config applies within this interval.
+#ZITI_SERVICE_REFRESH=30s
+
 # Maximum concurrent connections per service (default 128); further
 # connections are closed immediately.
 #ZITI_MAX_CONNECTIONS=128

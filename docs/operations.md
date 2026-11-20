@@ -95,7 +95,7 @@ An entry that omits a field means that field gets nothing — globals are not me
 
 #### Live config reload
 
-When a `ziti-ssh-host.v1` config is updated in the Ziti controller, the change propagates to all running `ziti-ssh-host` instances bound to that service within seconds via the service-changed event. Already-open sessions are not affected — the updated permissions apply only to connections established after the reload. No restart of `ziti-ssh-host` is required.
+When a `ziti-ssh-host.v1` config is updated in the Ziti controller, the change reaches all running `ziti-ssh-host` instances bound to that service at their next service refresh — within 30 seconds by default (`ZITI_SERVICE_REFRESH`) — via the service-changed event. Until then a host keeps applying the previous config, so removing a grant (for example `sudo`) takes effect for new connections only after that interval. Already-open sessions are not affected — the updated permissions apply only to connections established after the reload. No restart of `ziti-ssh-host` is required.
 
 ### Host grant policy
 

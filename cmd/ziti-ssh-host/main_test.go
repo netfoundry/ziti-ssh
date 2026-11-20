@@ -172,3 +172,20 @@ func TestMergeTrustedKeys_KeepsKeysOfUnreachableControllers(t *testing.T) {
 		}
 	}
 }
+
+func TestServiceRefreshFromEnv(t *testing.T) {
+	t.Setenv("ZITI_SERVICE_REFRESH", "")
+	if d, err := serviceRefreshFromEnv(); err != nil || d != defaultServiceRefresh {
+		t.Errorf("default: %v, %v", d, err)
+	}
+	t.Setenv("ZITI_SERVICE_REFRESH", "10s")
+	if d, err := serviceRefreshFromEnv(); err != nil || d != 10*time.Second {
+		t.Errorf("10s: %v, %v", d, err)
+	}
+	for _, bad := range []string{"1s", "0", "-5s", "soon"} {
+		t.Setenv("ZITI_SERVICE_REFRESH", bad)
+		if _, err := serviceRefreshFromEnv(); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
