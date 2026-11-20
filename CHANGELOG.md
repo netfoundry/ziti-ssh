@@ -240,6 +240,7 @@ See security advisory GHSA-TBD for details.
 - CI vulnerability scan (`govulncheck-action`) now uses `go-version-file: go.mod` instead of the action's default `stable`, so it scans the toolchain that actually builds releases.
 - GitHub Actions updated and pinned to commit SHAs: `checkout` v7.0.1, `setup-go` v7.1.0, `upload-artifact` v7.0.2, `govulncheck-action` v1.1.0, `setup-jfrog-cli` v5.3.5, `action-gh-release` v3.0.4. `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` removed (all actions now run on Node 24 natively).
 - `ci.yml`, `ziti-test.yml` and `promote.yml` declare `permissions: contents: read` at the top level; jobs add only what they need (`id-token: write` for AWS / Artifactory OIDC, `attestations: write` for provenance).
+- `ziti-test.yml` runs two suites (matrix): `suites/ziti-ssh` (shared mode) and the new `suites/ziti-ssh-per-identity` (per-identity accounts, grant policy, config reload, revocation), each on its own stack.
 - `ziti-test.yml` calls the `ziti-test-suite` reusable workflow at a pinned commit and checks out the suite code at the same commit (was `@main`).
 - Default tool versions: nfpm 2.49.0 (prerelease download now verified against the release `checksums.txt`; `build-packages.sh` fallback pinned instead of `@latest`), jfrog-cli 2.133.0.
 - `ziti-test.yml` builds packages with `build-packages.sh` (same nfpm path as releases) instead of `build-deb.sh`; `suites/ziti-ssh/suite.yml` paths updated to the nfpm filenames (`<pkg>_0.0.0-1_amd64.deb`).

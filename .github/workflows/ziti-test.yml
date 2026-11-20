@@ -9,10 +9,13 @@ name: Integration Test
 #   ZTS_CHECKOUT_TOKEN — fine-grained PAT with read access to
 #                        netfoundry/ziti-test-suite
 #
-# The topology is defined in suites/ziti-ssh/suite.yml:
-#   • 1 Ziti controller  — runs ziti-ssh-ca
-#   • 2 edge routers     — each runs ziti-ssh-host (proxies Ziti → local sshd)
-#   • 1 client VM        — runs ziti-ssh and ziti-scp
+# Two suites, same topology (1 controller running ziti-ssh-ca, 2 edge routers
+# each running ziti-ssh-host, 1 client VM running ziti-ssh and ziti-scp):
+#   • suites/ziti-ssh/suite.yml              — shared mode
+#   • suites/ziti-ssh-per-identity/suite.yml — per-identity mode (accounts,
+#     grant policy, config reload, revocation)
+# Each suite gets its own stack (run_id_override). The called workflow's
+# concurrency group may run them one after the other.
 
 on:
   workflow_dispatch:
@@ -53,8 +56,12 @@ jobs:
           retention-days: 1
 
   integration-test:
-    name: Integration Test
+    name: Integration Test (${{ matrix.suite }})
     needs: build-debs
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [ziti-ssh, ziti-ssh-per-identity]
     # The reusable workflow and the suite code it checks out are pinned to the
     # same commit (ziti-test-suite main, 2026-04-24). ziti-test-suite is private:
     # bump both SHAs together by hand unless Dependabot has been granted access.
@@ -64,7 +71,8 @@ jobs:
       id-token: write
     uses: netfoundry/ziti-test-suite/.github/workflows/ziti-network.yml@fdba452ba30e016a7cc8bbb051784606efe35c55 # main 2026-04-24
     with:
-      topology_file: suites/ziti-ssh/suite.yml
+      topology_file: suites/${{ matrix.suite }}/suite.yml
+      run_id_override: run${{ github.run_number }}-${{ matrix.suite }}
       ziti_test_suite_ref: fdba452ba30e016a7cc8bbb051784606efe35c55
       artifacts: ziti-ssh-debs
       keep_on_failure: ${{ inputs.keep_on_failure || 'false' }}
