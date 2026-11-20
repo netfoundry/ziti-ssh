@@ -1,0 +1,86 @@
+# suites/ziti-ssh-per-identity/suite.yml
+#
+# Per-identity mode integration test for netfoundry/ziti-ssh. Same topology
+# and install scripts as suites/ziti-ssh; the suite vars below switch the CA
+# and hosts to per-identity mode, bind a second service (ssh-ops) and opt
+# ssh-ops in to granting the privileged "sudo" group.
+#
+# Topology:
+#   • 1 controller (t3.medium)  — runs ziti-ssh-ca
+#   • 2 edge routers (t3.small) — each runs ziti-ssh-host
+#   • 1 client VM   (t3.micro)  — runs ziti-ssh + ziti-scp
+
+meta:
+  name: "ziti-ssh-per-identity"
+  description: "ziti-ssh per-identity mode end-to-end integration test"
+
+# Injected into every post_install script and test as environment variables.
+vars:
+  ZSSH_MODE: "per-identity"
+  ZSSH_SERVICES: "ssh,ssh-ops"
+  ZSSH_ALLOW_GROUPS: "ssh-ops:sudo"
+  # Config changes reach hosts within this interval (default 30s).
+  ZSSH_SERVICE_REFRESH: "10s"
+
+ziti:
+  version: "2.0.8"
+  apt_channel: "test"
+  network_name: "ziti-ssh-pi-test"
+
+  # Declarative network resources applied after all ERs are online and before
+  # any client post_install runs.  Defines the ssh-ca and ssh services plus
+  # all bind/dial policies.
+  resources_file: "suites/ziti-ssh-per-identity/network.yaml"
+
+  controllers:
+    - count: 1
+      instance_type: "t3.medium"
+      files:
+        - local: "dist/ziti-ssh-ca_0.0.0-1_amd64.deb"
+          remote: "/tmp/ziti-ssh-ca.deb"
+      post_install:
+        - script: "suites/ziti-ssh/scripts/install-ca.sh"
+          args: []
+
+  edge_routers:
+    - name: "er"
+      type: "edge"
+      count: 2
+      instance_type: "t3.small"
+      listener_port: 3022
+      public: true
+      files:
+        - local: "dist/ziti-ssh-host_0.0.0-1_amd64.deb"
+          remote: "/tmp/ziti-ssh-host.deb"
+      post_install:
+        - script: "suites/ziti-ssh/scripts/install-host.sh"
+          args: []
+
+clients:
+  - name: "client"
+    type: "custom"
+    count: 1
+    instance_type: "t3.micro"
+    files:
+      - local: "dist/ziti-ssh_0.0.0-1_amd64.deb"
+        remote: "/tmp/ziti-ssh.deb"
+      - local: "dist/ziti-scp_0.0.0-1_amd64.deb"
+        remote: "/tmp/ziti-scp.deb"
+    post_install:
+      - script: "suites/ziti-ssh/scripts/install-client.sh"
+        args: []
+
+provider:
+  type: "aws"
+  region: "us-east-2"
+  networking:
+    isolated_vpc: false
+
+tests:
+  - script: "suites/ziti-ssh-per-identity/tests/test.sh"
+    args: []
+    target: "client"
+
+behavior:
+  keep_on_failure: false
+  teardown_timeout_minutes: 60

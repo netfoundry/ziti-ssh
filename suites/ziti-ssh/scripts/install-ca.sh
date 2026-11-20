@@ -14,6 +14,7 @@
 # Environment variables (injected by ziti-test-suite):
 #   ZITI_CTRL_URL       — controller management API URL (https://host:port)
 #   ZITI_ADMIN_PASSWORD — controller admin password
+#   ZSSH_MODE           — optional suite var: shared (default) or per-identity
 #
 # Exit codes: 0 on success; non-zero on any failure (set -euo pipefail).
 
@@ -137,7 +138,7 @@ sudo tee /etc/ziti-ssh-ca/env > /dev/null <<ENVEOF
 ZITI_IDENTITY=/etc/ziti-ssh-ca/identity.json
 ZITI_CA_KEY=${CA_KEY}
 ZITI_CA_SERVICE=ssh-ca
-ZITI_SSH_MODE=shared
+ZITI_SSH_MODE=${ZSSH_MODE:-shared}
 ZITI_SSH_PRINCIPAL=ziggy
 ENVEOF
 sudo chown ziti-controller: /etc/ziti-ssh-ca/env
