@@ -34,7 +34,10 @@ jobs:
       # Scan with the same Go toolchain that builds release binaries (the
       # go.mod toolchain directive), not the action's default of "stable",
       # so standard-library vulnerabilities in shipped binaries are reported.
+      # go-version-input must be emptied: the action defaults it to "stable"
+      # and setup-go ignores go-version-file whenever go-version is set.
       - name: Vulnerability scan
         uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1.1.0
         with:
+          go-version-input: ""
           go-version-file: go.mod
