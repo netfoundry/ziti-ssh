@@ -1,0 +1,19 @@
+# Keep the Docker build context to what the package build needs.
+# Never send credentials, identities, local notes or build output.
+.git
+.github
+.claude
+dist/
+.deb-staging/
+ziti-ssh
+ziti-scp
+ziti-ssh-ca
+ziti-ssh-host
+*.jwt
+*.json
+*.pem
+*.key
+*.log
+SECURITY_FINDINGS.md
+ziti-ssh-security-review.md
+suites/

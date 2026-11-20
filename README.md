@@ -24,7 +24,7 @@ The Ziti network enforces who can reach which machines; `sshd` on each machine o
 
 ## Prerequisites
 
-- An operational OpenZiti network (controller + at least one edge router). See the [OpenZiti quickstart](https://openziti.io/docs/learn/quickstarts/) if you do not have one yet.
+- An operational OpenZiti network (controller + at least one edge router), running **OpenZiti v2.0.0 or later** on the controller and all edge routers. See the [OpenZiti quickstart](https://openziti.io/docs/learn/quickstarts/) if you do not have one yet.
 - **On user machines:** `ziti-ssh` installed
 - **On the controller:** `ziti-ssh-ca` installed
 - **On each SSH target host:** `ziti-ssh-host` installed — Ubuntu 22.04 or later (or any distro with OpenSSH 8.2+ and systemd)

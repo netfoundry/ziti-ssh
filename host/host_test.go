@@ -389,7 +389,7 @@ func TestEnsureUser_AcceptsIdentityPermissions(t *testing.T) {
 
 	dir := t.TempDir()
 	stateFile := filepath.Join(dir, "state")
-	mgr := host.NewUserManager(stateFile, true)
+	mgr := mustUserManager(t, stateFile, true)
 
 	// Use a deliberately short unique name unlikely to clash with system users.
 	username := "ztestperm01"
@@ -430,7 +430,7 @@ func TestEnsureUser_RefCounting(t *testing.T) {
 
 	dir := t.TempDir()
 	stateFile := filepath.Join(dir, "state")
-	mgr := host.NewUserManager(stateFile, true)
+	mgr := mustUserManager(t, stateFile, true)
 
 	username := "ztestrefcnt1"
 	perms := host.IdentityPermissions{}
@@ -473,7 +473,7 @@ func TestNewUserManager_Signature(t *testing.T) {
 	// Verify that NewUserManager's signature no longer includes sudoersRule.
 	// This is a compile-time check embedded as a runtime test.
 	dir := t.TempDir()
-	mgr := host.NewUserManager(filepath.Join(dir, "state"), true)
+	mgr := mustUserManager(t, filepath.Join(dir, "state"), true)
 	if mgr == nil {
 		t.Fatal("NewUserManager returned nil")
 	}
@@ -510,6 +510,10 @@ func TestValidateSudoersRule(t *testing.T) {
 		{"Host_Alias ALL = *", "Host_Alias keyword"},
 		{"User_Alias ADMINS = root", "User_Alias keyword"},
 		{"Runas_Alias ROOT = root", "Runas_Alias keyword"},
+		{", ALL ALL=(ALL) NOPASSWD: ALL", "leading comma extends the user list"},
+		{"  ,ALL ALL=(ALL) NOPASSWD: ALL", "leading comma after whitespace"},
+		{"ALL=(ALL) NOPASSWD: /bin/ls\x00", "NUL byte"},
+		{"NOPASSWD: ALL", "missing '=' (not a user specification)"},
 	}
 	for _, tc := range invalid {
 		if err := host.ValidateSudoersRule(tc.rule); err == nil {
@@ -524,7 +528,7 @@ func TestEnsureUser_CollisionRejected(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	mgr := host.NewUserManager(filepath.Join(dir, "state"), true)
+	mgr := mustUserManager(t, filepath.Join(dir, "state"), true)
 
 	// "alice.corp" and "alice_corp" are different Ziti identities that both
 	// derive to the Linux username "alice_corp" (period → underscore).
@@ -547,4 +551,14 @@ func TestEnsureUser_CollisionRejected(t *testing.T) {
 	if !strings.Contains(err.Error(), "already in use") {
 		t.Errorf("expected 'already in use' in error, got: %v", err)
 	}
+}
+
+// mustUserManager constructs a UserManager or fails the test.
+func mustUserManager(t *testing.T, stateFile string, cleanup bool) *host.UserManager {
+	t.Helper()
+	mgr, err := host.NewUserManager(stateFile, cleanup)
+	if err != nil {
+		t.Fatalf("NewUserManager: %v", err)
+	}
+	return mgr
 }

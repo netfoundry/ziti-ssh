@@ -12,7 +12,7 @@ meta:
   description: "ziti-ssh end-to-end integration test"
 
 ziti:
-  version: "2.0.0-pre10"
+  version: "2.0.8"
   apt_channel: "test"
   network_name: "ziti-ssh-test"
 
@@ -25,7 +25,7 @@ ziti:
     - count: 1
       instance_type: "t3.medium"
       files:
-        - local: "dist/ziti-ssh-ca_0.0.0_amd64.deb"
+        - local: "dist/ziti-ssh-ca_0.0.0-1_amd64.deb"
           remote: "/tmp/ziti-ssh-ca.deb"
       post_install:
         - script: "suites/ziti-ssh/scripts/install-ca.sh"
@@ -39,7 +39,7 @@ ziti:
       listener_port: 3022
       public: true
       files:
-        - local: "dist/ziti-ssh-host_0.0.0_amd64.deb"
+        - local: "dist/ziti-ssh-host_0.0.0-1_amd64.deb"
           remote: "/tmp/ziti-ssh-host.deb"
       post_install:
         - script: "suites/ziti-ssh/scripts/install-host.sh"
@@ -51,9 +51,9 @@ clients:
     count: 1
     instance_type: "t3.micro"
     files:
-      - local: "dist/ziti-ssh_0.0.0_amd64.deb"
+      - local: "dist/ziti-ssh_0.0.0-1_amd64.deb"
         remote: "/tmp/ziti-ssh.deb"
-      - local: "dist/ziti-scp_0.0.0_amd64.deb"
+      - local: "dist/ziti-scp_0.0.0-1_amd64.deb"
         remote: "/tmp/ziti-scp.deb"
     post_install:
       - script: "suites/ziti-ssh/scripts/install-client.sh"

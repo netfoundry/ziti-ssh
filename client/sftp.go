@@ -61,16 +61,14 @@ func RunSFTP(
 	recursive bool,
 	preserve bool,
 	quiet bool,
+	hostKeyCallback ssh.HostKeyCallback,
 ) error {
 	cfg := &ssh.ClientConfig{
-		User:            user,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		// Host key verification is intentionally skipped. The connection arrives
-		// over a Ziti overlay that enforces mutual TLS using the controller's
-		// PKI — the host's Ziti identity is cryptographically proven before any
-		// SSH bytes are exchanged. A traditional known-hosts check would be
-		// redundant and weaker than the guarantee Ziti already provides.
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec
+		User: user,
+		Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		// OpenZiti does not tell the dialer which identity answered, so the
+		// host key is checked against keys seen before (see HostKeyCallback).
+		HostKeyCallback: hostKeyCallback,
 	}
 
 	clientConn, chans, reqs, err := ssh.NewClientConn(conn, host, cfg)
@@ -124,7 +122,7 @@ func uploadAll(client *sftp.Client, localPaths []string, remoteDst string, recur
 			} else {
 				dstDir = remoteDst
 			}
-			if err := uploadDir(client, localPath, dstDir, preserve, quiet); err != nil {
+			if err := uploadDir(client, localPath, dstDir, preserve, quiet, 0); err != nil {
 				return err
 			}
 		} else {
@@ -142,7 +140,10 @@ func uploadAll(client *sftp.Client, localPaths []string, remoteDst string, recur
 	return nil
 }
 
-func uploadDir(client *sftp.Client, localDir, remoteDir string, preserve, quiet bool) error {
+func uploadDir(client *sftp.Client, localDir, remoteDir string, preserve, quiet bool, depth int) error {
+	if depth > maxRecursionDepth {
+		return fmt.Errorf("local directory %q exceeds the maximum depth of %d", localDir, maxRecursionDepth)
+	}
 	if err := client.MkdirAll(remoteDir); err != nil {
 		return fmt.Errorf("mkdir remote %q: %w", remoteDir, err)
 	}
@@ -156,7 +157,7 @@ func uploadDir(client *sftp.Client, localDir, remoteDir string, preserve, quiet 
 		localPath := filepath.Join(localDir, entry.Name())
 		remotePath := path.Join(remoteDir, entry.Name())
 		if entry.IsDir() {
-			if err := uploadDir(client, localPath, remotePath, preserve, quiet); err != nil {
+			if err := uploadDir(client, localPath, remotePath, preserve, quiet, depth+1); err != nil {
 				return err
 			}
 		} else {
@@ -256,7 +257,7 @@ func downloadAll(client *sftp.Client, remotePaths []string, localDst string, rec
 			} else {
 				localDir = localDst
 			}
-			if err := downloadDir(client, remotePath, localDir, preserve, quiet); err != nil {
+			if err := downloadDir(client, remotePath, localDir, preserve, quiet, 0); err != nil {
 				return err
 			}
 		} else {
@@ -274,7 +275,13 @@ func downloadAll(client *sftp.Client, remotePaths []string, localDst string, rec
 	return nil
 }
 
-func downloadDir(client *sftp.Client, remoteDir, localDir string, preserve, quiet bool) error {
+func downloadDir(client *sftp.Client, remoteDir, localDir string, preserve, quiet bool, depth int) error {
+	if depth > maxRecursionDepth {
+		return fmt.Errorf("remote directory %q exceeds the maximum depth of %d", remoteDir, maxRecursionDepth)
+	}
+	if err := refuseLocalSymlink(localDir); err != nil {
+		return err
+	}
 	fi, err := client.Stat(remoteDir)
 	if err != nil {
 		return fmt.Errorf("stat remote dir %q: %w", remoteDir, err)
@@ -300,7 +307,7 @@ func downloadDir(client *sftp.Client, remoteDir, localDir string, preserve, quie
 		rPath := path.Join(remoteDir, entry.Name())
 		lPath := filepath.Join(localDir, entry.Name())
 		if entry.IsDir() {
-			if err := downloadDir(client, rPath, lPath, preserve, quiet); err != nil {
+			if err := downloadDir(client, rPath, lPath, preserve, quiet, depth+1); err != nil {
 				return err
 			}
 		} else {
@@ -328,13 +335,15 @@ func downloadFile(client *sftp.Client, remotePath, localPath string, preserve, q
 		return fmt.Errorf("stat remote file %q: %w", remotePath, err)
 	}
 
-	var perm os.FileMode = 0644
-	if preserve {
-		perm = fi.Mode().Perm()
-	}
+	// New files take the remote file's permission bits, reduced by the local
+	// umask (as scp does). Perm() never includes setuid/setgid/sticky.
+	perm := downloadMode(fi.Mode(), preserve)
 
 	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 		return fmt.Errorf("create local parent dir for %q: %w", localPath, err)
+	}
+	if err := refuseLocalSymlink(localPath); err != nil {
+		return err
 	}
 
 	dst, err := os.OpenFile(localPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm) //nolint:gosec
@@ -342,6 +351,13 @@ func downloadFile(client *sftp.Client, remotePath, localPath string, preserve, q
 		return fmt.Errorf("open local file %q for writing: %w", localPath, err)
 	}
 	defer dst.Close()
+	if preserve {
+		// -p: apply the mode exactly (not reduced by umask), except that a
+		// server can never make a local file world-writable.
+		if err := dst.Chmod(perm); err != nil {
+			slog.Debug("chmod local file failed (non-fatal)", "path", localPath, "err", err)
+		}
+	}
 
 	var w io.Writer = dst
 	if !quiet {
@@ -427,7 +443,7 @@ func (pw *progressWriter) printProgress(now time.Time) {
 	}
 	eta := time.Duration(etaSec) * time.Second
 
-	name := pw.name
+	name := terminalSafe(pw.name)
 	if len(name) > 30 {
 		name = "..." + name[len(name)-27:]
 	}
@@ -442,6 +458,7 @@ func (pw *progressWriter) printProgress(now time.Time) {
 }
 
 func printFinalProgress(name string, total int64) {
+	name = terminalSafe(name)
 	if len(name) > 30 {
 		name = "..." + name[len(name)-27:]
 	}
@@ -479,4 +496,45 @@ func formatDuration(d time.Duration) string {
 		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
 	}
 	return fmt.Sprintf("%d:%02d", m, s)
+}
+
+// maxRecursionDepth bounds recursive copies; on downloads the remote server
+// controls the directory structure.
+const maxRecursionDepth = 64
+
+// refuseLocalSymlink fails if localPath already exists as a symbolic link, so
+// a download can never write through a link to a file elsewhere (for example
+// a link in the target directory pointing at a shell startup file).
+func refuseLocalSymlink(localPath string) error {
+	fi, err := os.Lstat(localPath)
+	if err != nil {
+		return nil // does not exist (or cannot be inspected; open will report it)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to write through local symlink %q", localPath)
+	}
+	return nil
+}
+
+// downloadMode returns the permission bits for a downloaded file. Only the
+// 0777 bits are ever used; with preserve (-p) the world-writable bit is also
+// dropped so a server cannot make a local file writable by every user.
+func downloadMode(remote os.FileMode, preserve bool) os.FileMode {
+	perm := remote.Perm()
+	if preserve {
+		perm &^= 0o002
+	}
+	return perm
+}
+
+// terminalSafe replaces control characters (including ESC and C1 controls)
+// in server-supplied names before they are written to the terminal, so a
+// host cannot inject terminal escape sequences.
+func terminalSafe(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return '?'
+		}
+		return r
+	}, s)
 }

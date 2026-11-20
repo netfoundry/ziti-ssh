@@ -18,7 +18,7 @@ depends:
 
 contents:
   - src: "dist/binaries/ziti-ssh"
-    dst: /usr/local/bin/ziti-ssh
+    dst: /usr/bin/ziti-ssh
     file_info:
       mode: 0755
 

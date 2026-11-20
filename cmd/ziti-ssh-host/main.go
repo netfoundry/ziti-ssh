@@ -26,6 +26,9 @@
 //
 //	inspect               Show the resolved ziti-ssh-host.v1 config for one or
 //	                      more services. Exits without opening any listeners.
+//
+//	users list|claim      Show or extend the per-identity account ownership
+//	                      registry (/var/lib/ziti-ssh-host/owned-users.json).
 package main
 
 import (
@@ -39,6 +42,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -114,7 +118,7 @@ func main() {
 	_ = enrollCmd.MarkFlagRequired("jwt")
 
 	// --------------------------------------------------------------------- run
-	var modeFlag string
+	var modeFlag, maxConnsFlag string
 	runCmd := &cobra.Command{
 		Use:   "run",
 		Short: "Listen on the Ziti ssh service and proxy to local sshd",
@@ -133,10 +137,16 @@ func main() {
 			if zitiTimeout <= 0 {
 				return fmt.Errorf("--ziti-timeout (or ZITI_TIMEOUT) must be greater than zero, got %q", zitiTimeoutStr)
 			}
-			return runProxy(identityFile, sshServices, mode, zitiTimeout)
+			maxConnsStr := config.EnvOrFlag(maxConnsFlag, "ZITI_MAX_CONNECTIONS", strconv.Itoa(host.DefaultMaxConnections))
+			maxConns, err := strconv.Atoi(maxConnsStr)
+			if err != nil || maxConns < 1 {
+				return fmt.Errorf("--max-connections (or ZITI_MAX_CONNECTIONS) must be a positive integer, got %q", maxConnsStr)
+			}
+			return runProxy(identityFile, sshServices, mode, zitiTimeout, maxConns)
 		},
 	}
 	runCmd.Flags().StringVar(&modeFlag, "mode", "", "Principal mode: \"shared\" (default) or \"per-identity\" (or set ZITI_SSH_MODE)")
+	runCmd.Flags().StringVar(&maxConnsFlag, "max-connections", "", fmt.Sprintf("Maximum concurrent connections per service; further connections are closed immediately (or ZITI_MAX_CONNECTIONS, default: %d)", host.DefaultMaxConnections))
 
 	// ----------------------------------------------------------------- inspect
 	var inspectServicesFlag []string
@@ -169,7 +179,7 @@ func main() {
 		},
 	}
 
-	root.AddCommand(enrollCmd, runCmd, inspectCmd, versionCmd)
+	root.AddCommand(enrollCmd, runCmd, inspectCmd, newUsersCmd(), versionCmd)
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -218,13 +228,45 @@ func parseGlobalGroups() []string {
 // appends configType to the context's declared config types before the first
 // Authenticate call. This is required for the SDK to deliver service config
 // data of that type.
-func newZitiContextWithConfigTypes(identityFile string, configTypes ...string) (ziti.Context, error) {
+//
+// serviceRefresh sets how often the SDK checks the controller for service
+// changes — and so how quickly a changed ziti-ssh-host.v1 config reaches this
+// host (0 = SDK default, 5 minutes). Each check is a small "anything
+// changed?" request; services are only re-fetched when something changed.
+func newZitiContextWithConfigTypes(identityFile string, serviceRefresh time.Duration, configTypes ...string) (ziti.Context, error) {
 	cfg, err := ziti.NewConfigFromFile(identityFile)
 	if err != nil {
 		return nil, fmt.Errorf("load Ziti config from %q: %w", identityFile, err)
 	}
 	cfg.ConfigTypes = append(cfg.ConfigTypes, configTypes...)
-	return ziti.NewContext(cfg)
+	opts := *ziti.DefaultOptions
+	if serviceRefresh > 0 {
+		opts.RefreshInterval = serviceRefresh
+	}
+	return ziti.NewContextWithOpts(cfg, &opts)
+}
+
+// Service refresh interval for ziti-ssh-host run (ZITI_SERVICE_REFRESH).
+const (
+	defaultServiceRefresh = 30 * time.Second
+	minServiceRefresh     = 5 * time.Second
+)
+
+// serviceRefreshFromEnv parses ZITI_SERVICE_REFRESH (a duration, at least
+// minServiceRefresh), defaulting to defaultServiceRefresh.
+func serviceRefreshFromEnv() (time.Duration, error) {
+	v := os.Getenv("ZITI_SERVICE_REFRESH")
+	if v == "" {
+		return defaultServiceRefresh, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("ZITI_SERVICE_REFRESH: invalid duration %q: %w", v, err)
+	}
+	if d < minServiceRefresh {
+		return 0, fmt.Errorf("ZITI_SERVICE_REFRESH must be at least %s, got %s", minServiceRefresh, d)
+	}
+	return d, nil
 }
 
 // runEnroll enrolls this host with the Ziti network, fetches the intermediate
@@ -295,7 +337,12 @@ func runEnroll(jwtPath, identityFile string) error {
 	}
 	caPubBytes := clusterCAsToBytes(clusterCAs)
 
-	// 6. Write sshd configuration.
+	// 6. Write sshd configuration. The drop-in refers to the managed group, so
+	// create it first (an unknown group in "Match Group" simply never matches).
+	if err := host.EnsureManagedGroup(); err != nil {
+		slog.Warn("could not create managed group; Ziti-managed accounts keep authorized_keys login until it exists",
+			"group", host.ManagedGroup, "err", err)
+	}
 	if err := host.WriteSSHConfig(caPubBytes, sshdConfFile, sshdCAPubKeyFile); err != nil {
 		return fmt.Errorf("write sshd config: %w", err)
 	}
@@ -377,6 +424,14 @@ type clusterCA struct {
 // per unique intermediate CA (deduplicated by actual public key bytes, not
 // SubjectKeyId which is unreliable across HA nodes).
 func collectClusterCAs(urlRoots []string, rootPool *x509.CertPool) ([]clusterCA, error) {
+	cas, _, err := collectClusterCAsDetailed(urlRoots, rootPool)
+	return cas, err
+}
+
+// collectClusterCAsDetailed is collectClusterCAs, also reporting how many
+// controllers could not be queried.
+func collectClusterCAsDetailed(urlRoots []string, rootPool *x509.CertPool) ([]clusterCA, int, error) {
+	failed := 0
 	seen := make(map[string]bool)
 	var out []clusterCA
 
@@ -384,6 +439,7 @@ func collectClusterCAs(urlRoots []string, rootPool *x509.CertPool) ([]clusterCA,
 		cert, err := intCAFromController(urlRoot, rootPool)
 		if err != nil {
 			slog.Warn("could not get intermediate CA from controller", "url", urlRoot, "err", err)
+			failed++
 			continue
 		}
 
@@ -416,9 +472,9 @@ func collectClusterCAs(urlRoots []string, rootPool *x509.CertPool) ([]clusterCA,
 	}
 
 	if len(out) == 0 {
-		return nil, fmt.Errorf("no intermediate CA public keys found across %d controller(s)", len(urlRoots))
+		return nil, failed, fmt.Errorf("no intermediate CA public keys found across %d controller(s)", len(urlRoots))
 	}
-	return out, nil
+	return out, failed, nil
 }
 
 // clusterCAsToBytes concatenates all authorized_key lines from cas into a
@@ -473,21 +529,32 @@ func intCAFromController(controllerURL string, rootPool *x509.CertPool) (*x509.C
 			"selfSigned", cert.Subject.String() == cert.Issuer.String())
 	}
 
-	if len(state.PeerCertificates) == 0 {
+	// Use the chain Go verified against rootPool, not the certificates the
+	// server sent: a server could append an extra CA certificate to
+	// PeerCertificates, which would then become an SSH trust anchor. Only the
+	// enrollment bootstrap (no root pool yet) falls back to PeerCertificates.
+	chain := state.PeerCertificates
+	if rootPool != nil {
+		if len(state.VerifiedChains) == 0 || len(state.VerifiedChains[0]) < 2 {
+			return nil, fmt.Errorf("no verified certificate chain from %q", host)
+		}
+		chain = state.VerifiedChains[0]
+	}
+	if len(chain) == 0 {
 		return nil, fmt.Errorf("no certificates in TLS chain from %q", host)
 	}
-	leaf := state.PeerCertificates[0]
+	leaf := chain[0]
 	// Walk the chain and pick the cert whose Subject matches the leaf's Issuer
 	// field. Raw-bytes comparison avoids encoding differences that string
 	// formatting can obscure, and correctly identifies the signing intermediate
 	// even when the chain contains cross-signed or multiple intermediate certs.
-	for _, cert := range state.PeerCertificates[1:] {
+	for _, cert := range chain[1:] {
 		if cert.IsCA && bytes.Equal(cert.RawSubject, leaf.RawIssuer) {
 			return cert, nil
 		}
 	}
 	// Fallback to the original heuristic for unusual chain orderings.
-	for _, cert := range state.PeerCertificates {
+	for _, cert := range chain {
 		if cert.IsCA && !bytes.Equal(cert.RawSubject, cert.RawIssuer) {
 			return cert, nil
 		}
@@ -500,6 +567,16 @@ func intCAFromController(controllerURL string, rootPool *x509.CertPool) (*x509.C
 // sshd if the set has changed. Logs only when the set changes (additions
 // with controller URL, removals by count).
 func refreshTrustedCAs(urls []*url.URL, rootPool *x509.CertPool) error {
+	// Called from both the controller-URL event handler and the periodic
+	// poller; serialise so two refreshes cannot interleave their read/write.
+	trustRefreshMu.Lock()
+	defer trustRefreshMu.Unlock()
+
+	// Only fetch CA keys from well-formed https controller URLs.
+	urls, rejected := config.FilterControllerURLs(urls)
+	for _, r := range rejected {
+		slog.Warn("ignoring controller URL", "reason", r)
+	}
 	if len(urls) == 0 {
 		return nil
 	}
@@ -508,16 +585,25 @@ func refreshTrustedCAs(urls []*url.URL, rootPool *x509.CertPool) error {
 		urlStrs[i] = u.String()
 	}
 
-	newCAs, err := collectClusterCAs(urlStrs, rootPool)
+	newCAs, failed, err := collectClusterCAsDetailed(urlStrs, rootPool)
 	if err != nil {
 		return fmt.Errorf("collect CA public keys: %w", err)
 	}
-	newKeyBytes := clusterCAsToBytes(newCAs)
 
 	current, err := os.ReadFile(sshdCAPubKeyFile)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("read %q: %w", sshdCAPubKeyFile, err)
 	}
+
+	// If any controller did not answer, keep every currently trusted key: an
+	// unreachable controller's CA must not be dropped (that would break
+	// logins for certificates it signed). Keys are only removed when all
+	// controllers in the cluster list answered and none presented them.
+	if failed > 0 {
+		slog.Warn("some controllers did not answer; keeping currently trusted CA keys", "failed", failed, "controllers", len(urls))
+		newCAs = mergeTrustedKeys(current, newCAs)
+	}
+	newKeyBytes := clusterCAsToBytes(newCAs)
 
 	if sshPubKeySetsEqual(current, newKeyBytes) {
 		slog.Debug("trusted CA keys unchanged", "controllers", len(urls))
@@ -657,19 +743,32 @@ func nonEmptyLines(s string) []string {
 type serviceState struct {
 	mu     sync.RWMutex
 	config *host.PermissionsConfig // nil if no ziti-ssh-host.v1 config is attached
+	// loadErr is set when the service's config could not be loaded or parsed.
+	// Per-identity connections on the service are then rejected (fail closed)
+	// rather than falling back to the global defaults or a stale config.
+	loadErr error
 }
 
-func (s *serviceState) get() *host.PermissionsConfig {
+// current returns the config, or an error if the last load failed.
+func (s *serviceState) current() (*host.PermissionsConfig, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.config
+	return s.config, s.loadErr
 }
 
-func (s *serviceState) set(pc *host.PermissionsConfig) {
+// update records the result of loading the service's config: on success the
+// new config (nil = none attached) replaces the old one; on failure the
+// service is marked unavailable and the old config is discarded.
+func (s *serviceState) update(pc *host.PermissionsConfig, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.config = pc
+	if err != nil {
+		s.config, s.loadErr = nil, err
+		return
+	}
+	s.config, s.loadErr = pc, nil
 }
+
 
 // loadPermissionsConfig fetches and parses the ziti-ssh-host.v1 config from
 // serviceName via zitiCtx. Returns nil when no such config is attached.
@@ -739,6 +838,9 @@ func loadPermissionsConfig(zitiCtx ziti.Context, serviceName string) (*host.Perm
 			serviceName, strings.Join(collisions, "; "))
 	}
 
+	for _, w := range pc.PatternWarnings() {
+		slog.Warn("ziti-ssh-host.v1 config: pattern meaning changed", "service", serviceName, "detail", w)
+	}
 	slog.Info("loaded ziti-ssh-host.v1 config", "service", serviceName, "identities", len(pc.Permissions))
 	return pc, nil
 }
@@ -751,7 +853,7 @@ func loadPermissionsConfig(zitiCtx ziti.Context, serviceName string) (*host.Perm
 // startup, and ProxyHooks are wired to create/delete Linux users as sessions
 // open and close. Each service gets its own ProxyHooks that resolve permissions
 // from that service's ziti-ssh-host.v1 config.
-func runProxy(identityFile string, sshServices []string, mode string, zitiTimeout time.Duration) error {
+func runProxy(identityFile string, sshServices []string, mode string, zitiTimeout time.Duration, maxConns int) error {
 	// Load the Ziti config to build the CA pool used when refreshing trusted
 	// CA keys after a controller cluster membership change.
 	cfg, err := ziti.NewConfigFromFile(identityFile)
@@ -765,10 +867,15 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 
 	// Use NewConfigFromFile + NewContext so we can inject ConfigTypes before
 	// the first Authenticate call.
-	zitiCtx, err := newZitiContextWithConfigTypes(identityFile, zitiSSHHostConfigType)
+	serviceRefresh, err := serviceRefreshFromEnv()
+	if err != nil {
+		return err
+	}
+	zitiCtx, err := newZitiContextWithConfigTypes(identityFile, serviceRefresh, zitiSSHHostConfigType)
 	if err != nil {
 		return fmt.Errorf("init Ziti context from %q: %w", identityFile, err)
 	}
+	slog.Info("service refresh interval (config changes reach this host within it)", "interval", serviceRefresh)
 	defer zitiCtx.Close()
 
 	// cachedCtrlURLs holds the most-recently-seen controller URL list so the
@@ -792,6 +899,14 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 		}
 		urls, ok := args[0].([]*url.URL)
 		if !ok {
+			return
+		}
+		if len(urls) == 0 {
+			slog.Warn("ignoring empty controller URL list from controller")
+			return
+		}
+		if valid, _ := config.FilterControllerURLs(urls); len(valid) == 0 {
+			slog.Warn("ignoring controller URL list with no acceptable https URLs", "count", len(urls))
 			return
 		}
 		cachedMu.Lock()
@@ -852,6 +967,18 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 	globalSudoersRule := os.Getenv("ZITI_SUDOERS_RULE")
 	globalGroups := parseGlobalGroups()
 	cleanupOnDisconnect := os.Getenv("ZITI_USER_CLEANUP") == "true"
+	terminateOnDisconnect := os.Getenv("ZITI_TERMINATE_ON_DISCONNECT") == "true"
+	grantPolicy, err := grantPolicyFromEnv()
+	if err != nil && mode == "per-identity" {
+		return fmt.Errorf("per-identity mode: %w", err)
+	}
+
+	// Accounts managed through Ziti may only log in with a CA certificate:
+	// make sure the managed group exists and the sshd drop-in (which may
+	// predate this release) disables authorized_keys for its members.
+	if err := ensureSSHDLockdown(mode); err != nil {
+		return err
+	}
 
 	listenOpts := &ziti.ListenOptions{
 		BindUsingEdgeIdentity: true,
@@ -887,10 +1014,12 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 		if mode == "per-identity" {
 			pc, err := loadPermissionsConfig(zitiCtx, svcName)
 			if err != nil {
-				slog.Warn("could not load permissions config, using global fallbacks only",
+				slog.Error("could not load permissions config; per-identity connections on this service will be rejected until it loads",
 					"service", svcName, "err", err)
 			}
-			state.set(pc)
+			slog.Info("host grant policy", "service", svcName, "policy", grantPolicy.Describe(svcName))
+			warnPolicyViolations(svcName, pc, grantPolicy)
+			state.update(pc, err)
 		}
 
 		entries = append(entries, serviceEntry{
@@ -924,13 +1053,28 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 	)
 
 	if mode == "per-identity" {
-		mgr = host.NewUserManager(userManagerStateFile, cleanupOnDisconnect)
+		var err error
+		mgr, err = host.NewUserManager(userManagerStateFile, cleanupOnDisconnect)
+		if err != nil {
+			return fmt.Errorf("per-identity mode: %w", err)
+		}
+		mgr.SetTerminateOnDisconnect(terminateOnDisconnect)
+		switch {
+		case cleanupOnDisconnect:
+			slog.Info("per-identity: accounts deleted (and their processes ended) when the last session closes")
+		case terminateOnDisconnect:
+			slog.Info("per-identity: accounts kept; their processes are ended when the last session closes")
+		default:
+			slog.Warn("per-identity: accounts and their background processes are kept after the last session closes; " +
+				"set ZITI_TERMINATE_ON_DISCONNECT=true or ZITI_USER_CLEANUP=true so revoked identities lose running processes")
+		}
 
 		slog.Info("running orphan user cleanup")
 		if err := mgr.CleanupOrphans(); err != nil {
 			// Log but do not abort — a cleanup failure is not fatal to startup.
 			slog.Error("orphan cleanup failed", "err", err)
 		}
+		mgr.ReconcileLegacySudoers()
 	}
 
 	// Subscribe to service-changed events so we can hot-reload permissions.
@@ -953,10 +1097,13 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 			slog.Info("service-changed event received, reloading permissions config", "service", svcName)
 			pc, err := loadPermissionsConfig(zitiCtx, svcName)
 			if err != nil {
-				slog.Error("failed to reload permissions config", "service", svcName, "err", err)
+				slog.Error("failed to reload permissions config; per-identity connections on this service will be rejected until it loads",
+					"service", svcName, "err", err)
+				st.update(nil, err)
 				return
 			}
-			st.set(pc)
+			warnPolicyViolations(svcName, pc, grantPolicy)
+			st.update(pc, nil)
 			slog.Info("permissions config reloaded", "service", svcName)
 		})
 		defer removeListener()
@@ -975,14 +1122,27 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 					if username == "" {
 						return fmt.Errorf("derived empty username from identity %q", zitiIdentity)
 					}
-					perms := st.get().Resolve(zitiIdentity, globalGroups, globalSudoersRule)
+					pc, loadErr := st.current()
+					if loadErr != nil {
+						slog.Error("rejecting connection: permissions config for this service could not be loaded",
+							"service", svcName, "identity", zitiIdentity, "err", loadErr)
+						return fmt.Errorf("service %q: permissions config unavailable: %w", svcName, loadErr)
+					}
+					perms, fromConfig := pc.ResolveWithSource(zitiIdentity, globalGroups, globalSudoersRule)
+					// The host owner's per-service limit on what the
+					// controller-side config may grant (fail closed).
+					if err := grantPolicy.Enforce(svcName, perms, fromConfig); err != nil {
+						slog.Error("rejecting connection: permissions refused by host grant policy",
+							"service", svcName, "identity", zitiIdentity, "err", err)
+						return fmt.Errorf("identity %q on service %q: %w", zitiIdentity, svcName, err)
+					}
 					slog.Info("per-identity connect",
 						"service", svcName,
 						"identity", zitiIdentity,
 						"username", username,
 						"groups", perms.Groups,
 						"has_sudoers", perms.SudoersRule != "")
-					return mgr.EnsureUser(zitiIdentity, username, perms)
+					return mgr.EnsureUserForService(zitiIdentity, username, svcName, perms)
 				},
 				OnDisconnect: func(zitiIdentity string) {
 					username := ca.DeriveUsername(zitiIdentity)
@@ -1004,7 +1164,7 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			host.Proxy(e.listener, defaultSSHTarget, hooks, &connWg)
+			host.ProxyLimited(e.listener, defaultSSHTarget, hooks, &connWg, maxConns)
 		}()
 	}
 
@@ -1058,7 +1218,7 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 // ziti-ssh-host.v1 config for each requested service, and prints a formatted
 // permissions table. Exits without opening any listeners.
 func runInspect(identityFile string, serviceNames []string, zitiTimeout time.Duration) error {
-	zitiCtx, err := newZitiContextWithConfigTypes(identityFile, zitiSSHHostConfigType)
+	zitiCtx, err := newZitiContextWithConfigTypes(identityFile, 0, zitiSSHHostConfigType)
 	if err != nil {
 		return fmt.Errorf("init Ziti context from %q: %w", identityFile, err)
 	}
@@ -1070,6 +1230,10 @@ func runInspect(identityFile string, serviceNames []string, zitiTimeout time.Dur
 
 	globalSudoersRule := os.Getenv("ZITI_SUDOERS_RULE")
 	globalGroups := parseGlobalGroups()
+	policy, policyErr := grantPolicyFromEnv()
+	if policyErr != nil {
+		fmt.Printf("WARNING: invalid host grant policy (ziti-ssh-host run would refuse to start in per-identity mode): %v\n\n", policyErr)
+	}
 
 	for _, svcName := range serviceNames {
 		_, ok := zitiCtx.GetService(svcName)
@@ -1088,8 +1252,18 @@ func runInspect(identityFile string, serviceNames []string, zitiTimeout time.Dur
 		if pc == nil {
 			fmt.Printf("  Config type %s: not attached\n\n", zitiSSHHostConfigType)
 		} else {
-			fmt.Printf("  Config type %s: present\n\n", zitiSSHHostConfigType)
+			fmt.Printf("  Config type %s: present\n", zitiSSHHostConfigType)
+			if policyErr == nil {
+				fmt.Printf("  Host grant policy: %s\n", policy.Describe(svcName))
+			}
+			fmt.Println()
 			printPermissionsTable(pc)
+			for _, w := range pc.PatternWarnings() {
+				fmt.Printf("  WARNING: %s\n", w)
+			}
+			if policyErr == nil {
+				printPolicyRefusals(svcName, pc, policy)
+			}
 		}
 		printGlobalFallbacks(globalGroups, globalSudoersRule)
 		fmt.Println()
@@ -1184,3 +1358,111 @@ func sortStrings(ss []string) {
 // interface that host.proxyConn uses to extract the caller's Ziti identity
 // name. This keeps the zitiEdge import live and verifies SDK compatibility.
 var _ interface{ GetDialerIdentityName() string } = (zitiEdge.Conn)(nil)
+
+// grantPolicyFromEnv reads the host grant policy settings.
+func grantPolicyFromEnv() (host.GrantPolicy, error) {
+	return host.ParseGrantPolicy(
+		os.Getenv("ZITI_ALLOW_SUDOERS"),
+		os.Getenv("ZITI_ALLOW_GROUPS"),
+		os.Getenv("ZITI_RESTRICT_GROUPS"),
+	)
+}
+
+// warnPolicyViolations logs every entry of pc that the host grant policy
+// would refuse for service, so operators see the problem when a config is
+// loaded rather than only when the identity connects.
+func warnPolicyViolations(service string, pc *host.PermissionsConfig, policy host.GrantPolicy) {
+	if pc == nil {
+		return
+	}
+	for key, perms := range pc.Permissions {
+		if err := policy.Check(service, perms); err != nil {
+			slog.Warn("ziti-ssh-host.v1 entry will be refused by host grant policy",
+				"service", service, "entry", key, "err", err)
+		}
+	}
+}
+
+// printPolicyRefusals lists config entries the host grant policy refuses.
+func printPolicyRefusals(service string, pc *host.PermissionsConfig, policy host.GrantPolicy) {
+	keys := make([]string, 0, len(pc.Permissions))
+	for k := range pc.Permissions {
+		keys = append(keys, k)
+	}
+	sortStrings(keys)
+	refused := 0
+	for _, k := range keys {
+		if err := policy.Check(service, pc.Permissions[k]); err != nil {
+			if refused == 0 {
+				fmt.Println("  Entries REFUSED by host policy (these identities cannot connect via this service):")
+			}
+			refused++
+			fmt.Printf("    %s: %v\n", k, err)
+		}
+	}
+	if refused > 0 {
+		fmt.Println()
+	}
+}
+
+// ensureSSHDLockdown creates host.ManagedGroup and brings the sshd drop-in up
+// to date (reloading sshd if it changed). In per-identity mode a failure to
+// create the group is fatal, because accounts would then keep authorized_keys
+// login; in shared mode it is logged. In shared mode it also warns when no
+// account is in the group, since the administrator must add the shared account.
+func ensureSSHDLockdown(mode string) error {
+	if err := host.EnsureManagedGroup(); err != nil {
+		if mode == "per-identity" {
+			return fmt.Errorf("per-identity mode: %w", err)
+		}
+		slog.Warn("could not create managed group", "group", host.ManagedGroup, "err", err)
+	}
+	if _, err := os.Stat(sshdCAPubKeyFile); err == nil {
+		changed, err := host.EnsureSSHDDropIn(sshdConfFile, sshdCAPubKeyFile)
+		if err != nil {
+			return fmt.Errorf("update sshd drop-in: %w", err)
+		}
+		if changed {
+			slog.Info("updated sshd drop-in", "file", sshdConfFile)
+			if err := host.ReloadSSHD(); err != nil {
+				return fmt.Errorf("reload sshd after updating drop-in: %w", err)
+			}
+		}
+	} else {
+		slog.Warn("CA key file missing; run 'ziti-ssh-host enroll' first", "file", sshdCAPubKeyFile)
+	}
+	if mode != "per-identity" {
+		members, err := host.ManagedGroupMembers()
+		switch {
+		case err != nil:
+			slog.Warn("could not read managed group members", "group", host.ManagedGroup, "err", err)
+		case len(members) == 0:
+			slog.Warn("shared mode: no account is in the managed group, so the shared account's own authorized_keys stays active; "+
+				"add it with: usermod -aG "+host.ManagedGroup+" <shared account>", "group", host.ManagedGroup)
+		default:
+			slog.Info("shared mode: accounts restricted to certificate login", "group", host.ManagedGroup, "members", members)
+		}
+	}
+	return nil
+}
+
+// trustRefreshMu serialises refreshTrustedCAs.
+var trustRefreshMu sync.Mutex
+
+// mergeTrustedKeys returns collected plus every key in the current
+// TrustedUserCAKeys content that collected does not already contain.
+func mergeTrustedKeys(current []byte, collected []clusterCA) []clusterCA {
+	have := make(map[string]bool)
+	for _, ca := range collected {
+		have[normalizeSSHKey(strings.TrimSpace(string(ca.AuthorizedKey)))] = true
+	}
+	out := append([]clusterCA(nil), collected...)
+	for _, line := range nonEmptyLines(string(current)) {
+		k := normalizeSSHKey(line)
+		if !have[k] {
+			have[k] = true
+			out = append(out, clusterCA{ControllerURL: "(kept: controller unreachable)", AuthorizedKey: []byte(strings.TrimSpace(line) + "\n")})
+		}
+	}
+	return out
+}

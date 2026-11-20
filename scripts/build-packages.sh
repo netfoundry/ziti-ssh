@@ -12,7 +12,7 @@
 #   FORMAT   — comma-separated list of package formats: deb, rpm, or deb,rpm (default: deb,rpm)
 #   ARCHS    — comma-separated list of Go architectures to build (default: native arch)
 #
-# Requires: go, nfpm
+# Requires: go; nfpm (downloaded and checksum-verified for this run if not on PATH; Linux)
 
 set -euo pipefail
 
@@ -36,10 +36,35 @@ if ! command -v go >/dev/null 2>&1; then
     printf 'error: go is required but not found in PATH\n' >&2
     exit 1
 fi
+# nfpm: use the one on PATH, otherwise download the pinned release binary and
+# verify it against the release checksums (as prerelease.yml does). It is put
+# in a temporary directory for this run only. "go install" is not used: recent
+# nfpm releases need a newer Go than this module's toolchain.
 if ! command -v nfpm >/dev/null 2>&1; then
-    log "nfpm not found — installing via go install..."
-    go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
-    export PATH="${PATH}:$(go env GOPATH)/bin"
+    NFPM_VERSION="${NFPM_VERSION:-2.49.0}"
+    if [[ "$(uname -s)" != "Linux" ]]; then
+        printf 'error: nfpm not found; install nfpm v%s (https://nfpm.goreleaser.com/install/)\n' "${NFPM_VERSION}" >&2
+        exit 1
+    fi
+    case "$(uname -m)" in
+        x86_64|amd64)  NFPM_ARCH_NAME=x86_64 ;;
+        aarch64|arm64) NFPM_ARCH_NAME=arm64 ;;
+        *) printf 'error: nfpm not found and no release binary for %s; install nfpm v%s\n' "$(uname -m)" "${NFPM_VERSION}" >&2
+           exit 1 ;;
+    esac
+    for tool in curl tar sha256sum; do
+        command -v "${tool}" >/dev/null 2>&1 || { printf 'error: %s is required to download nfpm\n' "${tool}" >&2; exit 1; }
+    done
+    NFPM_TMP="$(mktemp -d)"
+    trap 'rm -rf "${NFPM_TMP}"' EXIT
+    tarball="nfpm_${NFPM_VERSION}_Linux_${NFPM_ARCH_NAME}.tar.gz"
+    base="https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}"
+    log "nfpm not found — downloading v${NFPM_VERSION} (${tarball}) and verifying its checksum"
+    curl -sfL -o "${NFPM_TMP}/${tarball}" "${base}/${tarball}"
+    curl -sfL -o "${NFPM_TMP}/checksums.txt" "${base}/checksums.txt"
+    (cd "${NFPM_TMP}" && grep " ${tarball}\$" checksums.txt | sha256sum -c -)
+    tar -xzf "${NFPM_TMP}/${tarball}" -C "${NFPM_TMP}" nfpm
+    export PATH="${NFPM_TMP}:${PATH}"
 fi
 
 IFS=',' read -ra FORMAT_LIST <<< "${FORMAT}"

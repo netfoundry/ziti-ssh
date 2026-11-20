@@ -17,18 +17,18 @@
 package main
 
 import (
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 
 	httptransport "github.com/go-openapi/runtime/client"
 	"github.com/go-openapi/strfmt"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	management "github.com/openziti/edge-api/rest_management_api_client"
 	"github.com/openziti/edge-api/rest_management_api_client/authentication"
@@ -60,7 +60,7 @@ const configTypeSchema = `{
           },
           "sudoers_rule": {
             "type": "string",
-            "description": "Rule fragment written after the username in /etc/sudoers.d/<username>"
+            "description": "Rule fragment written after the username in /etc/sudoers.d/ziti-ssh-host-<username>"
           }
         }
       }
@@ -85,7 +85,7 @@ Fields:
 
       sudoers_rule  (string)
         Rule fragment appended after the username in
-        /etc/sudoers.d/<username>. Example: "ALL=(ALL) NOPASSWD: /usr/bin/apt"
+        /etc/sudoers.d/ziti-ssh-host-<username>. Example: "ALL=(ALL) NOPASSWD: /usr/bin/apt"
 
 Example config value:
   {
@@ -111,8 +111,10 @@ func buildConfigCmd() *cobra.Command {
 		controllerFlag   string
 		usernameFlag     string
 		passwordFlag     string
+		passwordFileFlag string
 		insecureFlag     bool
 		controllerCAFlag string
+		yesFlag          bool
 	)
 
 	parent := &cobra.Command{
@@ -126,9 +128,13 @@ func buildConfigCmd() *cobra.Command {
 	parent.PersistentFlags().StringVar(&usernameFlag, "username", "",
 		"Controller admin username (or set ZITI_CTRL_USERNAME)")
 	parent.PersistentFlags().StringVar(&passwordFlag, "password", "",
-		"Controller admin password (or set ZITI_CTRL_PASSWORD)")
+		"Controller admin password (visible in the process list; prefer --password-file, ZITI_CTRL_PASSWORD, or the prompt)")
+	parent.PersistentFlags().StringVar(&passwordFileFlag, "password-file", "",
+		"Read the controller admin password from a file, or \"-\" for stdin (or set ZITI_CTRL_PASSWORD_FILE)")
+	parent.PersistentFlags().BoolVarP(&yesFlag, "yes", "y", false,
+		"Trust the controller's certificate authority on first use without asking (never replaces a changed one)")
 	parent.PersistentFlags().BoolVar(&insecureFlag, "insecure", false,
-		"Skip TLS certificate verification (or set ZITI_CTRL_INSECURE)")
+		"Skip TLS certificate verification — sends the admin password unverified; last resort (or set ZITI_CTRL_INSECURE)")
 	parent.PersistentFlags().StringVar(&controllerCAFlag, "controller-ca", "",
 		"Path to PEM CA certificate to trust for the controller's TLS (or set ZITI_CTRL_CA)")
 
@@ -146,16 +152,11 @@ func buildConfigCmd() *cobra.Command {
 		Use:   "apply",
 		Short: "Idempotent install-or-update of the ziti-ssh-host.v1 config type on the controller",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctrl := config.EnvOrFlag(controllerFlag, "ZITI_CTRL_ADDRESS", "")
-			user := config.EnvOrFlag(usernameFlag, "ZITI_CTRL_USERNAME", "")
-			pass := config.EnvOrFlag(passwordFlag, "ZITI_CTRL_PASSWORD", "")
-			insecure := insecureFlag || os.Getenv("ZITI_CTRL_INSECURE") == "true"
-			caPath := config.EnvOrFlag(controllerCAFlag, "ZITI_CTRL_CA", "")
-
-			if err := validateControllerFlags(ctrl, user, pass, insecure, caPath); err != nil {
+			opts, err := resolveControllerOptions(controllerFlag, usernameFlag, passwordFlag, passwordFileFlag, controllerCAFlag, insecureFlag, yesFlag)
+			if err != nil {
 				return err
 			}
-			return runConfigApply(ctrl, user, pass, insecure, caPath)
+			return runConfigApply(opts)
 		},
 	}
 
@@ -164,16 +165,11 @@ func buildConfigCmd() *cobra.Command {
 		Use:   "remove",
 		Short: "Remove the ziti-ssh-host.v1 config type from the controller",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctrl := config.EnvOrFlag(controllerFlag, "ZITI_CTRL_ADDRESS", "")
-			user := config.EnvOrFlag(usernameFlag, "ZITI_CTRL_USERNAME", "")
-			pass := config.EnvOrFlag(passwordFlag, "ZITI_CTRL_PASSWORD", "")
-			insecure := insecureFlag || os.Getenv("ZITI_CTRL_INSECURE") == "true"
-			caPath := config.EnvOrFlag(controllerCAFlag, "ZITI_CTRL_CA", "")
-
-			if err := validateControllerFlags(ctrl, user, pass, insecure, caPath); err != nil {
+			opts, err := resolveControllerOptions(controllerFlag, usernameFlag, passwordFlag, passwordFileFlag, controllerCAFlag, insecureFlag, yesFlag)
+			if err != nil {
 				return err
 			}
-			return runConfigRemove(ctrl, user, pass, insecure, caPath)
+			return runConfigRemove(opts)
 		},
 	}
 
@@ -183,22 +179,84 @@ func buildConfigCmd() *cobra.Command {
 	return parent
 }
 
-// validateControllerFlags returns an error if any required flag is missing or
-// if --insecure and --controller-ca are both set.
-func validateControllerFlags(ctrl, user, pass string, insecure bool, caPath string) error {
-	if ctrl == "" {
-		return fmt.Errorf("--controller (or ZITI_CTRL_ADDRESS) is required")
+// controllerOptions are the resolved settings for a management API session.
+type controllerOptions struct {
+	ctrl, user, pass string
+	caPath           string
+	insecure, yes    bool
+	caCacheDir       string
+	confirm          trustPrompt
+}
+
+// resolveControllerOptions applies flag/env precedence, reads the password
+// (flag, ZITI_CTRL_PASSWORD, --password-file / ZITI_CTRL_PASSWORD_FILE, or a
+// hidden prompt), and validates the combination.
+func resolveControllerOptions(ctrlFlag, userFlag, passFlag, passFileFlag, caFlag string, insecureFlag, yes bool) (controllerOptions, error) {
+	o := controllerOptions{
+		ctrl:     config.EnvOrFlag(ctrlFlag, "ZITI_CTRL_ADDRESS", ""),
+		user:     config.EnvOrFlag(userFlag, "ZITI_CTRL_USERNAME", ""),
+		caPath:   config.EnvOrFlag(caFlag, "ZITI_CTRL_CA", ""),
+		insecure: insecureFlag || os.Getenv("ZITI_CTRL_INSECURE") == "true",
+		yes:      yes,
 	}
-	if user == "" {
-		return fmt.Errorf("--username (or ZITI_CTRL_USERNAME) is required")
+	if o.ctrl == "" {
+		return o, fmt.Errorf("--controller (or ZITI_CTRL_ADDRESS) is required")
 	}
-	if pass == "" {
-		return fmt.Errorf("--password (or ZITI_CTRL_PASSWORD) is required")
+	if o.user == "" {
+		return o, fmt.Errorf("--username (or ZITI_CTRL_USERNAME) is required")
 	}
-	if insecure && caPath != "" {
-		return fmt.Errorf("--insecure and --controller-ca are mutually exclusive")
+	if o.insecure && o.caPath != "" {
+		return o, fmt.Errorf("--insecure and --controller-ca are mutually exclusive")
 	}
-	return nil
+
+	interactive := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stderr.Fd()))
+	passFile := config.EnvOrFlag(passFileFlag, "ZITI_CTRL_PASSWORD_FILE", "")
+	switch {
+	case passFlag != "":
+		fmt.Fprintln(os.Stderr, "WARNING: --password is visible to other users in the process list and saved in shell history; prefer --password-file, ZITI_CTRL_PASSWORD, or the interactive prompt.")
+		o.pass = passFlag
+	case os.Getenv("ZITI_CTRL_PASSWORD") != "":
+		o.pass = os.Getenv("ZITI_CTRL_PASSWORD")
+	case passFile == "-":
+		p, err := lineReader(os.Stdin)
+		if err != nil {
+			return o, fmt.Errorf("read password from stdin: %w", err)
+		}
+		o.pass = p
+		interactive = false // stdin is consumed
+	case passFile != "":
+		b, err := os.ReadFile(passFile)
+		if err != nil {
+			return o, fmt.Errorf("read password file: %w", err)
+		}
+		o.pass = strings.TrimRight(strings.SplitN(string(b), "\n", 2)[0], "\r")
+	case interactive:
+		fmt.Fprintf(os.Stderr, "Password for %s: ", o.user)
+		b, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return o, fmt.Errorf("read password: %w", err)
+		}
+		o.pass = string(b)
+	}
+	if o.pass == "" {
+		return o, fmt.Errorf("a controller admin password is required (--password-file, ZITI_CTRL_PASSWORD, or run interactively)")
+	}
+
+	dir, err := defaultControllerCADir()
+	if err != nil {
+		return o, err
+	}
+	o.caCacheDir = dir
+	if interactive {
+		o.confirm = func(question string) bool {
+			fmt.Fprint(os.Stderr, question)
+			answer, _ := lineReader(os.Stdin)
+			answer = strings.TrimSpace(answer)
+			return strings.EqualFold(answer, "y") || strings.EqualFold(answer, "yes")
+		}
+	}
+	return o, nil
 }
 
 // resolveControllerHost strips any scheme prefix and appends the default port 443
@@ -216,22 +274,21 @@ func resolveControllerHost(raw string) string {
 // buildMgmtClient constructs a Ziti management API client and authenticates it.
 // On success the returned *httptransport.Runtime has DefaultAuthentication set to
 // the bearer token, so callers can pass nil as the auth info to each API call.
-func buildMgmtClient(ctrl, user, pass string, insecure bool, caPath string) (*management.ZitiEdgeManagement, error) {
-	host := resolveControllerHost(ctrl)
+func buildMgmtClient(o controllerOptions) (*management.ZitiEdgeManagement, error) {
+	host := resolveControllerHost(o.ctrl)
+	user, pass := o.user, o.pass
 
-	tlsCfg := &tls.Config{} //nolint:gosec
-	if insecure {
-		tlsCfg.InsecureSkipVerify = true //nolint:gosec // operator-explicit flag
-	} else if caPath != "" {
-		pemBytes, err := os.ReadFile(caPath)
-		if err != nil {
-			return nil, fmt.Errorf("read controller CA file %q: %w", caPath, err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pemBytes) {
-			return nil, fmt.Errorf("no valid PEM certificates found in %q", caPath)
-		}
-		tlsCfg.RootCAs = pool
+	tlsCfg, err := controllerTLSConfig(controllerTrustOptions{
+		host:     host,
+		caPath:   o.caPath,
+		insecure: o.insecure,
+		yes:      o.yes,
+		cacheDir: o.caCacheDir,
+		confirm:  o.confirm,
+		out:      os.Stderr,
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	transport := httptransport.New(host, "/edge/management/v1", []string{"https"})
@@ -284,8 +341,8 @@ func runConfigPrint() error {
 }
 
 // runConfigApply idempotently creates or updates the ziti-ssh-host.v1 config type.
-func runConfigApply(ctrl, user, pass string, insecure bool, caPath string) error {
-	mgmtClient, err := buildMgmtClient(ctrl, user, pass, insecure, caPath)
+func runConfigApply(o controllerOptions) error {
+	mgmtClient, err := buildMgmtClient(o)
 	if err != nil {
 		return err
 	}
@@ -335,8 +392,8 @@ func runConfigApply(ctrl, user, pass string, insecure bool, caPath string) error
 }
 
 // runConfigRemove removes the ziti-ssh-host.v1 config type if it exists.
-func runConfigRemove(ctrl, user, pass string, insecure bool, caPath string) error {
-	mgmtClient, err := buildMgmtClient(ctrl, user, pass, insecure, caPath)
+func runConfigRemove(o controllerOptions) error {
+	mgmtClient, err := buildMgmtClient(o)
 	if err != nil {
 		return err
 	}

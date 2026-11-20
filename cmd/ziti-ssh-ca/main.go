@@ -67,6 +67,9 @@ func main() {
 		certTTLFlag     string
 		rateLimitFlag   string
 		rateBurstFlag   string
+		sourceAddrFlag  string
+		maxConnsFlag    string
+		extensionsFlag  string
 		zitiTimeoutFlag string
 		versionFlag     bool
 	)
@@ -91,6 +94,9 @@ func main() {
 			rateLimitStr := config.EnvOrFlag(rateLimitFlag, "ZITI_RATE_LIMIT", "5")
 			rateBurstStr := config.EnvOrFlag(rateBurstFlag, "ZITI_RATE_BURST", "3")
 			zitiTimeoutStr := config.EnvOrFlag(zitiTimeoutFlag, "ZITI_TIMEOUT", "30s")
+			sourceAddrStr := config.EnvOrFlag(sourceAddrFlag, "ZITI_CERT_SOURCE_ADDRESS", ca.DefaultSourceAddress)
+			maxConnsStr := config.EnvOrFlag(maxConnsFlag, "ZITI_MAX_CONNECTIONS", strconv.Itoa(defaultMaxConnections))
+			extensionsStr := config.EnvOrFlag(extensionsFlag, "ZITI_CERT_EXTENSIONS", ca.DefaultExtensions)
 
 			if identityFile == "" {
 				return fmt.Errorf("--identity (or ZITI_IDENTITY) is required")
@@ -128,17 +134,35 @@ func main() {
 				return fmt.Errorf("--rate-burst (or ZITI_RATE_BURST): must be a positive integer, got %q", rateBurstStr)
 			}
 
-			return run(identityFile, caKeyFile, serviceName, principal, mode, certTTL, rateLimit, rateBurst, zitiTimeout)
+			sourceAddress, err := ca.ParseSourceAddress(sourceAddrStr)
+			if err != nil {
+				return fmt.Errorf("--cert-source-address (or ZITI_CERT_SOURCE_ADDRESS): %w", err)
+			}
+
+			maxConns, err := strconv.Atoi(maxConnsStr)
+			if err != nil || maxConns < 1 {
+				return fmt.Errorf("--max-connections (or ZITI_MAX_CONNECTIONS): must be a positive integer, got %q", maxConnsStr)
+			}
+
+			extensions, err := ca.ParseExtensions(extensionsStr)
+			if err != nil {
+				return fmt.Errorf("--cert-extensions (or ZITI_CERT_EXTENSIONS): %w", err)
+			}
+
+			return run(identityFile, caKeyFile, serviceName, principal, mode, certTTL, sourceAddress, extensions, rateLimit, rateBurst, maxConns, zitiTimeout)
 		},
 	}
 
 	root.Flags().StringVar(&identityFlag, "identity", "", "Path to Ziti identity file (or set ZITI_IDENTITY)")
-	root.Flags().StringVar(&caKeyFlag, "ca-key", "", "Path to CA private key (Ed25519) (or set ZITI_CA_KEY)")
+	root.Flags().StringVar(&caKeyFlag, "ca-key", "", "Path to the controller intermediate CA private key (RSA, ECDSA or Ed25519) (or set ZITI_CA_KEY)")
 	root.Flags().StringVar(&serviceFlag, "service", "", "Ziti service name to bind (or set ZITI_CA_SERVICE, default: ssh-ca)")
 	root.Flags().StringVar(&principalFlag, "principal", "", "SSH certificate principal in shared mode (or set ZITI_SSH_PRINCIPAL, default: ziggy)")
 	root.Flags().StringVar(&modeFlag, "mode", "", "Principal mode: \"shared\" (default) or \"per-identity\" (or set ZITI_SSH_MODE)")
 	root.Flags().StringVar(&certTTLFlag, "cert-ttl", "", "Certificate validity duration (or set ZITI_CERT_TTL, default: 5m)")
 	root.Flags().StringVar(&rateLimitFlag, "rate-limit", "", "Max cert signing requests per minute per identity (or set ZITI_RATE_LIMIT, default: 5)")
+	root.Flags().StringVar(&sourceAddrFlag, "cert-source-address", "", "Comma-separated IPs/CIDRs set as the certificate source-address option, or \"none\" (or set ZITI_CERT_SOURCE_ADDRESS, default: "+ca.DefaultSourceAddress+")")
+	root.Flags().StringVar(&extensionsFlag, "cert-extensions", "", "Comma-separated certificate extensions to grant, or \"none\" (or set ZITI_CERT_EXTENSIONS, default: "+ca.DefaultExtensions+")")
+	root.Flags().StringVar(&maxConnsFlag, "max-connections", "", "Maximum concurrent CA connections; further connections are closed (or set ZITI_MAX_CONNECTIONS, default: "+strconv.Itoa(defaultMaxConnections)+")")
 	root.Flags().StringVar(&rateBurstFlag, "rate-burst", "", "Burst allowance for per-identity rate limiter (or set ZITI_RATE_BURST, default: 3)")
 	root.PersistentFlags().StringVar(&zitiTimeoutFlag, "ziti-timeout", "", "Timeout for Ziti network operations (or set ZITI_TIMEOUT, default: 30s)")
 	root.PersistentFlags().BoolVarP(&versionFlag, "version", "V", false, "Print version and exit")
@@ -238,14 +262,15 @@ const drainTimeout = 30 * time.Second
 // burst window.
 const idleLimiterTTL = 10 * time.Minute
 
-func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL time.Duration, ratePerMinute float64, rateBurst int, zitiTimeout time.Duration) error {
+func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL time.Duration, sourceAddress string, extensions []string, ratePerMinute float64, rateBurst int, maxConns int, zitiTimeout time.Duration) error {
 	// Load CA key.
 	signer, caPub, err := ca.LoadKey(caKeyFile)
 	if err != nil {
 		return fmt.Errorf("load CA key: %w", err)
 	}
 	slog.Info("CA key loaded", "service", serviceName, "mode", mode, "principal", principal,
-		"rate_limit_per_min", ratePerMinute, "rate_burst", rateBurst)
+		"cert_ttl", certTTL, "cert_source_address", sourceAddressForLog(sourceAddress), "cert_extensions", extensions,
+		"rate_limit_per_min", ratePerMinute, "rate_burst", rateBurst, "max_connections", maxConns)
 
 	caPubBytes := ca.PublicKeyBytes(caPub)
 
@@ -327,6 +352,7 @@ func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL t
 	}()
 
 	// Accept loop.
+	slots := make(chan struct{}, maxConns)
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -335,11 +361,9 @@ func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL t
 			slog.Info("listener closed, draining in-flight connections")
 			break
 		}
-		wg.Add(1)
-		go func(c net.Conn) {
-			defer wg.Done()
-			handleConn(c, signer, caPubBytes, principal, mode, certTTL, limiter)
-		}(conn)
+		dispatch(conn, slots, &wg, func(c net.Conn) {
+			handleConn(c, signer, caPubBytes, principal, mode, certTTL, sourceAddress, extensions, limiter)
+		})
 	}
 
 	// Stop the limiter eviction goroutine now that we're shutting down.
@@ -365,21 +389,19 @@ func run(identityFile, caKeyFile, serviceName, principal, mode string, certTTL t
 
 // handleConn serves a single incoming Ziti connection.
 // It reads one line from the client:
-//   - empty line  → send CA public key (not rate-limited)
+//   - empty line  → send CA public key
 //   - public key  → sign and return certificate (rate-limited per identity)
 //
 // In "shared" mode the principal comes from the operator-configured flag.
 // In "per-identity" mode the principal is derived from the caller's Ziti identity
 // name via ca.DeriveUsername.
-func handleConn(conn net.Conn, signer ssh.Signer, caPubBytes []byte, principal, mode string, certTTL time.Duration, limiter *ratelimit.Map) {
+func handleConn(conn net.Conn, signer ssh.Signer, caPubBytes []byte, principal, mode string, certTTL time.Duration, sourceAddress string, extensions []string, limiter *ratelimit.Map) {
 	defer conn.Close()
 
-	// Extract caller identity. The Ziti listener returns edge.Conn values via
-	// AcceptEdge; plain Accept returns a net.Conn wrapper. We type-assert to get
-	// the identity name.
+	// Extract the router-verified caller identity. Fail closed if absent.
 	identity := callerIdentity(conn)
 	if identity == "" {
-		slog.Error("rejected connection: empty Ziti identity")
+		slog.Error("rejected connection: edge router did not supply a dialer identity (OpenZiti v2.0.0+ routers required)")
 		return
 	}
 
@@ -389,20 +411,30 @@ func handleConn(conn net.Conn, signer ssh.Signer, caPubBytes []byte, principal, 
 	effectivePrincipal := principal
 	if mode == "per-identity" {
 		effectivePrincipal = ca.DeriveUsername(identity)
-		if effectivePrincipal == "" {
-			log.Error("rejected connection: derived username is empty", "identity", identity)
+		if err := ca.ValidatePerIdentityPrincipal(effectivePrincipal); err != nil {
+			log.Error("rejected connection: invalid per-identity principal", "identity", identity, "err", err)
 			return
 		}
 		log = log.With("derived_principal", effectivePrincipal)
 	}
 
-	// Bound the connection lifetime: 30 s is generous for a single-line request.
-	// The size cap (4 KiB) is well above any real SSH public key but prevents a
-	// slow-sender from holding the connection indefinitely.
-	if err := conn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+	// Bound the connection lifetime: the request is a single line sent right
+	// after dialing. The size cap (4 KiB) is well above any real SSH public key.
+	if err := conn.SetDeadline(time.Now().Add(connDeadline)); err != nil {
 		log.Error("set deadline", "err", err)
 		return
 	}
+
+	// Enforce the per-identity rate limit before reading anything, for every
+	// request type (certificate and CA public key alike).
+	if !limiter.Allow(identity) {
+		log.Warn("rate limit exceeded, rejecting request", "identity", identity)
+		if _, err := conn.Write([]byte("error: rate limit exceeded\n")); err != nil {
+			log.Error("write rate limit error", "err", err)
+		}
+		return
+	}
+
 	const maxRequestBytes = 4096
 	reader := bufio.NewReader(io.LimitReader(conn, maxRequestBytes))
 	line, err := reader.ReadString('\n')
@@ -413,7 +445,7 @@ func handleConn(conn net.Conn, signer ssh.Signer, caPubBytes []byte, principal, 
 	line = strings.TrimSpace(line)
 
 	if line == "" {
-		// Client requested the CA public key — not subject to rate limiting.
+		// Client requested the CA public key.
 		if _, err := conn.Write(caPubBytes); err != nil {
 			log.Error("write CA public key", "err", err)
 		} else {
@@ -422,23 +454,20 @@ func handleConn(conn net.Conn, signer ssh.Signer, caPubBytes []byte, principal, 
 		return
 	}
 
-	// Cert signing request — enforce per-identity rate limit.
-	if !limiter.Allow(identity) {
-		log.Warn("rate limit exceeded, rejecting cert signing request", "identity", identity)
-		if _, err := conn.Write([]byte("error: rate limit exceeded\n")); err != nil {
-			log.Error("write rate limit error", "err", err)
-		}
-		return
-	}
-
 	// Client sent a public key — parse it and return a signed certificate.
 	pubKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(line))
 	if err != nil {
 		log.Error("parse client public key", "err", err)
+		writeRefusal(conn, log, "request is not an SSH public key in authorized_keys format")
+		return
+	}
+	if err := ca.ValidateClientKey(pubKey, signer.PublicKey()); err != nil {
+		log.Warn("rejected client key", "type", pubKey.Type(), "err", err)
+		writeRefusal(conn, log, err.Error())
 		return
 	}
 
-	certBytes, err := ca.SignCert(signer, pubKey, identity, effectivePrincipal, certTTL)
+	certBytes, err := ca.SignCert(signer, pubKey, identity, effectivePrincipal, certTTL, sourceAddress, extensions)
 	if err != nil {
 		log.Error("sign certificate", "err", err)
 		return
@@ -449,32 +478,94 @@ func handleConn(conn net.Conn, signer ssh.Signer, caPubBytes []byte, principal, 
 		return
 	}
 
-	log.Info("issued SSH certificate", "principal", effectivePrincipal, "ttl", certTTL)
+	// The serial appears in sshd's log for every login with this certificate.
+	var serial uint64
+	if pk, _, _, _, err := ssh.ParseAuthorizedKey(certBytes); err == nil {
+		if c, ok := pk.(*ssh.Certificate); ok {
+			serial = c.Serial
+		}
+	}
+	log.Info("issued SSH certificate", "principal", effectivePrincipal, "ttl", certTTL, "serial", serial)
 }
 
-// callerIdentity extracts the Ziti identity name from a net.Conn.
+// Compile-time assertion: SDK connections must expose the router-verified
+// dialer identity that callerIdentity relies on.
+var _ interface{ GetDialerIdentityName() string } = (zitiEdge.Conn)(nil)
+
+// callerIdentity returns the authenticated Ziti identity name of the dialer.
 //
-// The SDK sets CallerIdHeader to the dialer's identity name on every dial
-// (ziti.go: edgeDialOptions.CallerId = GetCurrentApiSession().GetIdentityName()).
-// This is exposed via SourceIdentifier() on edge.Conn.
+// Only GetDialerIdentityName() is trusted. That header is set by the dialer's
+// edge router (OpenZiti v2.0.0+) from the router's own record of the
+// authenticated identity and cannot be influenced by the client.
 //
-// GetDialerIdentityName() reads a separate header injected by the fabric layer
-// that is not always present — SourceIdentifier() is the reliable source.
+// SourceIdentifier() (the CallerId header) is NOT trusted: it is written by the
+// dialing SDK and copied through the router unchanged, so a modified client can
+// claim any identity name. It is used only to log a warning on mismatch.
 //
-// Returns "" only for plain net.Conn values (e.g. in unit tests).
+// Returns "" when the router did not supply a dialer identity (router older
+// than v2.0.0, or the router could not resolve the identity); callers must
+// reject the connection in that case.
 func callerIdentity(conn net.Conn) string {
-	if ec, ok := conn.(zitiEdge.Conn); ok {
-		if name := ec.SourceIdentifier(); name != "" {
-			return name
-		}
-		return ec.GetDialerIdentityName()
+	type dialerNamer interface {
+		GetDialerIdentityName() string
 	}
-	// Fallback: structural interface for tests/mocks that don't import edge.
+	dn, ok := conn.(dialerNamer)
+	if !ok {
+		return ""
+	}
+	name := dn.GetDialerIdentityName()
+
 	type sourceIdentifier interface {
 		SourceIdentifier() string
 	}
 	if si, ok := conn.(sourceIdentifier); ok {
-		return si.SourceIdentifier()
+		if claimed := si.SourceIdentifier(); claimed != "" && name != "" && claimed != name {
+			slog.Warn("client-supplied caller id does not match router-verified dialer identity; using router-verified identity",
+				"dialer_identity", name, "claimed_caller_id", claimed)
+		}
 	}
-	return ""
+	return name
+}
+
+// sourceAddressForLog renders the configured source-address restriction.
+func sourceAddressForLog(sourceAddress string) string {
+	if sourceAddress == "" {
+		return "none (certificates accepted from any address)"
+	}
+	return sourceAddress
+}
+
+const (
+	// defaultMaxConnections bounds concurrent CA connections.
+	defaultMaxConnections = 64
+	// connDeadline bounds each connection's lifetime.
+	connDeadline = 10 * time.Second
+)
+
+// dispatch runs handle(conn) in a new goroutine if a connection slot is free,
+// and returns true. If all slots are in use it closes conn immediately and
+// returns false. The slot is released when handle returns.
+func dispatch(conn net.Conn, slots chan struct{}, wg *sync.WaitGroup, handle func(net.Conn)) bool {
+	select {
+	case slots <- struct{}{}:
+	default:
+		slog.Warn("connection limit reached; closing new connection", "max_connections", cap(slots))
+		_ = conn.Close()
+		return false
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer func() { <-slots }()
+		handle(conn)
+	}()
+	return true
+}
+
+// writeRefusal sends an "error: <reason>" line, which clients report as a CA
+// refusal instead of a generic read failure.
+func writeRefusal(conn net.Conn, log *slog.Logger, reason string) {
+	if _, err := conn.Write([]byte("error: " + reason + "\n")); err != nil {
+		log.Error("write refusal", "err", err)
+	}
 }

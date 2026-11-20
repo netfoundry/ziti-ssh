@@ -2,6 +2,272 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-11-20
+
+### Security: upgrade required
+
+This release fixes security issues in how the CA and the host daemon identify callers, in per-identity account
+handling, in certificate scope and in the clients. All deployments should upgrade. Before upgrading:
+
+- **OpenZiti routers v2.0.0 or later are required.** The caller's identity is taken only from the router-set dialer
+  identity; connections without it are refused.
+- **Upgrade `ziti-ssh-ca` and `ziti-ssh-host` together.** Certificates are now valid only through the local
+  `ziti-ssh-host` proxy (`source-address`), and derived usernames fold only ASCII case.
+- **Breaking changes:** a `ziti-ssh-host.v1` config may grant privileged groups or a `sudoers_rule` only where the
+  host opts the service in (`ZITI_ALLOW_GROUPS`, `ZITI_ALLOW_SUDOERS`); certificates no longer grant agent forwarding
+  by default, and `ziti-ssh -A` needs `--forward-agent-unverified`; permission keys match `*` and `?` only (`[` and
+  `\` are literal).
+- **Per-identity hosts:** accounts created by earlier releases are not managed until claimed with
+  `ziti-ssh-host users claim --username <u> --identity <id>` (`ziti-ssh-host users list` shows them).
+- **Shared mode:** add the shared account to the `ziti-ssh-managed` group (`usermod -aG ziti-ssh-managed ziggy`) so it
+  can only log in with a CA certificate.
+- **Revocation:** by default a disconnected (or revoked) user's background processes and scheduled jobs keep
+  running. Set `ZITI_TERMINATE_ON_DISCONNECT=true` or `ZITI_USER_CLEANUP=true` on hosts where that is not acceptable.
+
+Details of each change follow.
+
+#### Certificates restricted to the Ziti path (`source-address`)
+
+`ziti-ssh-ca` now adds the OpenSSH `source-address` critical option to every certificate, defaulting to `127.0.0.1/32,::1/128`. sshd accepts a certificate only from those addresses; `ziti-ssh-host` always proxies to `127.0.0.1:22`, so the same certificate keeps working on every host the caller's Ziti policies allow, but is rejected on any connection that reaches port 22 directly.
+
+- New flag `--cert-source-address` / `ZITI_CERT_SOURCE_ADDRESS` (comma-separated IPs or CIDRs, or `none` to omit the option). Invalid values stop the CA at startup.
+- If something other than the local `ziti-ssh-host` delivers connections to sshd, set this accordingly.
+
+#### Host grant policy for `ziti-ssh-host.v1` configs (BREAKING)
+
+- `ziti-ssh-host` now limits, per Ziti service, what a `ziti-ssh-host.v1` config may grant: `sudoers_rule` only from services listed in `ZITI_ALLOW_SUDOERS` (default: none); privileged groups (`root`, `sudo`, `admin`, `wheel`, `docker`, `lxd`, `disk`, `shadow`, `libvirt`) only when opted in via `ZITI_ALLOW_GROUPS` (`<service>:<group>` or `*:<group>`); optionally only listed groups (`ZITI_RESTRICT_GROUPS=true`). The host's own `ZITI_SSH_GROUPS` / `ZITI_SUDOERS_RULE` fallbacks are unaffected.
+- An entry exceeding the policy rejects the connection (`rejecting connection: permissions refused by host grant policy`); violations are logged at config load/reload; `ziti-ssh-host inspect` shows the policy and refused entries. Invalid policy settings stop `run` in per-identity mode.
+- **Action:** configs that grant `sudoers_rule` or privileged groups are refused until each host opts the service in. Run `ziti-ssh-host inspect --service <name>` before upgrading.
+
+#### Host keys checked on every connection (trust on first use)
+
+- `ziti-ssh` and `ziti-scp` no longer accept any SSH host key. They remember the key(s) seen for each Ziti address in `$XDG_CONFIG_HOME/ziti-ssh/known_hosts` (0600). A host dialed by name (`<host>@<service>`) with a changed key is refused; for a service dialed directly, where any bound host may answer, the user is asked before an additional key is trusted (refused without a terminal). OpenZiti does not tell the dialer which identity answered, so this detects impersonation after the first connection.
+- New `ziti-ssh known-hosts list|remove <address>`.
+- Dialing a service directly now prints `Dialing service "…" directly: any host bound to it may answer.` (`ziti-ssh`, `ziti-scp`, `ziti-ssh proxy`).
+- **Action:** after rebuilding a host, users run `ziti-ssh known-hosts remove <host>@<service>`.
+
+#### Certificate-only login for Ziti-managed accounts
+
+- The sshd drop-in now contains `Match Group ziti-ssh-managed` with `AuthorizedKeysFile none` and `AuthorizedKeysCommand none`, so members of that group can only log in with a CA certificate; a key added to their own `authorized_keys` can no longer outlive their certificate or identity. Other accounts are unaffected.
+- The group is created by the `ziti-ssh-host` package, `enroll` and `run`; `run` rewrites an outdated drop-in at startup and reloads sshd. Per-identity accounts are always kept in the group.
+- **Action (shared mode):** add the shared account to the group — `usermod -aG ziti-ssh-managed <account>`. `run` warns at startup if the group is empty.
+
+#### Agent forwarding off by default (BREAKING)
+
+- `ziti-ssh-ca` grants certificate extensions from `--cert-extensions` / `ZITI_CERT_EXTENSIONS`, default `permit-pty,permit-port-forwarding` — **agent forwarding is no longer granted by default**.
+- `ziti-ssh connect -A` is refused unless `--forward-agent-unverified` is also given: clients cannot yet verify which host answered on a terminator address (an OpenZiti limitation), and a forwarded agent can be used by that host while connected.
+- **Action:** to keep agent forwarding, add `permit-agent-forwarding` to `ZITI_CERT_EXTENSIONS` on the CA and use `-A --forward-agent-unverified`.
+
+#### Documentation: host identity and access scope
+
+- Docs no longer present the terminator name as a per-host access boundary: access control is per Ziti service, and a terminator name is an address chosen by the binding identity. New section in `docs/operations.md` (host identity / terminator names) describing the limitation, Bind-policy guidance, and one-service-per-host for hosts needing a strong identity guarantee.
+
+#### Temporary files removed with deleted accounts
+
+- With `ZITI_USER_CLEANUP=true`, files a deleted user owned in `/tmp`, `/var/tmp` and `/dev/shm` are removed before `userdel` (symlinks are removed, never followed; directories only when empty), so they do not pass to the next account given the same UID.
+
+#### Controller CA key tracking
+
+- `ziti-ssh-host` takes each controller's intermediate CA from the TLS chain verified against the enrollment root CA (`VerifiedChains`) instead of the certificates the server presented, which could include an extra CA certificate that would have become an SSH trust anchor.
+- If a controller does not answer during a CA key refresh, currently trusted keys are kept (previously its key was dropped from `TrustedUserCAKeys`, breaking logins during a transient outage). Keys are removed only when every controller answered.
+- The event-driven and periodic refreshes are serialised; empty controller URL lists are ignored and never persisted to the identity file (applies to all binaries via `config.PersistZtAPIs`).
+
+#### Permission configs that fail to load now fail closed
+
+- If a service's `ziti-ssh-host.v1` config cannot be fetched or parsed at startup, per-identity connections on that service are rejected instead of falling back to the global defaults. A failed live reload marks the service unavailable instead of keeping the previous config. A config that is simply not attached still uses the global fallbacks.
+
+#### `ziti-scp` download hardening
+
+- Refuses to write through an existing local symlink at a download destination.
+- Downloaded files take the remote file's permission bits reduced by the local umask (previously always 0644); with `-p` the mode is applied exactly except that files are never made world-writable. setuid/setgid/sticky are never applied.
+- Recursive copies stop at 64 directory levels (the remote host controls download depth).
+- Control characters in server-supplied file names are replaced before being printed in progress output.
+
+#### `ziti-ssh proxy` never prompts
+
+- In `ProxyCommand` mode, `ziti-ssh proxy` no longer offers to generate an SSH key when none is found (the prompt was written into the SSH data stream on stdout); it exits with an error asking for a key or `--key`.
+
+#### CA key-type allowlist
+
+- `ziti-ssh-ca` only certifies ed25519, ECDSA (P-256/384/521), the `sk-` security-key variants, and RSA keys of at least 3072 bits. Certificates, DSA keys, shorter RSA keys, and the CA's own key are refused with an `error: …` reply (shown by clients as `CA refused the request: …`). Malformed requests now also get an `error:` reply instead of a silent close.
+- **Action:** users with RSA keys shorter than 3072 bits must generate a new key (e.g. `ssh-keygen -t ed25519`).
+
+#### CA connection limits
+
+- `ziti-ssh-ca` caps concurrent connections (`--max-connections` / `ZITI_MAX_CONNECTIONS`, default 64); connections beyond the cap are closed immediately.
+- The per-identity rate limit is now checked before the request is read and applies to CA public key requests as well as certificate requests. A limited caller receives `error: rate limit exceeded`.
+- The per-connection deadline is reduced from 30 s to 10 s.
+
+#### Optional termination of a user's processes on disconnect
+
+- New `ziti-ssh-host` setting `ZITI_TERMINATE_ON_DISCONNECT` (default `false`, per-identity mode with `ZITI_USER_CLEANUP=false`). When `true`, everything the account can run is stopped when its last session closes — the account is expired (`usermod -e 1`; re-enabled on the identity's next authorized connection, which is rejected if that fails), its crontab and `at` jobs are removed, lingering is disabled, `loginctl terminate-user`, then SIGTERM/SIGKILL to the account's UID — while the account and home directory are kept. With `ZITI_USER_CLEANUP=true` the same sequence runs before deletion. Also applied at startup to accounts that still had sessions open when the daemon stopped.
+- With both settings at their defaults, background processes survive disconnect and identity revocation; the daemon now logs a warning at startup in that configuration.
+- `docs/operations.md` revocation section now tabulates the behaviour of each combination.
+
+#### Per-identity permissions are applied fail-closed (behaviour change)
+
+- If `ziti-ssh-host` cannot set an account's supplementary groups, remove a legacy sudoers file, or write/remove its sudoers file, the connection is now **rejected** instead of continuing with the account's previous groups and sudoers rule. If a new sudoers rule cannot be installed, the existing file is removed first. Log line: `rejecting connection: could not apply permissions`.
+- **Action:** a group named in a `ziti-ssh-host.v1` entry or `ZITI_SSH_GROUPS` that does not exist on the host now blocks that identity's logins on that host. Verify configs with `ziti-ssh-host inspect`.
+- When the last session closes with `ZITI_USER_CLEANUP=false`, supplementary groups are cleared as well as the sudoers file (also after a restart following a crash).
+
+#### OIDC callback server listens on loopback only and refuses an occupied port
+
+- The temporary OIDC callback server now binds only `127.0.0.1` and `::1` (previously all interfaces), and claims the port before contacting the identity provider. If either address is already in use the flow stops with an error instead of opening the browser. The redirect URI (`http://localhost:<callback_port>/auth/callback`) and default port are unchanged; no identity-provider changes are needed.
+- The login URL is printed to stderr before the browser is opened, and failing to launch a browser is no longer fatal (previously `ziti-ssh` exited on headless machines without showing the URL).
+- Only the first authorization callback is used; the callback server has a read-header timeout.
+
+#### Caller identity taken from the edge router (BREAKING)
+
+`ziti-ssh-ca` and `ziti-ssh-host` now identify each caller only by the dialer identity name that the caller's edge router attaches to the connection (`GetDialerIdentityName()`). The client-supplied caller ID header is no longer used for any decision; if it differs, a warning is logged (`client-supplied caller id does not match router-verified dialer identity`).
+
+- Connections without a router-supplied dialer identity are rejected (`rejected connection: edge router did not supply a dialer identity (OpenZiti v2.0.0+ routers required)`). In `per-identity` mode, `ziti-ssh-host` closes such connections without proxying them to sshd.
+- **Breaking:** the controller and all edge routers must run **OpenZiti v2.0.0 or later**.
+- Integration suite (`suites/ziti-ssh/suite.yml`) now runs against OpenZiti v2.0.8.
+
+**Updated docs:** `ARCHITECTURE.md` §6 (identity flow, with diagram) and §12; `README.md` prerequisites; `docs/provisioning.md` version requirement; `docs/operations.md` new "Caller identity verification" section.
+
+#### Per-identity account ownership registry
+
+`ziti-ssh-host` now records the Linux accounts it creates in `/var/lib/ziti-ssh-host/owned-users.json` (username → Ziti identity, UID; mode 0600) and only creates, modifies, or deletes accounts recorded there for the connecting identity with a matching UID ≥ 1000.
+
+- Existing accounts that `ziti-ssh-host` did not create are not managed; connections deriving their names are rejected. A corrupt registry stops `run` in per-identity mode.
+- Two identities that derive the same username are detected across disconnects and restarts.
+- Reserved names (`root`, common system accounts, `ubuntu`, `admin`, `ziti`) and names starting with `-` are refused.
+- Sudoers files moved to `/etc/sudoers.d/ziti-ssh-host-<username>`; a legacy `/etc/sudoers.d/<username>` is removed only if it contains the single line `ziti-ssh-host` wrote.
+- The session count is re-checked before account cleanup when a session is released.
+- With cleanup disabled, sudoers files left by sessions open during a crash are removed on restart.
+- `ziti-ssh-ca` refuses to sign a per-identity certificate whose derived principal is a reserved account name (the same list the host refuses) or starts with `-`.
+- New `ziti-ssh-host users list` and `ziti-ssh-host users claim --username <u> --identity <id>` (root).
+
+**Upgrade action required (per-identity hosts with persistent accounts):** accounts created by earlier releases are not in the registry, so their identities are rejected (`refusing to manage pre-existing account`) until claimed with `sudo ziti-ssh-host users claim --username <u> --identity <id>`. This mainly affects hosts with `ZITI_USER_CLEANUP=false` (the default), where accounts persist. With cleanup enabled, accounts are normally deleted at disconnect; an account whose session was still open during the upgrade is left in place (not deleted, since it is unregistered) and must be claimed or removed with `userdel -r` by an administrator.
+
+**Updated docs:** `docs/operations.md` (account ownership flow diagram, lifecycle, new "Managing account ownership" section, files-written table), `docs/configuration.md` (`users` subcommands, sudoers path), `ARCHITECTURE.md` (`UserManager`, `deleteUser`, §12 account ownership boundary), `CLAUDE.md`.
+
+### Fixed
+#### Permission config changes apply within 30 seconds
+
+- `ziti-ssh-host run` checks the controller for service changes every 30 s (`ZITI_SERVICE_REFRESH`, minimum 5 s); previously it used the SDK default of 5 minutes, so a changed or reduced `ziti-ssh-host.v1` config could take up to 5 minutes to reach a host although the docs said "within seconds". Each check is a small "anything changed?" request.
+
+#### Host connection limit and cross-service permission conflicts
+
+- `ziti-ssh-host run --max-connections` / `ZITI_MAX_CONNECTIONS` (default 128) caps concurrent connections per service; further connections are closed immediately and logged at most every 10 s. Previously accepts were unbounded.
+- Per-identity mode: a Linux account has one set of groups and one sudoers file. While an identity has sessions open through one service, a connection through a different service that resolves to different permissions is now **rejected** instead of replacing the permissions of the open sessions (the previous docs incorrectly said the first connection's permissions were kept). The same service always applies the current config; a different service with identical permissions is allowed.
+
+#### Controller URL lists validated
+
+- Controller URL lists pushed by the controller are filtered before use: entries must be `https` with a host and no user info, query or fragment; others are logged and dropped, and duplicates removed. This applies before `ziti-ssh-host` fetches CA keys and before any binary saves the list to its identity file.
+- The identity file is no longer rewritten when the controller list has not changed.
+
+#### Certificate serials and clock-skew tolerance
+
+- Each certificate carries a random 64-bit serial (was always 0). `ziti-ssh-ca` logs it when issuing (`serial=`) and sshd logs it at login, so a login can be traced to its issuance.
+- Certificates are valid from 60 seconds before signing, so an SSH host whose clock is slightly behind the CA's accepts a new certificate. Expiry is unchanged (signing time + `--cert-ttl`).
+
+#### Derived usernames fold ASCII case only (behaviour change)
+
+- `ca.DeriveUsername` lowercases only `A`–`Z`; every other non-`[a-z0-9_-]` character becomes `_`. Previously Unicode case folding mapped some non-ASCII letters to ASCII (the Kelvin sign to `k`, `İ` to `i`), so a lookalike identity name could derive another identity's username. Only identity names containing such characters derive a different name; upgrade `ziti-ssh-ca` and `ziti-ssh-host` together.
+
+#### Permission key matching (behaviour change)
+
+- `ziti-ssh-host.v1` permission keys are matched by `host.MatchPattern`: `*` matches any run of characters including `/`, `?` one character, everything else literally. Previously `path.Match` was used, where `*` stopped at `/` (so `"*"` did not match identity names containing `/`), `[…]` was a character class and `\` an escape. Keys containing `[` or `\` are flagged in the log and by `inspect`.
+- Patterns of equal specificity are now ordered by the pattern string, so which entry applies no longer depends on map iteration order.
+
+#### Client key and file checks
+
+- When `ziti-ssh` generates a key it no longer passes an empty passphrase: `ssh-keygen` asks for one (Enter for none).
+- A passphrase-protected key that no SSH agent holds is unlocked by asking for the passphrase on the terminal, instead of failing (`client.NewCertSignerPrompt`).
+- `config.yaml` and the Ziti `known_hosts` file are refused if writable by others, writable by a shared group, or owned by another user (`config.CheckUserFile`), as OpenSSH does for its client config. Group write is accepted when the group is the owner's private group (Debian/Ubuntu default umask 002).
+
+#### MFA codes asked for by every client command
+
+- `ziti-ssh connect/sign/proxy/list` and `ziti-scp` now ask for an MFA TOTP code when the controller requires one; previously only the `mfa` subcommands did, so other commands could not authenticate an MFA-enrolled identity. Codes are read from the terminal (`/dev/tty`) without echo — never from stdin — and authentication stops after three wrong codes or at end of input (the `mfa` prompt previously looped forever on closed stdin). Shared code in `internal/mfa`.
+
+#### SOCKS5 proxy method negotiation
+
+- `ziti-ssh -D` replies "no acceptable methods" (`0xFF`) and closes when a SOCKS5 client does not offer the no-authentication method, as RFC 1928 requires; previously it always selected no-authentication.
+
+#### Client target parsing
+
+- `ziti-ssh` and `ziti-scp` split `[user@]target` at the last `@` (as OpenSSH does); previously `a@b@web1` targeted `b@web1`.
+- Without `user@`, `ziti-ssh connect` and `ziti-scp` use the certificate's principal as the SSH user when it has exactly one (in per-identity mode, the identity's derived Linux username), instead of the local user name. Per-identity users can run `ziti-ssh web1`; an explicit user must be the derived name (`alice_corp_com`), not the identity name.
+- `ziti-scp` treats an argument as remote only if it contains `:` with no `/` before it, matching `scp`. Previously `/data/a:b`, `./a:b` and `dir/a:b` were taken as remote host specifications.
+- `ziti-ssh -L/-R/-D` accept bracketed IPv6 addresses (`-L [::1]:8080:[2001:db8::1]:80`) and reject ports outside 1–65535; previously IPv6 specs were mis-split on `:`. A warning is printed when a `-L` or `-D` listener binds to a non-loopback address, since the listener has no authentication of its own.
+- `ziti-scp --service <name>` (as in `ziti-ssh`) treats the remote host as a terminator address on `<name>` even when the host name is also a service name.
+
+
+#### `ziti-ssh-host` did not reload a running sshd on socket-activated systems
+
+`host.ReloadSSHD` (used by `enroll` and by `run` when the CA key set changes) treated an active `ssh.socket` as "each connection starts a fresh sshd" and skipped both `systemctl reload ssh` and the SIGHUP to leftover sshd listeners. On Ubuntu 22.10+ `ssh.socket` uses `Accept=no`: the first connection starts a long-running `ssh.service`, which then serves all connections with the configuration it started with. On any host where sshd was already running when `enroll` wrote `TrustedUserCAKeys` — for example after an administrator had logged in — certificate logins failed until sshd was restarted.
+
+- `ReloadSSHD` now reloads `ssh.service` whenever it is active and sends SIGHUP to top-level sshd listeners (PPID 1) unless `ssh.socket` uses `Accept=yes` (where per-connection sshd processes also have PPID 1). The decision is unit-tested (`planSSHDReload`).
+- Integration suite: `install-ca.sh` no longer reports `ziti-ssh-ca` as running when its first start fails because the `ssh-ca` service has not been created yet; systemd restarts it until the service exists.
+- Integration suite: `install-host.sh` no longer fails provisioning when `ziti-ssh-host` first exits with `service 'ssh' not found` (the service is created only after all edge routers are online); systemd restarts it until the service exists. Any other startup failure is still fatal.
+
+#### Clients re-signed a certificate on every invocation and saved CA error replies as certificates
+
+`ziti-ssh` and `ziti-scp` refreshed a certificate when fewer than 5 minutes of validity remained — which, with the CA's default 5-minute TTL, was always true. Every invocation requested a new certificate, so a fourth call within a few seconds exceeded the CA's default rate limit (5/min, burst 3). The CA's `error: rate limit exceeded` reply was then written to `<key>-cert.pub` as if it were a certificate, overwriting a valid one, and the login failed with `unable to authenticate`.
+
+- A certificate is now refreshed when less than 20% of its lifetime remains, between 30 seconds and 5 minutes (1 minute for a 5-minute certificate; unchanged for certificates of 25 minutes or longer).
+- The CA reply is read with a 16 KiB limit and validated before it is written: an `error: …` reply is reported as `CA refused the request: <reason>`, and anything other than a user certificate for the caller's own public key is rejected. The existing certificate file is left untouched on failure.
+- Docs no longer state an 8-hour default TTL (`ARCHITECTURE.md`, `docs/usage.md`, `docs/operations.md`).
+
+#### Per-identity hardening follow-ups
+
+- `ziti-ssh-host`: a connection rejected by the ownership check (e.g. two identities deriving the same username) is no longer counted as a session while it is being checked; previously it could make the owner's final disconnect skip sudoers removal and account cleanup.
+- `ziti-ssh-host`: `sudoers_rule` (and `ZITI_SUDOERS_RULE`) values starting with `,` — which would add users to the rule, e.g. `, ALL ALL=(ALL) NOPASSWD: ALL` — are rejected, as are values containing NUL bytes or lacking `=`.
+- `ziti-ssh-host run`: at startup, legacy `/etc/sudoers.d/<username>` files are removed for registered accounts; legacy-format files for unregistered accounts are reported (log warning and `ziti-ssh-host users list`) but never removed automatically.
+- `docs/operations.md`: revocation section corrected — with `ZITI_USER_CLEANUP=false` (default) the account and its processes are kept after the last session closes.
+
+#### `ziti-ssh-ca` package runs as the controller's service user
+
+- The postinstall script detects the Ziti controller's service user (from `ziti-controller.service`, otherwise the owner of a running `ziti controller run` process) and writes the systemd drop-in `/etc/systemd/system/ziti-ssh-ca.service.d/10-controller-user.conf`. The `openziti-controller` v2 package runs the controller as `ziti-controller`, so the unit's fixed `User=ziti` left the CA unable to read the intermediate key there. Administrator overrides that set `User=` are left unchanged; if no controller is detected, instructions are printed.
+- `/etc/ziti-ssh-ca` is now owned by the service user (mode 0750) so controller URL updates can be saved to the identity file.
+
+### Changed
+
+#### `ziti-ssh-ca config`: controller trust and password handling
+
+- Controller TLS trust works like `ziti edge login`: if the system CAs do not trust the controller, its CA bundle is fetched from `/.well-known/est/cacerts`, the controller's certificate is verified against it, the CAs are shown and the user is asked to trust them (`--yes` for scripts). The bundle is saved under `$XDG_CONFIG_HOME/ziti-ssh/controllers/` and reused. A changed CA is refused unless confirmed interactively (`--yes` never replaces it). `--insecure` remains but warns.
+- The admin password can come from `--password-file <file|->`, `ZITI_CTRL_PASSWORD_FILE`, `ZITI_CTRL_PASSWORD`, or a hidden prompt. `--password` still works but warns that it is visible in the process list and shell history.
+
+#### Packages install to `/usr/bin`; remove/purge scripts (behaviour change)
+
+- All four packages install their binary to `/usr/bin` instead of `/usr/local/bin` (reserved for locally installed software); the systemd units are updated. Upgrades move the binary automatically; update any scripts or custom units that hard-code `/usr/local/bin/ziti-ssh*`.
+- `ziti-ssh-ca` and `ziti-ssh-host` stop and disable their service on removal (not on upgrade).
+- `apt purge ziti-ssh-host` removes the sshd drop-in and `/etc/ssh/ziti_ca.pub` and reloads sshd, so the host stops trusting the CA; identities, env files, the ownership registry and Linux accounts are kept. `apt purge ziti-ssh-ca` removes its managed systemd drop-in. rpm has no purge — see `docs/provisioning.md` (Uninstalling).
+
+#### Release checksums and build provenance
+
+- Tagged releases attach `SHA256SUMS` (every `.deb` and `.rpm`) to the GitHub release and publish a GitHub build provenance attestation for each package (`actions/attest-build-provenance`). Verify with `sha256sum --check` or `gh attestation verify <package> --repo netfoundry/ziti-ssh`; see `docs/building.md` (Verifying packages). Repository installs are unchanged (signed repository index).
+
+#### Docker package build
+
+- Added `.dockerignore` so the build context excludes `.git`, `dist/`, local binaries, `*.jwt`, `*.json` (identity files), key material and local security notes (previously `COPY . .` could copy an enrollment JWT into the image).
+- `scripts/Dockerfile.packages` pins `golang:1.26-bookworm` by digest; Dependabot now also tracks the Docker base image.
+- `scripts/build-packages.sh` no longer installs nfpm with `go install` (nfpm v2.49.0 needs Go ≥ 1.27.4, so the Docker build and machines without nfpm failed); when nfpm is not on `PATH` it downloads the pinned release binary, verifies it against the release checksums, and uses it for that run only — as the release workflow does.
+
+#### Documentation and cleanup
+
+- The CA key is described correctly as the controller's intermediate CA key (RSA, ECDSA or Ed25519; RSA on stock controllers), not "Ed25519".
+- Removed the unused `scripts/build-deb.sh`; packages are built with `scripts/build-packages.sh` (nfpm).
+
+#### Dependency, toolchain, and CI refresh
+
+- `github.com/openziti/sdk-golang` moved from v1.9.0 to **v1.8.4**. v1.9.0 was retracted upstream ("published from main before the module moved to `github.com/openziti/sdk-golang/v2`; the supported v1 line is 1.8.x").
+- Direct dependencies updated: `edge-api` v0.36.1, `go-openapi/runtime` v0.33.5, `go-openapi/strfmt` v0.27.4, `pkg/sftp` v1.13.12, `zitadel/oidc/v3` v3.52.0, `go.yaml.in/yaml/v3` v3.0.6, `x/crypto` v0.59.0, `x/term` v0.48.0, `x/time` v0.16.0.
+- `go.mod` now declares `go 1.26.0` (required by sdk-golang) and `toolchain go1.26.11`. `actions/setup-go` v6+ honours the `toolchain` directive, so release binaries are built with a patched standard library; previously `setup-go@v5` installed exactly the `go` directive version (1.25.0).
+- CI vulnerability scan runs `govulncheck` (pinned, `go run golang.org/x/vuln/cmd/govulncheck@v1.9.0`) with the release toolchain from `go.mod` instead of `govulncheck-action`, whose bundled setup-go scanned with `stable` or the `go` directive (1.26.0) rather than the toolchain that builds releases.
+- GitHub Actions updated and pinned to commit SHAs: `checkout` v7.0.1, `setup-go` v7.1.0, `upload-artifact` v7.0.2, `setup-jfrog-cli` v5.3.5, `action-gh-release` v3.0.4. `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` removed (all actions now run on Node 24 natively).
+- `ci.yml`, `ziti-test.yml` and `promote.yml` declare `permissions: contents: read` at the top level; jobs add only what they need (`id-token: write` for AWS / Artifactory OIDC, `attestations: write` for provenance).
+- `ziti-test.yml` runs two suites (matrix): `suites/ziti-ssh` (shared mode) and the new `suites/ziti-ssh-per-identity` (per-identity accounts, grant policy, config reload, revocation), each on its own stack.
+- `ziti-test.yml` calls the `ziti-test-suite` reusable workflow at a pinned commit and checks out the suite code at the same commit (was `@main`).
+- Default tool versions: nfpm 2.49.0 (prerelease download now verified against the release `checksums.txt`; `build-packages.sh` fallback pinned instead of `@latest`), jfrog-cli 2.133.0.
+- `ziti-test.yml` builds packages with `build-packages.sh` (same nfpm path as releases) instead of `build-deb.sh`; `suites/ziti-ssh/suite.yml` paths updated to the nfpm filenames (`<pkg>_0.0.0-1_amd64.deb`).
+- `scripts/Dockerfile.packages` base image moved to `golang:1.26-bookworm`.
+- Added `.github/dependabot.yml` (weekly `gomod` and `github-actions` updates, minor/patch grouped).
+
+---
+
 ## [Unreleased] - 2026-04-14
 
 ### Added

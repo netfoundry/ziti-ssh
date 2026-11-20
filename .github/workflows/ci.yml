@@ -6,8 +6,8 @@ on:
   push:
     branches: [main]
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -15,9 +15,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
           cache: true
@@ -31,5 +31,15 @@ jobs:
       - name: Build
         run: go build ./...
 
+      # Scan with the Go toolchain that builds release binaries (go.mod's
+      # toolchain directive, installed by setup-go above). govulncheck-action
+      # is not used: its bundled setup-go reads only the go directive (1.26.0)
+      # or defaults to "stable", so it never scanned the release toolchain.
+      # The pinned version is verified against the Go checksum database;
+      # bump it by hand (Dependabot does not track go run versions).
       - name: Vulnerability scan
-        uses: golang/govulncheck-action@v1
+        env:
+          GOVULNCHECK_VERSION: v1.9.0
+        run: |
+          go version
+          go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}" ./...

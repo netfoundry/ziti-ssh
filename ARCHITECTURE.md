@@ -46,22 +46,22 @@ Entry points: `cmd/ziti-ssh-ca/main.go` (service and root) and `cmd/ziti-ssh-ca/
 **Service startup sequence:**
 
 1. Resolve configuration (flags > env vars > defaults) via `config.EnvOrFlag`.
-2. Load the Ed25519 CA private key from disk with `ca.LoadKey` — fail fast if the file is missing or unparseable.
+2. Load the controller's intermediate CA private key (RSA, ECDSA or Ed25519) from disk with `ca.LoadKey` — fail fast if the file is missing or unparseable.
 3. Initialize a Ziti context from the identity file with `ziti.NewContextFromFile`, then call `zitiCtx.Authenticate()`.
 4. Call `zitiCtx.Listen(serviceName)` to bind the named Ziti service and receive an `edge.Listener`.
 5. Build a per-identity token-bucket rate limiter (`ratelimit.New`) and start its eviction goroutine.
-6. Loop: `listener.Accept()` → `go handleConn(...)`.
+6. Loop: `listener.Accept()` → `dispatch(...)`: if one of `--max-connections` slots (default 64) is free, run `handleConn` in a goroutine and release the slot when it returns; otherwise close the connection immediately.
 
 Each connection handler (`handleConn`):
 
-1. Type-asserts the `net.Conn` to `edge.Conn` to call `GetDialerIdentityName()` — the Ziti-verified identity name of the caller.
-2. Reads one newline-terminated line from the connection.
-3. Resolves the effective principal from the configured mode (see [Mode: shared vs per-identity](#mode-shared-vs-per-identity)).
-4. Enforces the per-identity rate limit for cert-signing requests (CA public key requests are not rate-limited).
-5. Dispatches on line content: empty → write CA public key; non-empty → parse as SSH public key, sign, write certificate.
+1. Calls `GetDialerIdentityName()` on the connection — the router-verified identity name of the caller (see [§6](#6-ziti-identity-flow)). Rejects the connection if it is empty.
+2. Resolves the effective principal from the configured mode (see [Mode: shared vs per-identity](#mode-shared-vs-per-identity)).
+3. Sets a 10-second deadline on the connection.
+4. Enforces the per-identity rate limit **before reading anything**, for every request type (CA public key requests included); a limited caller receives `error: rate limit exceeded`.
+5. Reads one newline-terminated line (at most 4 KiB) and dispatches on its content (a key that fails `ca.ValidateClientKey` — certificate, DSA, RSA < 3072 bits, unsupported type, or the CA's own key — gets an `error:` reply): empty → write CA public key; non-empty → parse as SSH public key, sign, write certificate.
 6. Logs every outcome with the identity name as a structured field.
 
-The CA signer (`ssh.Signer`) is initialized once and passed to every handler. `ssh.Signer` wraps a Go `crypto.Signer` — the standard library's Ed25519 implementation is safe for concurrent use, so no mutex is required.
+The CA signer (`ssh.Signer`) is initialized once and passed to every handler. `ssh.Signer` wraps a Go `crypto.Signer` — the standard library's RSA, ECDSA and Ed25519 implementations are safe for concurrent use, so no mutex is required.
 
 **`config` subcommand** (`cmd/ziti-ssh-ca/config.go`):
 
@@ -86,7 +86,7 @@ Three subcommands share persistent flags (`--identity`, `--ca-service`, `--ziti-
 3. Marshal the resulting config to JSON and write it to `/etc/ziti-ssh-host/identity.json` (mode 0600, parent dir mode 0700).
 4. Call `intermediateCAPublicKey(cfg)` to extract the intermediate CA public key from the enrollment response (see below). No network call to `ssh-ca` is required.
 5. Call `host.WriteSSHConfig` to write `/etc/ssh/ziti_ca.pub` and `/etc/ssh/sshd_config.d/ziti-ssh.conf`.
-6. Call `host.ReloadSSHD` (`systemctl reload ssh`) to make sshd pick up the new config.
+6. Call `host.ReloadSSHD` to make sshd pick up the new config: validate with `sshd -t`, `systemctl reload ssh.service` if it is running (including when `ssh.socket` with `Accept=no` has started it, the Ubuntu 22.10+ default), and send SIGHUP to any leftover top-level sshd listeners (PPID 1) — skipped only for an `Accept=yes` socket, where every connection's sshd has PPID 1.
 
 **Intermediate CA extraction:**
 
@@ -110,10 +110,10 @@ After enrollment, `cfg.ID.CA` contains the PEM chain (root CA + intermediate CA)
    b. Call `zitiCtx.GetService(svcName)` and `zitiEdge.ParseServiceConfig` to load and parse the `ziti-ssh-host.v1` config into a `*host.PermissionsConfig` (nil if no config attached).
    c. Store the config in a `serviceState` (RWMutex-protected pointer) for atomic live reload.
 5. If `mode == "per-identity"`:
-   a. Create a single shared `host.UserManager` backed by `/var/lib/ziti-ssh-host/managed-users`.
-   b. Call `manager.CleanupOrphans()` to remove users left over from a previous crash.
+   a. Create a single shared `host.UserManager` backed by `/var/lib/ziti-ssh-host/managed-users` (active sessions) and `/var/lib/ziti-ssh-host/owned-users.json` (ownership registry).
+   b. Call `manager.CleanupOrphans()` to remove registered users left over from a previous crash.
    c. For each service, build a `host.ProxyHooks` struct that closes over that service's `serviceState`:
-      - `OnConnect`: calls `ca.DeriveUsername(identity)`, resolves `host.IdentityPermissions` from the service's `PermissionsConfig` (falling back to global env vars), then calls `manager.EnsureUser(username, perms)`.
+      - `OnConnect`: calls `ca.DeriveUsername(identity)`, resolves `host.IdentityPermissions` from the service's `PermissionsConfig` (falling back to global env vars), then calls `manager.EnsureUser(identity, username, perms)`.
       - `OnDisconnect`: calls `manager.ReleaseUser(username)`.
 6. For each service, launch `host.Proxy(listener, "127.0.0.1:22", hooks, &connWg)` in a goroutine. All services share one `connWg` for graceful drain.
 7. Subscribe to service-changed events via `zitiCtx.Events().AddServiceChangedListener`. When a changed event arrives for a bound service, reload its `ziti-ssh-host.v1` config and swap the `serviceState` pointer atomically.
@@ -134,10 +134,10 @@ The client binary. It provides five subcommands (and a root shorthand for `conne
 **`connect [user@]<target>`** (also the root default when a target argument is given):
 
 1. Resolve the SSH private key (auto-detect from `~/.ssh/` or use `--key`).
-2. Call `client.CertNeedsRefresh(certPath)` — if the cert is missing or will expire within 5 minutes, run the sign flow automatically before opening the session.
+2. Call `client.CertNeedsRefresh(certPath)` — if the cert is missing or less than 20% of its lifetime remains (between 30 s and 5 min — 1 minute for the default 5-minute certificate), run the sign flow automatically before opening the session.
 3. Call `client.NewCertSigner(privKeyPath)` to load the private key and, if a `<key>-cert.pub` file is present, wrap it in an `ssh.CertSigner`. If the key is passphrase-protected, fall back to the SSH agent (`SSH_AUTH_SOCK`).
 4. Authenticate to Ziti and dial the `ssh` service, specifying the target identity name as the terminator address via `ziti.DialOptions{Identity: terminatorAddr}`. If the target matches a known Ziti service name directly, it is dialled without a terminator.
-5. Call `client.RunSession(conn, username, host, signer, forwardAgent)` to run an interactive PTY session over the Ziti connection. Pass `forwardAgent=true` when `-A` is set to forward the local SSH agent.
+5. Build the host-key check (`client.NewHostKeyCallback(service, terminator)`, trust on first use) and call `client.RunSession(conn, username, host, signer, forwardAgent, hostKeyCallback)` to run an interactive PTY session over the Ziti connection. Pass `forwardAgent=true` when `-A` is set to forward the local SSH agent.
 
 **`sign`**: dials the `ssh-ca` Ziti service, sends the user's SSH public key, receives the signed certificate, writes it to `~/.ssh/<key>-cert.pub`, and displays certificate details via `ssh-keygen -L`.
 
@@ -164,7 +164,7 @@ The CA places the operator-configured `--principal` (default: `ziggy`) in `Valid
 The CA calls `ca.DeriveUsername(callerIdentity)` to produce a Linux-safe username and places it in `ValidPrincipals`. `ziti-ssh-host run` uses `host.UserManager` to create and destroy Linux accounts on demand.
 
 **`ca.DeriveUsername` rules:**
-1. Lowercase the entire identity name.
+1. Lowercase ASCII letters (`A`–`Z`); other characters are not case-folded, so non-ASCII lookalikes such as the Kelvin sign `K` never become ASCII letters.
 2. Replace any character outside `[a-z0-9_-]` with `_`.
 3. If the result starts with a digit, prefix it with `z`.
 4. Truncate to 32 characters.
@@ -189,26 +189,35 @@ type IdentityPermissions struct {
 
 Safe on a nil receiver — returns the global fallbacks when no config is attached.
 
-**`host.NewUserManager(stateFile string, cleanupOnDisconnect bool)`** returns a concurrent-safe reference counter. It no longer accepts a global `sudoersRule` — permissions are passed per-call instead, enabling each service to supply different values through the same shared manager.
+**`host.NewUserManager(stateFile string, cleanupOnDisconnect bool) (*UserManager, error)`** returns a concurrent-safe session counter and account manager. Account ownership is persisted in a `host.OwnerRegistry` at `owned-users.json` next to `stateFile`; the constructor fails (and `run` exits) if that file exists but cannot be parsed, so accounts are never managed without it.
 
-**`host.UserManager`** tracks how many sessions are open for each derived username:
+**`host.UserManager`** tracks how many sessions are open for each derived username and decides which accounts may be touched:
 
-- `EnsureUser(username string, perms IdentityPermissions) error` — increments the session count. If the count was 0: runs `useradd -m -s /bin/bash <username>` (exit code 9 treated as success); if `perms.Groups` is non-empty, runs `usermod -aG <groups> <username>` (failure is non-fatal, logged); if `perms.SudoersRule` is non-empty, writes and validates a sudoers file at `/etc/sudoers.d/<username>` via `visudo -c`. The username is appended to the state file.
-- `ReleaseUser(username string) error` — decrements the session count. If the count reaches 0 and `cleanupOnDisconnect` is true, calls `deleteUser(username)` and removes the username from the state file. If `cleanupOnDisconnect` is false, the account is kept but the sudoers file is still removed (group membership is implicitly removed when the account is eventually deleted).
-- `CleanupOrphans()` — reads the state file and calls `deleteUser` on each entry. Called once at startup before accepting connections.
+- `EnsureUser(zitiIdentity, username string, perms IdentityPermissions) error` — rejects reserved names, names starting with `-`, and names outside `[a-z0-9_-]` (`ValidateManagedUsername`). Under a per-user lock it then looks the account up with `getent passwd`:
+  - **absent** → `useradd -m -s /bin/bash -- <username>`, verify the assigned UID is ≥ `MinManagedUID` (1000), record `{identity, uid}` in the registry;
+  - **present** → proceed only if the registry records it for the same identity with the same UID and the UID is ≥ 1000; otherwise reject without touching it (pre-existing system or admin account, identity collision, or replaced account). `useradd` exit 9 (created concurrently by someone else) is a rejection, not success.
+
+  It then (`applyPermissions`) sets supplementary groups with `usermod -G <groups> -- <username>`, removes a legacy `/etc/sudoers.d/<username>` only if it holds the single line this tool used to write, and writes or removes `/etc/sudoers.d/ziti-ssh-host-<username>`. Any failure rejects the connection; a failed sudoers install first removes the existing file. The session is counted only after this succeeds.
+- `ReleaseUser(username string) error` — decrements the session count. At zero it re-checks the count after taking the per-user lock (a new session may have started), then acts only on a registered account whose UID still matches: removes the sudoers file, or — with `cleanupOnDisconnect` — deletes the account and its registry record.
+- `CleanupOrphans()` — reads the state file at startup. With cleanup enabled, deletes each listed account that is still registered with a matching UID; otherwise removes their leftover sudoers files. Unregistered accounts are skipped.
+
+**`ziti-ssh-host users list|claim`** read and extend the registry. `claim` is the migration path for accounts created before the registry existed; see [operations.md](docs/operations.md#managing-account-ownership).
 
 **Global fallback env vars** (per-identity mode only):
 
 - `ZITI_SUDOERS_RULE` — sudoers rule fragment applied to any identity not matched by a `ziti-ssh-host.v1` config entry.
 - `ZITI_SSH_GROUPS` — comma-separated Linux group names applied to any identity not matched by a config entry.
 - `ZITI_USER_CLEANUP` — set to `true` to delete Linux accounts after the last session closes (default: `false`).
+- `ZITI_TERMINATE_ON_DISCONNECT` — set to `true` to end a kept account's processes when its last session closes (default: `false`).
 
-**`host.deleteUser(username)`** — the internal cleanup sequence:
+**`host.deleteUser(username, uid)`** — the internal cleanup sequence, called only for registered accounts with a verified UID (it also refuses any UID below 1000):
 
-1. Remove `/etc/sudoers.d/<username>` if present.
-2. Run `loginctl terminate-user <username>` to drain the systemd user session (errors are logged but ignored — the session may already be gone).
-3. Poll with `pgrep -u <username>` until no processes remain or a 5-second timeout elapses.
-4. Run `userdel -r <username>` to remove the account and home directory.
+1. Remove `/etc/sudoers.d/ziti-ssh-host-<username>` if present.
+2. `terminateUserProcesses`: run `loginctl disable-linger -- <username>` and `loginctl terminate-user -- <username>` (errors logged but ignored — the session may already be gone), then poll with `pgrep -u <uid>` until no processes remain (5 s), then `pkill -TERM -u <uid>` (10 s), then `pkill -KILL -u <uid>` (5 s).
+3. `removeOwnedFiles`: delete entries owned by the UID in `/tmp`, `/var/tmp` and `/dev/shm` (files and symlinks themselves, then directories left empty; never following links, never removing other users' files), so they cannot pass to the next account given the same UID.
+4. Run `userdel -r -- <username>` to remove the account and home directory.
+
+With `ZITI_TERMINATE_ON_DISCONNECT=true` and cleanup off, `ReleaseUser` (and `CleanupOrphans` after a crash) calls `terminateUserProcesses` via `accountOps.TerminateProcesses` after dropping privileges, without deleting the account.
 
 **`host.ProxyHooks`** wires `UserManager` into the proxy loop:
 
@@ -221,7 +230,7 @@ type ProxyHooks struct {
 
 `proxyConn` extracts the caller's Ziti identity name via the `dialerNamer` interface (same pattern as `ziti-ssh-ca`), then calls `OnConnect` before proxying and `OnDisconnect` in a deferred call after the connection closes. If `OnConnect` returns an error, the connection is closed without proxying.
 
-In `per-identity` mode, the `OnConnect` closure for each service: (1) derives the Linux username with `ca.DeriveUsername`; (2) calls `serviceState.get()` to read the current `*PermissionsConfig` under a read lock; (3) calls `config.Resolve(identity, globalGroups, globalSudoersRule)` to obtain the `IdentityPermissions` for this connection; (4) calls `manager.EnsureUser(username, perms)`. The `serviceState` pointer may be swapped by the service-changed listener at any time; the read lock ensures a consistent view per connection.
+In `per-identity` mode, the `OnConnect` closure for each service: (1) derives the Linux username with `ca.DeriveUsername`; (2) calls `serviceState.get()` to read the current `*PermissionsConfig` under a read lock; (3) calls `config.Resolve(identity, globalGroups, globalSudoersRule)` to obtain the `IdentityPermissions` for this connection; (4) calls `manager.EnsureUser(identity, username, perms)`. The `serviceState` pointer may be swapped by the service-changed listener at any time; the read lock ensures a consistent view per connection.
 
 **Multi-service binding:** all services share one `UserManager`. If the same Ziti identity connects through two different services simultaneously, the Linux user is created once on the first connection (with that service's permissions) and the second connection reuses the existing account. This first-connection-wins behaviour is logged at info level.
 
@@ -246,8 +255,10 @@ Client                         ziti-ssh-ca
 - Non-empty line: treated as an SSH public key in authorized_keys format (`ssh-ed25519 AAAA...`).
 
 **Response encoding:** A single line in authorized_keys format, terminated by `\n`.
-- CA public key response: `ssh-ed25519 AAAA... <comment>\n`
+- CA public key response: `<key type> AAAA... <comment>\n` — the type of the controller's intermediate CA key, typically `ssh-rsa`
 - Signed certificate response: `ssh-ed25519-cert-v01@openssh.com AAAA...\n`
+- Refusal: `error: <reason>\n` (e.g. `error: rate limit exceeded`). Every request, including a CA public key request, counts against the caller's rate limit.
+- When `--max-connections` concurrent connections are already open, a new connection is closed without a response.
 
 Both are produced by `ssh.MarshalAuthorizedKey` from `golang.org/x/crypto/ssh`.
 
@@ -257,29 +268,58 @@ The connection is closed by the server after each response. There is no persiste
 
 ## 6. Ziti Identity Flow
 
-The Ziti network provides mutual TLS for all connections. Every Ziti identity has a certificate issued by the Ziti controller. When a client dials a service, the edge router verifies the client's certificate and forwards the verified identity name to the listener side.
+The Ziti network provides mutual TLS for all connections. Every Ziti identity has a certificate issued by the Ziti controller. When a client dials a service, the client's edge router (which authenticated the client) attaches the dialer's identity name to the connection it delivers to the hosting side.
+
+Two identity values arrive with every accepted connection, and only one is trustworthy:
+
+| Accessor | Wire header | Set by | Trusted |
+|---|---|---|---|
+| `GetDialerIdentityName()` | `DialerIdentityName` | The dialer's edge router, from its own record of the authenticated identity (OpenZiti **v2.0.0+**) | **Yes** |
+| `SourceIdentifier()` | `CallerId` | The dialing SDK; copied through the router unchanged | **No** — a modified client can send any value |
+
+```mermaid
+sequenceDiagram
+    participant C as Client (ziti-ssh)
+    participant R as Edge router (v2.0.0+)
+    participant S as ziti-ssh-ca / ziti-ssh-host
+    C->>R: Dial (CallerId = any value the client chooses)
+    Note over R: Resolves the authenticated identity ID<br/>in its router data model
+    R->>S: CallerId (passed through, untrusted)<br/>DialerIdentityName (router-set, trusted)
+    alt DialerIdentityName present
+        S->>S: Use it for principal, Key ID, rate limit, permissions
+        S-->>S: Warn if CallerId differs (possible spoofing attempt)
+    else DialerIdentityName absent
+        S--xC: Close connection (fail closed)
+    end
+```
 
 ### Extraction
 
-In `cmd/ziti-ssh-ca/main.go`, `callerIdentity` performs the extraction:
+In `cmd/ziti-ssh-ca/main.go`, `callerIdentity` performs the extraction (`host.callerName` in `host/host.go` is equivalent):
 
 ```go
 func callerIdentity(conn net.Conn) string {
-    if ec, ok := conn.(zitiEdge.Conn); ok {
-        return ec.GetDialerIdentityName()
-    }
-    // Fallback narrow interface for flexibility
     type dialerNamer interface {
         GetDialerIdentityName() string
     }
-    if dn, ok := conn.(dialerNamer); ok {
-        return dn.GetDialerIdentityName()
+    dn, ok := conn.(dialerNamer)
+    if !ok {
+        return ""
     }
-    return ""
+    name := dn.GetDialerIdentityName()
+    // SourceIdentifier() is compared only to log a mismatch warning.
+    ...
+    return name
 }
 ```
 
-`zitiEdge.Conn` is from `github.com/openziti/sdk-golang/ziti/edge`. The `edge.Listener.Accept()` returns values that implement this interface. If the assertion fails (e.g. in unit tests using a plain `net.Conn`), the function returns `""` and the connection is rejected.
+If the router did not supply a dialer identity — a router older than v2.0.0, or a router that could not resolve the dialing identity — the function returns `""`. `ziti-ssh-ca` then closes the connection, and `ziti-ssh-host` in `per-identity` mode closes it without creating a user or proxying to sshd. In both cases the log line is:
+
+```
+rejected connection: edge router did not supply a dialer identity (OpenZiti v2.0.0+ routers required)
+```
+
+A compile-time assertion in both `cmd/ziti-ssh-ca/main.go` and `cmd/ziti-ssh-host/main.go` ensures `edge.Conn` still provides `GetDialerIdentityName()` after SDK upgrades.
 
 ### Identity as SSH Certificate Key ID
 
@@ -298,6 +338,8 @@ On the host side, `ziti-ssh-host run` uses `BindUsingEdgeIdentity: true`. This c
 ---
 
 ## 7. Addressable Terminators for Host Routing
+
+> **Limitation:** a terminator name is an address chosen by the binding identity, not an authenticated identity. OpenZiti only prevents two *different* identities from holding the same name at the same time, and the dialer is not told which identity answered. An identity with Bind on the service can therefore answer for an offline host's name. Access control is per service; per-host services give a per-host guarantee. See [operations.md](docs/operations.md#host-identity-terminator-names).
 
 Each Ziti service that `ziti-ssh-host` binds has multiple terminators — one per enrolled host. Each `ziti-ssh-host run` instance adds a terminator with its identity name as the address using `BindUsingEdgeIdentity: true`:
 
@@ -319,6 +361,8 @@ db-primary binds to: ssh-ops + ssh-db
 ssh-ops: alice → [sudo, adm]    ← ops team reach db-primary with OS permissions
 ssh-db:  carol → [mysql]        ← DBA team reach db-primary with DB permissions
 ```
+
+The `sudo` grant on `ssh-ops` requires the host owner's opt-in for that service (`ZITI_ALLOW_GROUPS=ssh-ops:sudo`); the `ssh-db` config cannot grant it.
 
 This design means:
 - No SSH jump hosts or bastion servers.
@@ -353,7 +397,7 @@ The key written to `ziti_ca.pub` is the **controller's intermediate CA public ke
 - Which Ziti identity the user holds.
 - Whether the user's Ziti identity is still valid.
 
-Both of these are enforced by the Ziti network before the connection ever reaches `sshd`. The certificate TTL (default 8 hours, configurable via `--cert-ttl` / `ZITI_CERT_TTL` on `ziti-ssh-ca`) provides a backstop: a revoked or expired Ziti identity loses access once any outstanding certificate expires, without any changes on SSH hosts.
+Both of these are enforced by the Ziti network before the connection ever reaches `sshd`. The certificate TTL (default 5 minutes, configurable via `--cert-ttl` / `ZITI_CERT_TTL` on `ziti-ssh-ca`) provides a backstop: a revoked or expired Ziti identity loses access once any outstanding certificate expires, without any changes on SSH hosts.
 
 ---
 
@@ -369,15 +413,15 @@ Certificates are issued on demand and are ephemeral. There is no certificate sto
 | `Key` | Client's submitted public key | Wire protocol request |
 | `KeyId` | `ziti:<identity-name>` | Extracted from Ziti connection |
 | `ValidPrincipals` | `[]string{principal}` | shared mode: `--principal` flag (default: `ziggy`); per-identity mode: `ca.DeriveUsername(callerIdentity)` |
-| `ValidAfter` | `time.Now().Unix()` | Signing time |
+| `Serial` | random non-zero `uint64` | `crypto/rand`; logged by the CA (`issued SSH certificate … serial=N`) and by sshd on login (`serial N`) |
+| `ValidAfter` | `time.Now().Add(-ca.ClockSkewAllowance).Unix()` | Signing time − 60 s, so hosts whose clock is slightly behind the CA's accept new certificates |
 | `ValidBefore` | `time.Now().Add(ttl).Unix()` | Signing time + TTL (default 5m, configurable via `--cert-ttl` / `ZITI_CERT_TTL`) |
-| `Extensions["permit-pty"]` | `""` | Hardcoded |
-| `Extensions["permit-port-forwarding"]` | `""` | Hardcoded |
-| `Extensions["permit-agent-forwarding"]` | `""` | Hardcoded |
+| `Extensions` | `permit-pty`, `permit-port-forwarding` | `--cert-extensions` / `ZITI_CERT_EXTENSIONS` (`ca.ParseExtensions`); agent forwarding not granted by default |
+| `CriticalOptions["source-address"]` | `127.0.0.1/32,::1/128` | `--cert-source-address` / `ZITI_CERT_SOURCE_ADDRESS`; omitted when set to `none` |
 
 ### TTL and Revocation
 
-The TTL defaults to 8 hours and is configurable via `--cert-ttl` (flag) or `ZITI_CERT_TTL` (environment variable) on `ziti-ssh-ca`. Any positive `time.Duration` string is accepted (e.g. `4h`, `12h`, `24h`). There is no revocation mechanism. Access control is handled upstream:
+The TTL defaults to 5 minutes and is configurable via `--cert-ttl` (flag) or `ZITI_CERT_TTL` (environment variable) on `ziti-ssh-ca`. Any positive `time.Duration` string is accepted (e.g. `4h`, `12h`, `24h`). There is no revocation mechanism (no KRL); with a 5-minute default TTL this is accepted. Access control is handled upstream:
 
 - **While TTL is active:** A user whose Ziti identity is revoked at the controller can no longer dial the `ssh` service — they cannot open new SSH sessions. Any existing SSH session (TCP connection already established) continues until it closes naturally.
 - **After TTL expires:** The certificate is no longer accepted by `sshd`. The user must obtain a new certificate, which requires a live Ziti identity.
@@ -391,22 +435,23 @@ For most operational scenarios this is sufficient. If immediate hard revocation 
 cert := &ssh.Certificate{
     CertType:        ssh.UserCert,
     Key:             pubKey,
+    Serial:          serial, // random, non-zero
     KeyId:           "ziti:" + identity,
     ValidPrincipals: []string{principal},
-    ValidAfter:      uint64(now.Unix()),
+    ValidAfter:      uint64(now.Add(-ca.ClockSkewAllowance).Unix()), // 60 s backdate
     ValidBefore:     uint64(now.Add(ttl).Unix()),
     Permissions: ssh.Permissions{
-        Extensions: map[string]string{
-            "permit-pty":              "",
-            "permit-port-forwarding":  "",
-            "permit-agent-forwarding": "",
-        },
+        // From --cert-extensions; default "permit-pty,permit-port-forwarding".
+        Extensions: map[string]string{"permit-pty": "", "permit-port-forwarding": ""},
     },
+}
+if sourceAddress != "" { // --cert-source-address, default "127.0.0.1/32,::1/128"
+    cert.Permissions.CriticalOptions = map[string]string{"source-address": sourceAddress}
 }
 cert.SignCert(rand.Reader, signer)
 ```
 
-`ssh.Certificate.SignCert` serializes the certificate in OpenSSH wire format, signs the serialized bytes with the CA key using Ed25519, and attaches the signature. The result is marshaled to authorized_keys format by `ssh.MarshalAuthorizedKey`.
+`ssh.Certificate.SignCert` serializes the certificate in OpenSSH wire format, signs the serialized bytes with the CA key (with an RSA CA key the signature algorithm is `rsa-sha2-256`, as `ssh-keygen -L` reports for issued certificates — accepted by OpenSSH's default `CASignatureAlgorithms`), and attaches the signature. The result is marshaled to authorized_keys format by `ssh.MarshalAuthorizedKey`.
 
 ---
 
@@ -519,6 +564,8 @@ conn, err := zitiCtx.Dial(caService)
 import zitiEdge "github.com/openziti/sdk-golang/ziti/edge"
 
 if ec, ok := conn.(zitiEdge.Conn); ok {
+    // Router-verified (OpenZiti v2.0.0+). Never use ec.SourceIdentifier()
+    // for authorization: it is client-supplied.
     identityName := ec.GetDialerIdentityName()
 }
 ```
@@ -610,12 +657,20 @@ This is possible because `ziti-ssh-ca` runs on the same host as the Ziti control
 
 **CA private key exposure:** The CA private key is loaded once at startup and held in memory as an `ssh.Signer`. It is never written to a log or returned over the wire. The key file must be owned by the service user with mode 0600.
 
-**Identity validation:** `callerIdentity` returns `""` for any connection where the Ziti identity cannot be asserted. `handleConn` rejects such connections immediately before reading any data from them.
+**Identity validation:** `callerIdentity` trusts only the router-set `DialerIdentityName` header (`GetDialerIdentityName()`), never the client-set `CallerId` header (`SourceIdentifier()`). It returns `""` when the router supplied no dialer identity, and `handleConn` rejects such connections before reading any data from them. `ziti-ssh-host` applies the same rule in `per-identity` mode. This requires every edge router to run OpenZiti v2.0.0 or later.
 
-**Principal derivation:** In `shared` mode, `ValidPrincipals` is set from the operator-configured `--principal` flag — a client cannot influence which Linux user they get. In `per-identity` mode, the principal is derived deterministically from the Ziti-verified identity name via `ca.DeriveUsername`. The identity name is attested by the Ziti network's mutual TLS and cannot be spoofed by the client. The derivation function (lowercase, replace non-`[a-z0-9_-]` with `_`, prefix `z` if digit-leading, truncate to 32) is purely defensive — it sanitizes the identity name for use as a POSIX username and is not a security boundary.
+**Principal derivation:** In `shared` mode, `ValidPrincipals` is set from the operator-configured `--principal` flag — a client cannot influence which Linux user they get. In `per-identity` mode, the principal is derived deterministically from the router-verified identity name via `ca.DeriveUsername`. The name comes from the dialer's edge router, which authenticated the client over mTLS, so the client cannot substitute another name. The derivation function (lowercase, replace non-`[a-z0-9_-]` with `_`, prefix `z` if digit-leading, truncate to 32) is purely defensive — it sanitizes the identity name for use as a POSIX username and is not a security boundary. Because it is lossy (`Alice` and `alice`, or `a.b` and `a_b`, derive the same name), `ziti-ssh-host` binds each account to the first identity that created it in its ownership registry and rejects any other identity deriving the same username. `ziti-ssh-ca` refuses to sign a per-identity certificate whose derived principal is a reserved account name (`ca.IsReservedUsername`: `root`, system accounts, `ubuntu`, `admin`, …) or starts with `-`; the host uses the same list.
+
+**Certificate-only login for managed accounts:** the sshd drop-in written by `ziti-ssh-host` adds `Match Group ziti-ssh-managed` with `AuthorizedKeysFile none` and `AuthorizedKeysCommand none`. Per-identity accounts are always in that group, and administrators add the shared account in shared mode. A key a user adds to their own `authorized_keys` therefore cannot outlive their certificate or the revocation of their identity. Other accounts (administrators, cloud default users) are unaffected.
+
+**Certificates are bound to the Ziti path:** every certificate carries the `source-address` critical option (default `127.0.0.1/32,::1/128`). Each host's sshd only ever receives legitimate logins from that host's own `ziti-ssh-host` proxy over loopback, so the same certificate works on every host the caller's Ziti policies allow, while sshd rejects it on any connection that reaches port 22 directly (a security group, LAN or VPN path that bypasses Ziti). A local user on the SSH host itself who also holds the private key can still use it via loopback until it expires.
 
 **Ziti as the authorization boundary:** Any identity that can dial `ssh-ca` receives a certificate. Any identity that can dial `ssh` with a given terminator address reaches that host. Access control is managed entirely in Ziti service policies (dial policies, service policies). This is intentional — the CA is a dumb signing service; the access control lives in Ziti.
 
 **No credentials on hosts:** The only file written to each SSH host is the CA public key (`/etc/ssh/ziti_ca.pub`). This is not a credential. An attacker who reads it gains nothing — it is the CA's public key and is not secret.
 
-**Per-identity permissions trust boundary:** The `ziti-ssh-host.v1` config is fetched from the Ziti controller over the same mTLS-authenticated data plane channel used for service subscription. The hosting identity must have a config policy granting it access to the `ziti-ssh-host.v1` config type — config data is not delivered to arbitrary identities. Permission entries are keyed by exact Ziti identity name; the identity name is attested by Ziti's mTLS and cannot be spoofed by the connecting client. Linux groups referenced in a config entry must already exist on the host — `ziti-ssh-host` does not create groups. A missing group causes `usermod` to fail for that group; the failure is non-fatal (logged, session continues) so a misconfigured group name silently reduces the permissions applied rather than blocking access. Operators should use `ziti-ssh-host inspect` to verify the effective permissions before and after config changes.
+**Account ownership boundary (per-identity mode):** `ziti-ssh-host` runs as root and creates, modifies, and deletes Linux accounts, so it must never act on an account it does not own. It manages an account only if it is recorded in `/var/lib/ziti-ssh-host/owned-users.json` for the connecting identity with the account's current UID, and the UID is at least 1000. Accounts that already exist but are not registered — `root`, the distribution's default user, administrator accounts — are refused before any `usermod`, sudoers write, process signal, or `userdel`. A short list of reserved names is refused even if absent. Sudoers files are written under a `ziti-ssh-host-` prefix so they cannot overwrite administrator files in `/etc/sudoers.d`. Accounts created by earlier releases are adopted only through an explicit `ziti-ssh-host users claim`.
+
+**Host grant policy:** a `ziti-ssh-host.v1` config is written by whoever can edit configs on the controller, so `ziti-ssh-host` does not apply it unconditionally. Per service, the host owner opts in to `sudoers_rule` (`ZITI_ALLOW_SUDOERS`) and to privileged groups (`ZITI_ALLOW_GROUPS`; `root`, `sudo`, `admin`, `wheel`, `docker`, `lxd`, `disk`, `shadow`, `libvirt` are refused otherwise), optionally restricting all grantable groups (`ZITI_RESTRICT_GROUPS`). Entries exceeding the policy reject the connection. Controller config access alone therefore cannot grant root on a host; it takes the host owner's opt-in for that service as well. The host's own env fallbacks are outside the policy.
+
+**Per-identity permissions trust boundary:** The `ziti-ssh-host.v1` config is fetched from the Ziti controller over the same mTLS-authenticated data plane channel used for service subscription. The hosting identity must have a config policy granting it access to the `ziti-ssh-host.v1` config type — config data is not delivered to arbitrary identities. Permission entries are keyed by Ziti identity name; the name used for lookup is the router-verified dialer identity (see [§6](#6-ziti-identity-flow)), so the connecting client cannot substitute another identity's entry. Linux groups referenced in a config entry must already exist on the host — `ziti-ssh-host` does not create groups. A missing group makes `usermod -G` fail, and the connection is then rejected (fail closed) rather than proceeding with the account's previous groups — a misconfigured entry blocks that identity until the config is fixed. The same applies to sudoers write or removal failures. Operators should use `ziti-ssh-host inspect` to verify the effective permissions before and after config changes.

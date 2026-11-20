@@ -14,6 +14,7 @@
 # Environment variables (injected by ziti-test-suite):
 #   ZITI_CTRL_URL       — controller management API URL (https://host:port)
 #   ZITI_ADMIN_PASSWORD — controller admin password
+#   ZSSH_MODE           — optional suite var: shared (default) or per-identity
 #
 # Exit codes: 0 on success; non-zero on any failure (set -euo pipefail).
 
@@ -137,7 +138,7 @@ sudo tee /etc/ziti-ssh-ca/env > /dev/null <<ENVEOF
 ZITI_IDENTITY=/etc/ziti-ssh-ca/identity.json
 ZITI_CA_KEY=${CA_KEY}
 ZITI_CA_SERVICE=ssh-ca
-ZITI_SSH_MODE=shared
+ZITI_SSH_MODE=${ZSSH_MODE:-shared}
 ZITI_SSH_PRINCIPAL=ziggy
 ENVEOF
 sudo chown ziti-controller: /etc/ziti-ssh-ca/env
@@ -157,7 +158,7 @@ Wants=network-online.target
 Type=notify
 User=ziti-controller
 EnvironmentFile=/etc/ziti-ssh-ca/env
-ExecStart=/usr/local/bin/ziti-ssh-ca
+ExecStart=/usr/bin/ziti-ssh-ca
 Restart=on-failure
 RestartSec=5
 
@@ -166,6 +167,15 @@ WantedBy=multi-user.target
 UNITEOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now ziti-ssh-ca
 
-log "install-ca.sh complete — ziti-ssh-ca is running on ctrl-0"
+# The ssh-ca Ziti service is created by the suite's network resources, which
+# are applied only after all edge routers are online — i.e. after this script
+# runs. Until then ziti-ssh-ca exits ("service 'ssh-ca' not found") and
+# systemd restarts it (Restart=on-failure, RestartSec=5), so a failed first
+# start here is expected and not fatal.
+if sudo systemctl enable --now ziti-ssh-ca; then
+    log "install-ca.sh complete — ziti-ssh-ca is running on ctrl-0"
+else
+    log "install-ca.sh complete — ziti-ssh-ca enabled on ctrl-0 but not yet running;" \
+        "systemd will restart it until the ssh-ca service exists"
+fi

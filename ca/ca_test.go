@@ -17,8 +17,11 @@
 package ca_test
 
 import (
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"strings"
 	"testing"
 	"time"
@@ -67,7 +70,7 @@ func TestSignCert(t *testing.T) {
 	const ttl = 5 * time.Minute
 
 	before := time.Now()
-	certBytes, err := ca.SignCert(caSigner, clientPub, identity, principal, ttl)
+	certBytes, err := ca.SignCert(caSigner, clientPub, identity, principal, ttl, ca.DefaultSourceAddress, mustExtensions(t, ca.DefaultExtensions))
 	after := time.Now()
 
 	if err != nil {
@@ -100,6 +103,16 @@ func TestSignCert(t *testing.T) {
 		}
 	})
 
+	t.Run("SourceAddress", func(t *testing.T) {
+		got := cert.CriticalOptions["source-address"]
+		if got != ca.DefaultSourceAddress {
+			t.Errorf("source-address = %q, want %q", got, ca.DefaultSourceAddress)
+		}
+		if len(cert.CriticalOptions) != 1 {
+			t.Errorf("CriticalOptions = %v, want only source-address", cert.CriticalOptions)
+		}
+	})
+
 	t.Run("Principals", func(t *testing.T) {
 		if len(cert.ValidPrincipals) != 1 {
 			t.Fatalf("len(ValidPrincipals) = %d, want 1", len(cert.ValidPrincipals))
@@ -113,13 +126,13 @@ func TestSignCert(t *testing.T) {
 		validAfter := time.Unix(int64(cert.ValidAfter), 0)
 		validBefore := time.Unix(int64(cert.ValidBefore), 0)
 
-		// ValidAfter must be at or after our before-timestamp (with 1s slack for clock granularity).
-		if validAfter.Before(before.Add(-time.Second)) {
-			t.Errorf("ValidAfter %v is before test start %v", validAfter, before)
+		// ValidAfter is backdated by ClockSkewAllowance (1s slack for
+		// clock granularity) so hosts slightly behind the CA accept it.
+		if validAfter.Before(before.Add(-ca.ClockSkewAllowance - time.Second)) {
+			t.Errorf("ValidAfter %v is more than %v before test start %v", validAfter, ca.ClockSkewAllowance, before)
 		}
-		// ValidAfter must not be in the future relative to after.
-		if validAfter.After(after.Add(time.Second)) {
-			t.Errorf("ValidAfter %v is after test end %v", validAfter, after)
+		if validAfter.After(after.Add(-ca.ClockSkewAllowance + time.Second)) {
+			t.Errorf("ValidAfter %v is not backdated by %v (test end %v)", validAfter, ca.ClockSkewAllowance, after)
 		}
 
 		// ValidBefore must be approximately now+5m (within 5 seconds).
@@ -131,15 +144,17 @@ func TestSignCert(t *testing.T) {
 	})
 
 	t.Run("Extensions", func(t *testing.T) {
-		required := []string{
-			"permit-pty",
-			"permit-port-forwarding",
-			"permit-agent-forwarding",
-		}
-		for _, ext := range required {
+		// Default: terminals and port forwarding, but no agent forwarding.
+		for _, ext := range []string{"permit-pty", "permit-port-forwarding"} {
 			if _, ok := cert.Extensions[ext]; !ok {
 				t.Errorf("missing extension %q", ext)
 			}
+		}
+		if _, ok := cert.Extensions["permit-agent-forwarding"]; ok {
+			t.Error("agent forwarding granted by default")
+		}
+		if len(cert.Extensions) != 2 {
+			t.Errorf("unexpected extensions: %v", cert.Extensions)
 		}
 	})
 }
@@ -148,7 +163,7 @@ func TestSignCert_EmptyIdentityRejected(t *testing.T) {
 	caSigner, _ := generateTestCA(t)
 	clientPub := generateTestClientKey(t)
 
-	_, err := ca.SignCert(caSigner, clientPub, "", "ziggy", 8*time.Hour)
+	_, err := ca.SignCert(caSigner, clientPub, "", "ziggy", 8*time.Hour, "", nil)
 	if err == nil {
 		t.Fatal("expected error for empty identity, got nil")
 	}
@@ -158,7 +173,7 @@ func TestSignCert_EmptyPrincipalRejected(t *testing.T) {
 	caSigner, _ := generateTestCA(t)
 	clientPub := generateTestClientKey(t)
 
-	_, err := ca.SignCert(caSigner, clientPub, "alice", "", 8*time.Hour)
+	_, err := ca.SignCert(caSigner, clientPub, "alice", "", 8*time.Hour, "", nil)
 	if err == nil {
 		t.Fatal("expected error for empty principal, got nil")
 	}
@@ -275,5 +290,160 @@ func TestPublicKeyBytes(t *testing.T) {
 	// authorized_keys lines begin with the key type.
 	if !strings.HasPrefix(string(b), "ssh-ed25519 ") {
 		t.Errorf("PublicKeyBytes = %q, want prefix %q", string(b), "ssh-ed25519 ")
+	}
+}
+
+func TestValidatePerIdentityPrincipal(t *testing.T) {
+	for _, p := range []string{"", "root", "-ou0", "ubuntu", "admin", "sshd", "ziti"} {
+		if err := ca.ValidatePerIdentityPrincipal(p); err == nil {
+			t.Errorf("ValidatePerIdentityPrincipal(%q) = nil, want error", p)
+		}
+	}
+	for _, p := range []string{"alice", "dba-alice", "z123bot"} {
+		if err := ca.ValidatePerIdentityPrincipal(p); err != nil {
+			t.Errorf("ValidatePerIdentityPrincipal(%q) = %v, want nil", p, err)
+		}
+	}
+}
+
+func TestSignCert_NoSourceAddress(t *testing.T) {
+	caSigner, _ := generateTestCA(t)
+	certBytes, err := ca.SignCert(caSigner, generateTestClientKey(t), "alice", "ziggy", 5*time.Minute, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, _, _, _, err := ssh.ParseAuthorizedKey(certBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts := pub.(*ssh.Certificate).CriticalOptions; len(opts) != 0 {
+		t.Errorf("CriticalOptions = %v, want none", opts)
+	}
+}
+
+func TestParseSourceAddress(t *testing.T) {
+	valid := map[string]string{
+		ca.DefaultSourceAddress:   "127.0.0.1/32,::1/128",
+		"127.0.0.1":               "127.0.0.1/32",
+		" 10.0.0.0/8 , ::1 ":      "10.0.0.0/8,::1/128",
+		"192.168.1.0/24,fd00::/8": "192.168.1.0/24,fd00::/8",
+		"none":                    "",
+		"NONE":                    "",
+	}
+	for in, want := range valid {
+		got, err := ca.ParseSourceAddress(in)
+		if err != nil || got != want {
+			t.Errorf("ParseSourceAddress(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"", "localhost", "127.0.0.1/33", "10.0.0.5/24", "127.0.0.1,,::1", "1.2.3"} {
+		if got, err := ca.ParseSourceAddress(in); err == nil {
+			t.Errorf("ParseSourceAddress(%q) = %q, want error", in, got)
+		}
+	}
+}
+
+func TestValidateClientKey(t *testing.T) {
+	caSigner, caPub := generateTestCA(t)
+	sshPub := func(k interface{}) ssh.PublicKey {
+		p, err := ssh.NewPublicKey(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	edPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	ec, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	rsa3072, _ := rsa.GenerateKey(rand.Reader, 3072)
+	rsa2048, _ := rsa.GenerateKey(rand.Reader, 2048)
+
+	for name, k := range map[string]ssh.PublicKey{
+		"ed25519":  sshPub(edPub),
+		"ecdsa":    sshPub(&ec.PublicKey),
+		"rsa-3072": sshPub(&rsa3072.PublicKey),
+	} {
+		if err := ca.ValidateClientKey(k, caPub); err != nil {
+			t.Errorf("%s rejected: %v", name, err)
+		}
+	}
+
+	cert := &ssh.Certificate{Key: sshPub(edPub), CertType: ssh.UserCert, ValidPrincipals: []string{"ziggy"}, ValidBefore: ssh.CertTimeInfinity}
+	if err := cert.SignCert(rand.Reader, caSigner); err != nil {
+		t.Fatal(err)
+	}
+	for name, k := range map[string]ssh.PublicKey{
+		"rsa-2048":     sshPub(&rsa2048.PublicKey),
+		"certificate":  cert,
+		"CA's own key": caPub,
+	} {
+		if err := ca.ValidateClientKey(k, caPub); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}
+
+func mustExtensions(t *testing.T, v string) []string {
+	t.Helper()
+	e, err := ca.ParseExtensions(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+func TestParseExtensions(t *testing.T) {
+	if got := mustExtensions(t, " permit-pty , permit-agent-forwarding,permit-pty"); strings.Join(got, ",") != "permit-pty,permit-agent-forwarding" {
+		t.Errorf("got %v", got)
+	}
+	if got := mustExtensions(t, "none"); len(got) != 0 {
+		t.Errorf("none: got %v", got)
+	}
+	for _, bad := range []string{"", "permit-everything", "permit-pty,,permit-user-rc"} {
+		if _, err := ca.ParseExtensions(bad); err == nil {
+			t.Errorf("ParseExtensions(%q) accepted", bad)
+		}
+	}
+}
+
+func TestDeriveUsername_NoNonASCIICaseFolding(t *testing.T) {
+	// Lookalike identity names must not derive the same username as the
+	// ASCII name they imitate.
+	cases := map[string]string{
+		"admİn":   "adm_n",   // LATIN CAPITAL LETTER I WITH DOT ABOVE
+		"Karen":   "_aren",   // KELVIN SIGN
+		"ALICE":        "alice",   // ASCII still folded
+		"Ünïcode-User": "_n_code-user",
+	}
+	for in, want := range cases {
+		if got := ca.DeriveUsername(in); got != want {
+			t.Errorf("DeriveUsername(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSignCert_RandomSerial(t *testing.T) {
+	_, caPriv, _ := ed25519.GenerateKey(rand.Reader)
+	signer, err := ssh.NewSignerFromKey(caPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub, _ := ssh.NewPublicKey(userPub)
+	seen := map[uint64]bool{}
+	for i := 0; i < 20; i++ {
+		b, err := ca.SignCert(signer, pub, "alice", "ziggy", 5*time.Minute, ca.DefaultSourceAddress, []string{"permit-pty"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		pk, _, _, _, err := ssh.ParseAuthorizedKey(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := pk.(*ssh.Certificate).Serial
+		if s == 0 || seen[s] {
+			t.Fatalf("serial %d is zero or repeated", s)
+		}
+		seen[s] = true
 	}
 }

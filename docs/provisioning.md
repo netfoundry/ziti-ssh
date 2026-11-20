@@ -33,6 +33,8 @@ In simple deployments a single `ssh` service is sufficient. Fleets using per-ide
 
 ## Provisioning the Ziti network
 
+**Version requirement:** the controller and every edge router that clients connect through must run **OpenZiti v2.0.0 or later**. `ziti-ssh-ca` and `ziti-ssh-host` (in `per-identity` mode) identify callers only by the dialer identity that the edge router attaches to each connection, a header that v2.0.0+ routers provide. Connections arriving through older routers are rejected. See [Caller identity verification](operations.md#caller-identity-verification).
+
 The commands in this section assume `ziti edge login` has already been run against your controller. All commands use the `ziti` CLI.
 
 ### 1. Create the two services
@@ -62,7 +64,8 @@ ziti edge create service-policy dial-ssh-ca Dial \
   --service-roles "@ssh-ca" \
   --identity-roles "#ssh-clients"
 
-# hosts bind ssh (one terminator per host, addressed by identity name)
+# hosts bind ssh (one terminator per host, addressed by identity name;
+# grant Bind only to host identities — see the Access scope note below)
 ziti edge create service-policy bind-ssh Bind \
   --service-roles "@ssh" \
   --identity-roles "#ssh-hosts"
@@ -121,6 +124,8 @@ Copy the JWT to the user's machine. Enrollment is covered in [Setting up a clien
 
 The identity name chosen for each host (`web-server-prod` above) is the address users pass to `ziti-ssh` — choose it carefully, as it is also the terminator address on the `ssh` service.
 
+> **Access scope:** Dial on the `ssh` service reaches every host bound to it, and the terminator name is an address, not a verified identity — any identity with Bind on `ssh` can answer for a host name that is not currently in use. Grant Bind only to host identities. For hosts that need per-host access control or a strong host identity, give each its own service with a Bind policy naming only that host. See [Host identity (terminator names)](operations.md#host-identity-terminator-names).
+
 ---
 
 ## Setting up `ziti-ssh-ca`
@@ -139,7 +144,20 @@ Or install from a locally built package:
 dpkg -i ziti-ssh-ca_<version>-1_<arch>.deb
 ```
 
-The postinstall script creates `/etc/ziti-ssh-ca/env` (mode 0640) with all variables commented out, and runs `systemctl daemon-reload`.
+The postinstall script creates `/etc/ziti-ssh-ca/env` (mode 0640) with all variables commented out, sets the service user (below), and runs `systemctl daemon-reload`.
+
+**Service user.** `ziti-ssh-ca` must run as the same OS user as the Ziti controller, because it reads the controller's intermediate CA key (mode 0600, owned by that user). That user varies: the `openziti-controller` package (v2.0+) runs the controller as `ziti-controller`; other deployments use e.g. `ziti`. The postinstall script detects it — from `User=` in `ziti-controller.service`, otherwise from the owner of a running `ziti controller run` process — and writes `/etc/systemd/system/ziti-ssh-ca.service.d/10-controller-user.conf` with that `User=`/`Group=`, and makes that user the owner of `/etc/ziti-ssh-ca` (mode 0750) so the service can save controller URL updates to its identity file. An existing administrator override that sets `User=` is never changed, and the managed drop-in is left alone once edited by hand (delete its first line to take ownership).
+
+If no controller is detected (for example the package is installed before the controller), the unit keeps its default `User=ziti` and the postinstall prints instructions. Check and fix with:
+
+```sh
+systemctl show -p User,Group ziti-ssh-ca          # what the CA will run as
+systemctl show -p User ziti-controller            # what the controller runs as
+sudo systemctl edit ziti-ssh-ca                   # [Service] User=<user> Group=<group>
+sudo chown <user>:<group> /etc/ziti-ssh-ca /etc/ziti-ssh-ca/identity.json
+```
+
+Re-running the package's postinstall (reinstalling the package) after the controller is installed also performs the detection.
 
 ### 2. Locate the Ziti controller intermediate CA private key
 
@@ -153,7 +171,7 @@ Root CA (offline)
 
 `ziti-ssh-ca` uses the **controller's intermediate CA private key** — the key that signs Ziti identity certificates. Do not use the root CA key; the root CA private key is kept offline and never used at runtime.
 
-In production, `ziti-ssh-ca` runs on the same machine as the Ziti controller, as the same OS user (typically `ziti`). This gives it direct filesystem access to the controller's PKI without any credential distribution.
+In production, `ziti-ssh-ca` runs on the same machine as the Ziti controller, as the same OS user (`ziti-controller` with the `openziti-controller` v2 package; `ziti` in some other deployments — see **Service user** above). This gives it direct filesystem access to the controller's PKI without any credential distribution.
 
 The intermediate CA private key is typically found at a path like:
 
@@ -251,13 +269,15 @@ Repeat these steps on every machine you want to make reachable over Ziti.
 
 > **Skip this step if using `per-identity` mode.** In `per-identity` mode, `ziti-ssh-host` creates and removes Linux accounts automatically on each connection. No manual account setup is needed.
 
-In `shared` mode, all SSH sessions authenticate as a single Linux user. Create it if it does not already exist:
+In `shared` mode, all SSH sessions authenticate as a single Linux user. Create it if it does not already exist, and add it to the `ziti-ssh-managed` group so it can only log in with a CA certificate (a key someone adds to its authorized_keys would otherwise keep working after their certificate expires or their identity is revoked):
 
 ```sh
-useradd --create-home --shell /bin/bash ziggy
+groupadd -f --system ziti-ssh-managed       # also created by the ziti-ssh-host package
+useradd --create-home --shell /bin/bash -G ziti-ssh-managed ziggy
+# existing account: usermod -aG ziti-ssh-managed ziggy
 ```
 
-Use any existing account — just set `--principal` on the CA to match.
+Use any existing account — just set `--principal` on the CA to match, and add it to `ziti-ssh-managed`. `ziti-ssh-host run` logs a warning at startup in shared mode if no account is in the group.
 
 ### 2. Install the package
 
@@ -311,6 +331,9 @@ ZITI_SSH_MODE=shared
 # ZITI_SSH_GROUPS=adm,systemd-journal   # per-identity mode only; global fallback groups
 # ZITI_SUDOERS_RULE=ALL=(ALL) NOPASSWD:ALL   # per-identity mode only; global fallback sudoers
 # ZITI_USER_CLEANUP=true                      # per-identity mode only; set to true to delete accounts on disconnect
+# ZITI_TERMINATE_ON_DISCONNECT=true           # per-identity mode only; end a kept account's processes on disconnect
+# ZITI_ALLOW_SUDOERS=ssh-ops                  # per-identity mode only; services whose config may set sudoers_rule
+# ZITI_ALLOW_GROUPS=ssh-ops:sudo              # per-identity mode only; privileged groups a service's config may grant
 ```
 
 `ZITI_SSH_MODE` must match the value set on `ziti-ssh-ca`. See [Modes](operations.md#modes) for a full explanation.
@@ -373,8 +396,8 @@ Register the `ziti-ssh-host.v1` config type in the Ziti controller. This step is
 ```sh
 ziti-ssh-ca config apply \
   --controller ctrl.example.com \
-  --username admin \
-  --password <password>
+  --username admin
+# prompts for the password; for scripts use --password-file <file> or ZITI_CTRL_PASSWORD
 ```
 
 This creates the config type if it does not exist, or updates it to the current schema if it does. To preview the schema that will be registered without connecting to the controller:
@@ -383,7 +406,9 @@ This creates the config type if it does not exist, or updates it to the current 
 ziti-ssh-ca config print
 ```
 
-> **TLS note:** If your controller uses a self-signed certificate, add `--insecure` to skip verification, or `--controller-ca /path/to/ca.pem` to trust a specific CA. All flags can also be set via environment variables (`ZITI_CTRL_ADDRESS`, `ZITI_CTRL_USERNAME`, `ZITI_CTRL_PASSWORD`, `ZITI_CTRL_INSECURE`, `ZITI_CTRL_CA`) — useful for scripted provisioning.
+> **Controller TLS trust:** like `ziti edge login`, the first connection to a controller whose certificate the system does not trust downloads the controller's own CA bundle (`/.well-known/est/cacerts`), checks that the controller's certificate is issued by it, prints each CA's subject and SHA-256 fingerprint, and asks `Trust this controller certificate authority? [y/N]` (`--yes` accepts without asking — for scripts). The bundle is saved under `$XDG_CONFIG_HOME/ziti-ssh/controllers/` and used from then on. If the controller later presents a different CA, the command refuses with a warning and only replaces the saved bundle after interactive confirmation — `--yes` never does. Alternatively pass `--controller-ca /path/to/ca.pem`. `--insecure` (no verification; sends the admin password to whoever answers) remains as a last resort and prints a warning.
+>
+> **Password:** prompted for (hidden) when run in a terminal; otherwise use `--password-file <file>` (`-` = stdin) / `ZITI_CTRL_PASSWORD_FILE`, or `ZITI_CTRL_PASSWORD`. `--password` still works but warns, because it is visible in the process list and shell history. Other settings have environment variables too (`ZITI_CTRL_ADDRESS`, `ZITI_CTRL_USERNAME`, `ZITI_CTRL_CA`, `ZITI_CTRL_INSECURE`).
 
 ### 2. Create a config for a service
 
@@ -418,12 +443,14 @@ The `ziti-ssh-host` identity must have access to the `ziti-ssh-host.v1` config t
 
 ### 4. Update a config
 
-Edit the config object in the controller to add, change, or remove identity entries. Changes propagate to all running `ziti-ssh-host` instances bound to that service within seconds — no restart required.
+Edit the config object in the controller to add, change, or remove identity entries. Changes reach all running `ziti-ssh-host` instances bound to that service within their service refresh interval — 30 seconds by default, `ZITI_SERVICE_REFRESH` — with no restart required.
 
 ```sh
 ziti edge update config ssh-permissions \
   '{"permissions":{"*":{"groups":["developers"]},"ops-*":{"groups":["developers","docker"]},"ops-alice":{"groups":["sudo","developers"]},"ops-automation":{"sudoers_rule":"ALL=(ALL) NOPASSWD: ALL"}}}'
 ```
+
+> **Host opt-in required:** the `docker` group and `sudoers_rule` entries in this example are only applied on hosts that allow them for this service — e.g. `ZITI_ALLOW_SUDOERS=ssh` and `ZITI_ALLOW_GROUPS=ssh:docker` in `/etc/ziti-ssh-host/env`. Otherwise those identities are refused. See [Host grant policy](operations.md#host-grant-policy).
 
 Run `ziti-ssh-host inspect --service ssh` on the host to confirm what the running daemon sees after the update. See [Inspecting per-identity permissions](operations.md#inspecting-per-identity-permissions) in the operations guide for details.
 
@@ -484,3 +511,18 @@ go build -o /usr/local/bin/ziti-scp  ./cmd/ziti-scp
 ```
 
 </details>
+
+---
+
+## Uninstalling
+
+Packages install binaries to `/usr/bin` (earlier releases used `/usr/local/bin`; upgrading moves them automatically).
+
+| Action | `ziti-ssh-host` | `ziti-ssh-ca` | `ziti-ssh`, `ziti-scp` |
+|---|---|---|---|
+| `apt remove` / `rpm -e` | Service stopped and disabled. Configuration, identity, sshd trust and Linux accounts are kept. | Service stopped and disabled. Configuration and identity are kept. | Binary removed. |
+| `apt purge` (deb only) | Additionally removes `/etc/ssh/sshd_config.d/ziti-ssh.conf` and `/etc/ssh/ziti_ca.pub` and reloads sshd, so the host **stops trusting the Ziti CA**. `/etc/ziti-ssh-host/` (identity, env), the account ownership registry and Linux accounts are kept. | Additionally removes the managed systemd drop-in `ziti-ssh-ca.service.d/10-controller-user.conf` (unless edited by hand). `/etc/ziti-ssh-ca/` is kept. | — |
+
+**rpm has no purge.** After `rpm -e ziti-ssh-host`, delete `/etc/ssh/sshd_config.d/ziti-ssh.conf` and `/etc/ssh/ziti_ca.pub` and reload sshd (`systemctl reload sshd`) if the host should no longer accept Ziti certificates.
+
+Delete Ziti identities (`/etc/ziti-ssh-host/identity.json`, `/etc/ziti-ssh-ca/identity.json`) and per-identity Linux accounts yourself if they are no longer needed; the packages never remove them.

@@ -31,7 +31,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -45,12 +44,12 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/openziti/edge-api/rest_model"
 	edgeapis "github.com/openziti/sdk-golang/edge-apis"
 	ziti "github.com/openziti/sdk-golang/ziti"
 	"github.com/openziti/sdk-golang/ziti/enroll"
@@ -61,6 +60,7 @@ import (
 
 	"github.com/netfoundry/ziti-ssh/client"
 	"github.com/netfoundry/ziti-ssh/config"
+	"github.com/netfoundry/ziti-ssh/internal/mfa"
 )
 
 // ---------------------------------------------------------------------------
@@ -87,6 +87,11 @@ type OIDCConfig struct {
 // loadConfig reads the YAML config file at cfgPath. If the file does not exist
 // an empty Config is returned without error.
 func loadConfig(cfgPath string) (*Config, error) {
+	// The config chooses the identity, CA service and key: refuse one that
+	// another user could have written.
+	if err := config.CheckUserFile(cfgPath); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(cfgPath)
 	if os.IsNotExist(err) {
 		return &Config{}, nil
@@ -124,78 +129,149 @@ func orDefault(val, fallback string) string {
 // Port-forward spec parsing
 // ---------------------------------------------------------------------------
 
+// splitForwardSpec splits a forwarding spec on ':' like ssh(1), except that
+// an IPv6 address may be written in brackets ("[::1]", "[2001:db8::1]"); the
+// brackets are removed from the returned field.
+func splitForwardSpec(s string) ([]string, error) {
+	var fields []string
+	for {
+		var field string
+		if strings.HasPrefix(s, "[") {
+			end := strings.IndexByte(s, ']')
+			if end < 0 {
+				return nil, fmt.Errorf("unterminated '[' in %q", s)
+			}
+			field, s = s[1:end], s[end+1:]
+			if s != "" && s[0] != ':' {
+				return nil, fmt.Errorf("expected ':' after ']' in %q", s)
+			}
+		} else if i := strings.IndexByte(s, ':'); i >= 0 {
+			field, s = s[:i], s[i:]
+		} else {
+			field, s = s, ""
+		}
+		fields = append(fields, field)
+		if s == "" {
+			return fields, nil
+		}
+		s = s[1:] // skip ':'
+	}
+}
+
+// validPort reports whether p is a TCP port number 1–65535.
+func validPort(p string) error {
+	n, err := strconv.Atoi(p)
+	if err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("invalid port %q", p)
+	}
+	return nil
+}
+
+// isLoopbackBind reports whether a local bind address only accepts
+// connections from this machine.
+func isLoopbackBind(bind string) bool {
+	if bind == "" || bind == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(bind)
+	return ip != nil && ip.IsLoopback()
+}
+
+// warnNonLoopbackBind prints a warning when a local forward or SOCKS listener
+// is reachable from other machines: it has no authentication of its own.
+func warnNonLoopbackBind(flag, bind string) {
+	if !isLoopbackBind(bind) {
+		fmt.Fprintf(os.Stderr, "Warning: %s listener on %q is reachable from other machines and has no authentication;\n"+
+			"anyone who can connect to it can use your session.\n", flag, bind)
+	}
+}
+
 // parseLocalForward parses a -L spec of the form:
 //
 //	[bind:]localport:remotehost:remoteport
 //
 // A bare 3-part form (localport:remotehost:remoteport) binds to 127.0.0.1.
+// IPv6 addresses are written in brackets: [::1]:8080:[2001:db8::1]:80.
 func parseLocalForward(s string) (client.LocalForwardSpec, error) {
-	parts := strings.Split(s, ":")
+	usage := fmt.Errorf("invalid -L spec %q: expected [bind:]localport:remotehost:remoteport", s)
+	parts, err := splitForwardSpec(s)
+	if err != nil {
+		return client.LocalForwardSpec{}, fmt.Errorf("invalid -L spec: %w", err)
+	}
+	var spec client.LocalForwardSpec
 	switch len(parts) {
 	case 3:
-		// localport:remotehost:remoteport
-		return client.LocalForwardSpec{
-			Bind:       "127.0.0.1",
-			LocalPort:  parts[0],
-			RemoteHost: parts[1],
-			RemotePort: parts[2],
-		}, nil
+		spec = client.LocalForwardSpec{Bind: "127.0.0.1", LocalPort: parts[0], RemoteHost: parts[1], RemotePort: parts[2]}
 	case 4:
-		// bind:localport:remotehost:remoteport
-		return client.LocalForwardSpec{
-			Bind:       parts[0],
-			LocalPort:  parts[1],
-			RemoteHost: parts[2],
-			RemotePort: parts[3],
-		}, nil
+		spec = client.LocalForwardSpec{Bind: parts[0], LocalPort: parts[1], RemoteHost: parts[2], RemotePort: parts[3]}
 	default:
-		return client.LocalForwardSpec{}, fmt.Errorf(
-			"invalid -L spec %q: expected [bind:]localport:remotehost:remoteport", s)
+		return client.LocalForwardSpec{}, usage
 	}
+	if spec.RemoteHost == "" {
+		return client.LocalForwardSpec{}, usage
+	}
+	for _, p := range []string{spec.LocalPort, spec.RemotePort} {
+		if err := validPort(p); err != nil {
+			return client.LocalForwardSpec{}, fmt.Errorf("invalid -L spec %q: %w", s, err)
+		}
+	}
+	return spec, nil
 }
 
 // parseRemoteForward parses a -R spec of the form:
 //
 //	[bind:]remoteport:localhost:localport
+//
+// IPv6 addresses are written in brackets.
 func parseRemoteForward(s string) (client.RemoteForwardSpec, error) {
-	parts := strings.Split(s, ":")
+	usage := fmt.Errorf("invalid -R spec %q: expected [bind:]remoteport:localhost:localport", s)
+	parts, err := splitForwardSpec(s)
+	if err != nil {
+		return client.RemoteForwardSpec{}, fmt.Errorf("invalid -R spec: %w", err)
+	}
+	var spec client.RemoteForwardSpec
 	switch len(parts) {
 	case 3:
-		// remoteport:localhost:localport
-		return client.RemoteForwardSpec{
-			Bind:       "",
-			RemotePort: parts[0],
-			LocalHost:  parts[1],
-			LocalPort:  parts[2],
-		}, nil
+		spec = client.RemoteForwardSpec{RemotePort: parts[0], LocalHost: parts[1], LocalPort: parts[2]}
 	case 4:
-		// bind:remoteport:localhost:localport
-		return client.RemoteForwardSpec{
-			Bind:       parts[0],
-			RemotePort: parts[1],
-			LocalHost:  parts[2],
-			LocalPort:  parts[3],
-		}, nil
+		spec = client.RemoteForwardSpec{Bind: parts[0], RemotePort: parts[1], LocalHost: parts[2], LocalPort: parts[3]}
 	default:
-		return client.RemoteForwardSpec{}, fmt.Errorf(
-			"invalid -R spec %q: expected [bind:]remoteport:localhost:localport", s)
+		return client.RemoteForwardSpec{}, usage
 	}
+	if spec.LocalHost == "" {
+		return client.RemoteForwardSpec{}, usage
+	}
+	for _, p := range []string{spec.RemotePort, spec.LocalPort} {
+		if err := validPort(p); err != nil {
+			return client.RemoteForwardSpec{}, fmt.Errorf("invalid -R spec %q: %w", s, err)
+		}
+	}
+	return spec, nil
 }
 
 // parseDynamicForward parses a -D spec of the form:
 //
 //	[bind:]port
+//
+// IPv6 bind addresses are written in brackets: [::1]:1080.
 func parseDynamicForward(s string) (client.DynamicForwardSpec, error) {
-	parts := strings.Split(s, ":")
+	parts, err := splitForwardSpec(s)
+	if err != nil {
+		return client.DynamicForwardSpec{}, fmt.Errorf("invalid -D spec: %w", err)
+	}
+	var spec client.DynamicForwardSpec
 	switch len(parts) {
 	case 1:
-		return client.DynamicForwardSpec{Bind: "127.0.0.1", LocalPort: parts[0]}, nil
+		spec = client.DynamicForwardSpec{Bind: "127.0.0.1", LocalPort: parts[0]}
 	case 2:
-		return client.DynamicForwardSpec{Bind: parts[0], LocalPort: parts[1]}, nil
+		spec = client.DynamicForwardSpec{Bind: parts[0], LocalPort: parts[1]}
 	default:
-		return client.DynamicForwardSpec{}, fmt.Errorf(
-			"invalid -D spec %q: expected [bind:]port", s)
+		return client.DynamicForwardSpec{}, fmt.Errorf("invalid -D spec %q: expected [bind:]port", s)
 	}
+	if err := validPort(spec.LocalPort); err != nil {
+		return client.DynamicForwardSpec{}, fmt.Errorf("invalid -D spec %q: %w", s, err)
+	}
+	return spec, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -208,7 +284,12 @@ var candidateKeys = []string{"id_ed25519", "id_ecdsa", "id_rsa"}
 // resolveKey returns the absolute path to the SSH private key to use.
 // If keyFile is non-empty it is used directly. Otherwise ~/.ssh/ is searched
 // in candidateKeys order. If no key exists the user is prompted to generate one.
-func resolveKey(keyFile string) (string, error) {
+// resolveKey returns the SSH private key to use: keyFile if given, otherwise
+// the first of candidateKeys found in the user's SSH directory. If none exists
+// and interactive is true, it offers to generate one; when interactive is
+// false (proxy mode, where stdin/stdout carry the SSH stream) it returns an
+// error instead of prompting.
+func resolveKey(keyFile string, interactive bool) (string, error) {
 	if keyFile != "" {
 		if _, err := os.Stat(keyFile); err != nil {
 			return "", fmt.Errorf("key file %q not found: %w", keyFile, err)
@@ -230,6 +311,10 @@ func resolveKey(keyFile string) (string, error) {
 		}
 	}
 
+	if !interactive {
+		return "", fmt.Errorf("no SSH key found; create one first (ssh-keygen -t ed25519) or pass --key")
+	}
+
 	// No key found — offer to generate one.
 	fmt.Print("No SSH key found. Generate one now? [y/N] ")
 	var answer string
@@ -246,7 +331,9 @@ func resolveKey(keyFile string) (string, error) {
 	}
 	slog.Info("generating SSH key", "path", keyPath)
 	//nolint:gosec // arguments are constant or path-derived; no user-controlled shell injection.
-	cmd := exec.Command("ssh-keygen", "-t", "ed25519", "-f", keyPath, "-N", "")
+	// No -N: ssh-keygen asks for a passphrase (Enter for none).
+	cmd := exec.Command("ssh-keygen", "-t", "ed25519", "-f", keyPath)
+	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -313,7 +400,7 @@ func registerZtAPIsPersist(zitiCtx ziti.Context, identityFile string) {
 // runSign obtains a signed SSH certificate from the CA and writes it to disk.
 // It is used both by the `sign` subcommand and by runConnect for auto-sign.
 func runSign(p signParams) error {
-	privKeyPath, err := resolveKey(p.keyFile)
+	privKeyPath, err := resolveKey(p.keyFile, true)
 	if err != nil {
 		return err
 	}
@@ -341,6 +428,7 @@ func runSign(p signParams) error {
 	}
 
 	registerZtAPIsPersist(zitiCtx, p.identityFile)
+	defer mfa.RegisterTTY(zitiCtx)()
 
 	if err := config.RunWithTimeout(p.zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
 		return err
@@ -362,18 +450,19 @@ func runSign(p signParams) error {
 		return fmt.Errorf("send public key to CA: %w", err)
 	}
 
-	reader := bufio.NewReader(conn)
-	certLine, err := reader.ReadString('\n')
+	certLine, err := client.ReadCAResponse(conn)
 	if err != nil {
-		return fmt.Errorf("read certificate from CA: %w", err)
+		return err
 	}
-	certLine = strings.TrimSpace(certLine)
-	if certLine == "" {
-		return fmt.Errorf("CA returned no certificate")
+	// Validate before writing so a CA error reply or a certificate for the
+	// wrong key never overwrites an existing valid certificate.
+	certBytes, err := client.ValidateSignedCert(certLine, pubKeyLine)
+	if err != nil {
+		return err
 	}
 
 	certPath := deriveCertPath(privKeyPath)
-	if err := config.AtomicWriteFile(certPath, []byte(certLine+"\n"), 0644); err != nil {
+	if err := config.AtomicWriteFile(certPath, certBytes, 0644); err != nil {
 		return fmt.Errorf("write certificate to %q: %w", certPath, err)
 	}
 
@@ -388,36 +477,65 @@ func runSign(p signParams) error {
 // connect subcommand logic
 // ---------------------------------------------------------------------------
 
-// parseTarget splits "[user@]target" into (user, target). If no "@" is
-// present the current OS user is returned as the default username.
+// parseTarget splits "[user@]target" into (user, target) at the last "@" (as
+// OpenSSH does). If no "@" is present
+// the current OS user is returned as the default username (proxy mode,
+// where the user is not used; connect uses splitTarget and defaultUser).
 func parseTarget(arg string) (username, target string, err error) {
-	if idx := strings.IndexByte(arg, '@'); idx >= 0 {
-		return arg[:idx], arg[idx+1:], nil
+	username, target, explicit := splitTarget(arg)
+	if explicit {
+		return username, target, nil
 	}
 	cur, err := user.Current()
 	if err != nil {
 		return "", "", fmt.Errorf("determine current user: %w", err)
 	}
-	return cur.Username, arg, nil
+	return cur.Username, target, nil
+}
+
+// splitTarget splits "[user@]target" at the last "@"; explicit reports
+// whether a user was given.
+func splitTarget(arg string) (username, target string, explicit bool) {
+	if idx := strings.LastIndexByte(arg, '@'); idx >= 0 {
+		return arg[:idx], arg[idx+1:], true
+	}
+	return "", arg, false
+}
+
+// defaultUser is the SSH user when the target names none: the certificate's
+// single principal if there is one (in per-identity mode, the identity's
+// derived Linux username), otherwise the current OS user.
+func defaultUser(certPath string) (string, error) {
+	if p, ok := client.CertPrincipal(certPath); ok {
+		return p, nil
+	}
+	cur, err := user.Current()
+	if err != nil {
+		return "", fmt.Errorf("determine current user: %w", err)
+	}
+	return cur.Username, nil
 }
 
 // connectParams holds all resolved settings for the connect command.
 type connectParams struct {
-	identityFile   string
-	caService      string
-	sshService     string
-	service        string // explicit override (--service)
-	keyFile        string
-	oidc           oidcFlowParams
-	zitiTimeout    time.Duration
-	target         string // raw "[user@]target" argument
-	command        string // optional remote command; empty means interactive shell
-	verbose        bool
-	noShell        bool                        // -N: do not open a shell, only run forwards
-	forwardAgent   bool                        // -A: forward local SSH agent to remote session
-	localForwards  []client.LocalForwardSpec   // -L specs
-	remoteForwards []client.RemoteForwardSpec  // -R specs
-	dynamicProxies []client.DynamicForwardSpec // -D specs
+	identityFile string
+	caService    string
+	sshService   string
+	service      string // explicit override (--service)
+	keyFile      string
+	oidc         oidcFlowParams
+	zitiTimeout  time.Duration
+	target       string // raw "[user@]target" argument
+	command      string // optional remote command; empty means interactive shell
+	verbose      bool
+	noShell      bool // -N: do not open a shell, only run forwards
+	forwardAgent bool // -A: forward local SSH agent to remote session
+	// forwardAgentUnverified acknowledges that the host cannot be verified
+	// (see checkAgentForwarding) and allows -A anyway.
+	forwardAgentUnverified bool
+	localForwards          []client.LocalForwardSpec   // -L specs
+	remoteForwards         []client.RemoteForwardSpec  // -R specs
+	dynamicProxies         []client.DynamicForwardSpec // -D specs
 }
 
 // certTimeRemaining parses the certificate at certPath and returns the time
@@ -450,14 +568,14 @@ func certTimeRemaining(certPath string) (string, bool) {
 }
 
 func runConnect(p connectParams) error {
-	username, host, err := parseTarget(p.target)
-	if err != nil {
+	if err := checkAgentForwarding(p.forwardAgent, p.forwardAgentUnverified); err != nil {
 		return err
 	}
+	username, host, explicitUser := splitTarget(p.target)
 
 	// Resolve SSH key path before touching the network so we can check cert
 	// freshness without authenticating twice.
-	privKeyPath, err := resolveKey(p.keyFile)
+	privKeyPath, err := resolveKey(p.keyFile, true)
 	if err != nil {
 		return err
 	}
@@ -500,8 +618,14 @@ func runConnect(p connectParams) error {
 		}
 	}
 
+	if !explicitUser {
+		if username, err = defaultUser(certPath); err != nil {
+			return err
+		}
+	}
+
 	// Load signer (private key + cert).
-	signer, err := client.NewCertSigner(privKeyPath)
+	signer, err := client.NewCertSignerPrompt(privKeyPath, client.TTYPassphrasePrompt(privKeyPath))
 	if err != nil {
 		return fmt.Errorf("load SSH key: %w", err)
 	}
@@ -518,6 +642,7 @@ func runConnect(p connectParams) error {
 	}
 
 	registerZtAPIsPersist(zitiCtx, p.identityFile)
+	defer mfa.RegisterTTY(zitiCtx)()
 
 	if err := config.RunWithTimeout(p.zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
 		return err
@@ -535,10 +660,16 @@ func runConnect(p connectParams) error {
 		// Target matches a known service name: dial it directly.
 		dialService = host
 		terminatorAddr = ""
+		fmt.Fprintf(os.Stderr, "Dialing service %q directly: any host bound to it may answer.\n", dialService)
 	}
 
 	if p.verbose {
 		fmt.Fprintf(os.Stderr, "%-12s %s @ %s\n", "Connecting:", username, host)
+	}
+
+	hostKeyCallback, err := client.NewHostKeyCallback(dialService, terminatorAddr)
+	if err != nil {
+		return err
 	}
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), p.zitiTimeout)
@@ -570,14 +701,14 @@ func runConnect(p connectParams) error {
 	if !hasForwards {
 		if p.command != "" {
 			slog.Debug("running remote command", "user", username, "host", host, "command", p.command)
-			return client.RunCommand(netConn, username, host, p.command, signer)
+			return client.RunCommand(netConn, username, host, p.command, signer, hostKeyCallback)
 		}
 		slog.Debug("SSH session starting", "user", username, "host", host)
-		return client.RunSession(netConn, username, host, signer, p.forwardAgent)
+		return client.RunSession(netConn, username, host, signer, p.forwardAgent, hostKeyCallback)
 	}
 
 	// Build an *ssh.Client for forwarding (and optionally a shell session).
-	sshClient, err := client.NewSSHClient(netConn, username, host, signer)
+	sshClient, err := client.NewSSHClient(netConn, username, host, signer, hostKeyCallback)
 	if err != nil {
 		return err
 	}
@@ -775,7 +906,7 @@ func runProxy(p proxyParams) error {
 	}
 
 	// Resolve SSH key for cert refresh — same logic as connect.
-	privKeyPath, err := resolveKey(p.keyFile)
+	privKeyPath, err := resolveKey(p.keyFile, false) // never prompt: stdin/stdout are the SSH stream
 	if err != nil {
 		return err
 	}
@@ -811,6 +942,10 @@ func runProxy(p proxyParams) error {
 
 	registerZtAPIsPersist(zitiCtx, p.identityFile)
 
+	// MFA codes are read from the terminal, never stdin (here it carries the
+	// SSH stream).
+	defer mfa.RegisterTTY(zitiCtx)()
+
 	if err := config.RunWithTimeout(p.zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
 		return err
 	}
@@ -824,6 +959,7 @@ func runProxy(p proxyParams) error {
 	} else if _, ok := zitiCtx.GetService(host); ok {
 		dialService = host
 		terminatorAddr = ""
+		fmt.Fprintf(os.Stderr, "Dialing service %q directly: any host bound to it may answer.\n", dialService)
 	}
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), p.zitiTimeout)
@@ -930,6 +1066,7 @@ func runList(identityFile string, zitiTimeout time.Duration) error {
 		return fmt.Errorf("init Ziti context from %q: %w", identityFile, err)
 	}
 	defer zitiCtx.Close()
+	defer mfa.RegisterTTY(zitiCtx)()
 
 	if err := config.RunWithTimeout(zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
 		return err
@@ -966,31 +1103,8 @@ func runList(identityFile string, zitiTimeout time.Duration) error {
 // MFA helpers
 // ---------------------------------------------------------------------------
 
-func readMFACode(allowEmpty bool) string {
-	reader := bufio.NewReader(os.Stdin)
-	for {
-		fmt.Print("MFA TOTP code: ")
-		code, _ := reader.ReadString('\n')
-		code = strings.TrimSpace(code)
-		if code != "" || allowEmpty {
-			return code
-		}
-	}
-}
-
-// mfaTotpListener returns a listener function compatible with
-// ziti.Events().AddMfaTotpCodeListener.
-func mfaTotpListener(_ ziti.Context, _ *rest_model.AuthQueryDetail, response ziti.MfaCodeResponse) {
-	for {
-		fmt.Println("MFA TOTP required to fully authenticate.")
-		code := readMFACode(false)
-		if err := response(code); err != nil {
-			fmt.Println("error verifying MFA TOTP:", err)
-			continue
-		}
-		break
-	}
-}
+// mfaStdin reads MFA codes for the mfa subcommands (hidden on a terminal).
+var mfaStdin = mfa.NewReader(os.Stdin)
 
 func runMFAEnable(identityFile string, showQR bool, zitiTimeout time.Duration) error {
 	zitiCtx, err := ziti.NewContextFromFile(identityFile)
@@ -1000,7 +1114,7 @@ func runMFAEnable(identityFile string, showQR bool, zitiTimeout time.Duration) e
 	defer zitiCtx.Close()
 
 	// Register MFA listener before authenticating in case it fires during auth.
-	zitiCtx.Events().AddMfaTotpCodeListener(mfaTotpListener)
+	zitiCtx.Events().AddMfaTotpCodeListener(mfa.Listener(mfaStdin, os.Stderr))
 
 	if err := config.RunWithTimeout(zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
 		return err
@@ -1031,7 +1145,10 @@ func runMFAEnable(identityFile string, showQR bool, zitiTimeout time.Duration) e
 	}
 	fmt.Println()
 
-	code := readMFACode(false)
+	code, err := mfa.ReadCode(mfaStdin, os.Stderr, false)
+	if err != nil {
+		return err
+	}
 	if err := zitiCtx.VerifyZitiMfa(code); err != nil {
 		return fmt.Errorf("verify MFA code: %w", err)
 	}
@@ -1064,7 +1181,7 @@ func runMFAVerify(identityFile string, zitiTimeout time.Duration) error {
 	}
 	defer zitiCtx.Close()
 
-	zitiCtx.Events().AddMfaTotpCodeListener(mfaTotpListener)
+	zitiCtx.Events().AddMfaTotpCodeListener(mfa.Listener(mfaStdin, os.Stderr))
 
 	if err := config.RunWithTimeout(zitiTimeout, "authenticate", zitiCtx.Authenticate); err != nil {
 		return err
@@ -1089,7 +1206,11 @@ func runMFARemove(identityFile string, zitiTimeout time.Duration) error {
 			fmt.Println("If MFA TOTP is enrolled, enter a valid code or recovery code.")
 			fmt.Println("Otherwise, enter any value to continue.")
 			fmt.Println()
-			code := readMFACode(true)
+			code, err := mfa.ReadCode(mfaStdin, os.Stderr, true)
+			if err != nil {
+				done <- err
+				return
+			}
 			if err := c.RemoveZitiMfa(code); err != nil {
 				done <- fmt.Errorf("remove MFA: %w", err)
 				return
@@ -1205,16 +1326,17 @@ Usage:
 
 	// ---------------------------------------------------------------- connect
 	var (
-		caServiceFlag    string
-		sshServiceFlag   string
-		serviceFlag      string
-		keyFlag          string
-		oidcIssuerFlag   string
-		noShellFlag      bool
-		forwardAgentFlag bool
-		localFwdFlags    []string
-		remoteFwdFlags   []string
-		dynamicFwdFlags  []string
+		caServiceFlag              string
+		sshServiceFlag             string
+		serviceFlag                string
+		keyFlag                    string
+		oidcIssuerFlag             string
+		noShellFlag                bool
+		forwardAgentFlag           bool
+		forwardAgentUnverifiedFlag bool
+		localFwdFlags              []string
+		remoteFwdFlags             []string
+		dynamicFwdFlags            []string
 	)
 	connectCmd = &cobra.Command{
 		Use:   "connect [user@]<target> [-- <command> [args...]]",
@@ -1229,7 +1351,8 @@ automatically refreshed via the ziti-ssh-ca service before connecting.
 
 The target may be given as:
   user@identity-name    — SSH as <user> to the host with Ziti identity <identity-name>
-  identity-name         — SSH as the current OS user
+  identity-name         — SSH as the certificate's principal (per-identity mode:
+                          your derived Linux username), else the current OS user
 
 If the target exactly matches a Ziti service name it is dialled directly. Otherwise
 it is used as a terminator address on the --ssh-service.
@@ -1274,6 +1397,7 @@ Examples:
 				if err != nil {
 					return err
 				}
+				warnNonLoopbackBind("-L", spec.Bind)
 				localFwds = append(localFwds, spec)
 			}
 			var remoteFwds []client.RemoteForwardSpec
@@ -1290,6 +1414,7 @@ Examples:
 				if err != nil {
 					return err
 				}
+				warnNonLoopbackBind("-D", spec.Bind)
 				dynFwds = append(dynFwds, spec)
 			}
 
@@ -1305,15 +1430,16 @@ Examples:
 					ClientSecret: cfg.OIDC.ClientSecret,
 					CallbackPort: oidcCallbackPort,
 				},
-				zitiTimeout:    zitiTimeout,
-				target:         args[0],
-				command:        remoteCommand,
-				verbose:        verbose,
-				noShell:        noShellFlag,
-				forwardAgent:   forwardAgentFlag,
-				localForwards:  localFwds,
-				remoteForwards: remoteFwds,
-				dynamicProxies: dynFwds,
+				zitiTimeout:            zitiTimeout,
+				target:                 args[0],
+				command:                remoteCommand,
+				verbose:                verbose,
+				noShell:                noShellFlag,
+				forwardAgent:           forwardAgentFlag,
+				forwardAgentUnverified: forwardAgentUnverifiedFlag,
+				localForwards:          localFwds,
+				remoteForwards:         remoteFwds,
+				dynamicProxies:         dynFwds,
 			})
 		},
 	}
@@ -1323,7 +1449,8 @@ Examples:
 	connectCmd.Flags().StringVar(&keyFlag, "key", "", "SSH private key path (default: auto-detect from ~/.ssh/)")
 	connectCmd.Flags().StringVar(&oidcIssuerFlag, "oidc-issuer", "", "OIDC issuer URL; triggers browser-based OIDC auth before connecting (or set oidc.issuer in config)")
 	connectCmd.Flags().BoolVarP(&noShellFlag, "no-shell", "N", false, "Do not open a shell; only forward ports (requires at least one -L, -R, or -D)")
-	connectCmd.Flags().BoolVarP(&forwardAgentFlag, "forward-agent", "A", false, "Forward local SSH agent to the remote session (requires SSH_AUTH_SOCK)")
+	connectCmd.Flags().BoolVarP(&forwardAgentFlag, "forward-agent", "A", false, "Forward local SSH agent to the remote session (requires SSH_AUTH_SOCK and --forward-agent-unverified)")
+	connectCmd.Flags().BoolVar(&forwardAgentUnverifiedFlag, "forward-agent-unverified", false, "Allow -A although the host's identity cannot be verified (the host can use your agent while connected)")
 	connectCmd.Flags().StringArrayVarP(&localFwdFlags, "local-forward", "L", nil, "Local port forward: [bind:]localport:remotehost:remoteport (may be repeated)")
 	connectCmd.Flags().StringArrayVarP(&remoteFwdFlags, "remote-forward", "R", nil, "Remote port forward: [bind:]remoteport:localhost:localport (may be repeated)")
 	connectCmd.Flags().StringArrayVarP(&dynamicFwdFlags, "dynamic", "D", nil, "Dynamic SOCKS5 proxy: [bind:]port (may be repeated)")
@@ -1547,6 +1674,7 @@ Example:
 		},
 	}
 	root.AddCommand(versionCmd)
+	root.AddCommand(newKnownHostsCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -1555,3 +1683,69 @@ Example:
 
 // Compile-time assertion: confirm the time package is referenced.
 var _ = time.Now
+
+// checkAgentForwarding refuses -A unless the user explicitly accepts that the
+// host cannot be verified. ziti-ssh cannot yet confirm which identity answered
+// on a terminator address, so a host impersonating another could use the
+// forwarded agent to authenticate as the user elsewhere while connected.
+func checkAgentForwarding(forward, unverified bool) error {
+	if forward && !unverified {
+		return fmt.Errorf("-A/--forward-agent is disabled: ziti-ssh cannot yet verify which host answered, " +
+			"and a forwarded agent can be used by that host while you are connected. " +
+			"To forward anyway, add --forward-agent-unverified (the CA must also grant permit-agent-forwarding)")
+	}
+	return nil
+}
+
+// newKnownHostsCmd builds "ziti-ssh known-hosts list|remove".
+func newKnownHostsCmd() *cobra.Command {
+	store := func() (client.KnownHosts, error) {
+		path, err := client.DefaultKnownHostsPath()
+		return client.KnownHosts{Path: path}, err
+	}
+	khCmd := &cobra.Command{
+		Use:   "known-hosts",
+		Short: "Show or remove remembered SSH host keys",
+		Long: `ziti-ssh remembers the SSH host key(s) seen for each Ziti address and refuses
+a changed key ("<host>@<service>" addresses) or asks before trusting an
+additional key (services dialed directly, where any bound host may answer).
+
+Addresses are "<host>@<service>" for hosts dialed by name, or "<service>" for
+services dialed directly.`,
+	}
+	khCmd.AddCommand(&cobra.Command{
+		Use:          "list",
+		Short:        "List remembered host keys",
+		Args:         cobra.NoArgs,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			kh, err := store()
+			if err != nil {
+				return err
+			}
+			return kh.List(os.Stdout)
+		},
+	})
+	khCmd.AddCommand(&cobra.Command{
+		Use:          "remove <address>",
+		Short:        "Forget the host key(s) for an address, e.g. after a host was rebuilt",
+		Args:         cobra.ExactArgs(1),
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			kh, err := store()
+			if err != nil {
+				return err
+			}
+			n, err := kh.Remove(args[0])
+			if err != nil {
+				return err
+			}
+			if n == 0 {
+				return fmt.Errorf("no host keys remembered for %q (see: ziti-ssh known-hosts list)", args[0])
+			}
+			fmt.Printf("Removed %d host key(s) for %s\n", n, args[0])
+			return nil
+		},
+	})
+	return khCmd
+}

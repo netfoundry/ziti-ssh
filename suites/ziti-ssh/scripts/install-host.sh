@@ -62,6 +62,10 @@ log "Ensuring 'ziggy' user exists"
 if ! id ziggy >/dev/null 2>&1; then
     sudo useradd --create-home --shell /bin/bash ziggy
 fi
+# Restrict the shared account to CA-certificate login (the ziti-ssh-host sshd
+# drop-in disables authorized_keys for members of ziti-ssh-managed).
+sudo groupadd -f --system ziti-ssh-managed
+sudo usermod -aG ziti-ssh-managed ziggy
 
 # ---------------------------------------------------------------------------
 # 3) Install the ziti-ssh-host package staged by the suite runner.
@@ -133,12 +137,26 @@ sudo ziti-ssh-host enroll \
 #    whether certificates carry a shared principal ("ziggy") or a per-identity
 #    derived username.
 # ---------------------------------------------------------------------------
-log "Writing ziti-ssh-host environment + systemd unit"
-sudo tee /etc/ziti-ssh-host/env > /dev/null <<'ENVEOF'
+# Suite vars (optional): ZSSH_MODE=per-identity switches the host to
+# per-identity mode, binds ZSSH_SERVICES (default "ssh") and applies the
+# grant policy ZSSH_ALLOW_GROUPS; it also creates the test groups.
+ZSSH_MODE="${ZSSH_MODE:-shared}"
+ZSSH_SERVICES="${ZSSH_SERVICES:-ssh}"
+if [[ "${ZSSH_MODE}" == "per-identity" ]]; then
+    for g in zt-dev zt-ops; do sudo groupadd -f "${g}"; done
+fi
+log "Writing ziti-ssh-host environment + systemd unit (mode ${ZSSH_MODE}, services ${ZSSH_SERVICES})"
+sudo tee /etc/ziti-ssh-host/env > /dev/null <<ENVEOF
 ZITI_IDENTITY=/etc/ziti-ssh-host/identity.json
-ZITI_SSH_SERVICE=ssh
-ZITI_SSH_MODE=shared
+ZITI_SSH_SERVICE=${ZSSH_SERVICES}
+ZITI_SSH_MODE=${ZSSH_MODE}
 ENVEOF
+if [[ -n "${ZSSH_ALLOW_GROUPS:-}" ]]; then
+    echo "ZITI_ALLOW_GROUPS=${ZSSH_ALLOW_GROUPS}" | sudo tee -a /etc/ziti-ssh-host/env > /dev/null
+fi
+if [[ -n "${ZSSH_SERVICE_REFRESH:-}" ]]; then
+    echo "ZITI_SERVICE_REFRESH=${ZSSH_SERVICE_REFRESH}" | sudo tee -a /etc/ziti-ssh-host/env > /dev/null
+fi
 
 sudo tee /etc/systemd/system/ziti-ssh-host.service > /dev/null <<'UNITEOF'
 [Unit]
@@ -149,7 +167,7 @@ Wants=network-online.target
 [Service]
 Type=notify
 EnvironmentFile=-/etc/ziti-ssh-host/env
-ExecStart=/usr/local/bin/ziti-ssh-host run
+ExecStart=/usr/bin/ziti-ssh-host run
 Restart=on-failure
 RestartSec=5
 
@@ -158,13 +176,27 @@ WantedBy=multi-user.target
 UNITEOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now ziti-ssh-host
+sudo systemctl enable --now ziti-ssh-host || true
 
 # With Type=notify, systemd waits for READY=1 before reporting active, so
 # is-active here confirms the daemon fully initialised and opened its listener.
+#
+# One startup failure is expected: the "ssh" Ziti service is created by the
+# suite's network resources, which are applied only after ALL edge routers are
+# online. If this ER finishes first, ziti-ssh-host exits with
+# "service 'ssh' not found" and systemd restarts it (Restart=on-failure,
+# RestartSec=5) until the service exists. Any other failure is fatal.
 if ! sudo systemctl is-active --quiet ziti-ssh-host; then
+    # Capture before matching: piping journalctl into "grep -q" can SIGPIPE
+    # journalctl and fail the pipeline under "set -o pipefail".
+    JOURNAL=$(sudo journalctl -u ziti-ssh-host --no-pager -n 50 || true)
+    if grep -qE "service '[^']+' not found" <<< "${JOURNAL}"; then
+        log "install-host.sh complete — ziti-ssh-host enabled as ${IDENTITY_NAME};" \
+            "waiting for the 'ssh' service to be created (systemd will restart it)"
+        exit 0
+    fi
     log "ziti-ssh-host failed to start — recent journal output:"
-    sudo journalctl -u ziti-ssh-host --no-pager -n 50 >&2
+    printf '%s\n' "${JOURNAL}" >&2
     exit 1
 fi
 

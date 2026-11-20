@@ -26,7 +26,8 @@ if [ ! -f /etc/ziti-ssh-host/env ]; then
 
 # SUDOERS — optional sudo rule granted to per-identity users on connect.
 # Only applies when ZITI_SSH_MODE=per-identity.
-# Leave unset for no sudo access. The rule is written to /etc/sudoers.d/<username>.
+# Leave unset for no sudo access. The rule is written to
+# /etc/sudoers.d/ziti-ssh-host-<username>.
 # Example (full passwordless sudo):
 #ZITI_SUDOERS_RULE=ALL=(ALL) NOPASSWD:ALL
 
@@ -34,8 +35,39 @@ if [ ! -f /etc/ziti-ssh-host/env ]; then
 # false (default): persistent users — account remains after disconnect.
 # true: ephemeral users — account removed when last session closes.
 #ZITI_USER_CLEANUP=false
+
+# TERMINATE_ON_DISCONNECT — with USER_CLEANUP=false, end all of the user's
+# processes (nohup, tmux, systemd user services), remove their crontab and at
+# jobs, and expire the account until its next authorized connection when the
+# last session closes, keeping the account and home directory. Needed for revoked identities to lose
+# running processes. No effect when USER_CLEANUP=true (deletion already ends them).
+#ZITI_TERMINATE_ON_DISCONNECT=false
+
+# How often to check the controller for service/config changes (default 30s,
+# minimum 5s); a changed ziti-ssh-host.v1 config applies within this interval.
+#ZITI_SERVICE_REFRESH=30s
+
+# Maximum concurrent connections per service (default 128); further
+# connections are closed immediately.
+#ZITI_MAX_CONNECTIONS=128
+
+# Host grant policy — what each service's ziti-ssh-host.v1 config may grant here.
+# ALLOW_SUDOERS: services whose config may set sudoers_rule (comma list, or *).
+#ZITI_ALLOW_SUDOERS=ssh-ops
+# ALLOW_GROUPS: privileged groups (root, sudo, admin, wheel, docker, lxd, disk,
+# shadow, libvirt) a service's config may grant, as <service>:<group> or *:<group>.
+#ZITI_ALLOW_GROUPS=ssh-ops:sudo
+# RESTRICT_GROUPS: true = config may grant only groups listed in ALLOW_GROUPS.
+#ZITI_RESTRICT_GROUPS=false
 ENVEOF
     chmod 640 /etc/ziti-ssh-host/env
+fi
+
+# Accounts in this group may only log in with a CA certificate (the sshd
+# drop-in written by "ziti-ssh-host enroll" disables authorized_keys for them).
+# Add the shared account to it in shared mode: usermod -aG ziti-ssh-managed <user>
+if command -v groupadd >/dev/null 2>&1; then
+    groupadd -f --system ziti-ssh-managed
 fi
 
 if [ -d /run/systemd/system ]; then

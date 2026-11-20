@@ -27,27 +27,47 @@ ziti-ssh ziggy@web-server-prod
 The CA derives a Linux username from each caller's Ziti identity name and places it in the certificate's `ValidPrincipals`. `ziti-ssh-host` creates the Linux user on the first connection from that identity and deletes it (including home directory) when the last session closes.
 
 **Username derivation rules** (`ca.DeriveUsername`):
-1. Lowercase the entire identity name.
+1. Lowercase ASCII letters (`A`–`Z`); other characters are not case-folded, so non-ASCII lookalikes such as the Kelvin sign `K` never become ASCII letters.
 2. Replace any character outside `[a-z0-9_-]` with `_`.
 3. If the result starts with a digit, prefix it with `z`.
 4. Truncate to 32 characters.
 
 Examples: `Alice` → `alice`, `dba-Alice` → `dba-alice`, `123bot` → `z123bot`
 
+**Account ownership:** `ziti-ssh-host` only creates, modifies, or deletes Linux accounts that it created itself (or that an administrator has explicitly claimed, see [Managing account ownership](#managing-account-ownership)). Ownership is recorded in `/var/lib/ziti-ssh-host/owned-users.json` (username → Ziti identity and UID). On each connection:
+
+```mermaid
+flowchart TD
+    A[Connection from identity] --> B{Username valid?<br/>not reserved, no leading '-'}
+    B -- no --> X[Reject]
+    B -- yes --> C{Account exists?<br/>getent passwd}
+    C -- no --> D["useradd -m -s /bin/bash -- &lt;username&gt;"]
+    D --> E{UID >= 1000?}
+    E -- no --> X
+    E -- yes --> F[Record in owned-users.json]
+    F --> G[Apply groups and sudoers]
+    C -- yes --> H{Registered to this identity<br/>with the same UID, UID >= 1000?}
+    H -- no --> X
+    H -- yes --> G
+```
+
+The connection is rejected — and the account left untouched — when the account already exists but was not created by `ziti-ssh-host` (for example `ubuntu` or an administrator account), when it is registered to a different Ziti identity (two identities deriving the same username), when it was deleted and recreated with a different UID, or when its UID is below 1000. Reserved names (`root`, common system accounts, `ubuntu`, `admin`, `ziti`) are always refused. `ziti-ssh-ca` refuses to sign a per-identity certificate for the same reserved names or for a principal starting with `-`.
+
 **Ephemeral user lifecycle:**
-- On first connection from an identity, `useradd -m -s /bin/bash <username>` runs.
-- If `ZITI_SSH_GROUPS` is set, `usermod -aG <groups> <username>` is run immediately after account creation. Groups must already exist on the host; failure is non-fatal and logged.
-- If `ZITI_SUDOERS_RULE` is set, a sudoers file is written to `/etc/sudoers.d/<username>` (validated with `visudo -c` before installation).
+- On first connection from an identity, `useradd -m -s /bin/bash -- <username>` runs and the account is recorded in the ownership registry.
+- On every connection, supplementary groups are set to exactly the resolved list with `usermod -G <groups> -- <username>` (from the `ziti-ssh-host.v1` config entry, or `ZITI_SSH_GROUPS`). Groups must already exist on the host. **If this fails — for example because a group does not exist — the connection is rejected.**
+- If a sudoers rule is resolved (config entry or `ZITI_SUDOERS_RULE`), it is written to `/etc/sudoers.d/ziti-ssh-host-<username>` (validated with `visudo -c` before installation); otherwise any existing file is removed. If the rule cannot be installed, the existing file is removed and the connection is rejected; if an existing file cannot be removed, the connection is rejected.
+- Every managed account is a member of the `ziti-ssh-managed` group (in addition to its configured groups, and also after its privileges are dropped). sshd ignores `authorized_keys` and any `AuthorizedKeysCommand` for this group, so users can only log in with a CA certificate.
 - Concurrent sessions from the same identity are reference-counted — `useradd` is only called once.
-- When the last session from an identity closes, the cleanup sequence runs: `loginctl terminate-user <username>` drains the systemd session, the process list is polled until the user's processes exit (up to 5 seconds), and then `userdel -r <username>` removes the account and home directory. The sudoers file is removed unconditionally at this point (group membership is implicit in account deletion).
-- By default the Linux account is kept after disconnect. Set `ZITI_USER_CLEANUP=true` to delete the account when the last session closes. The sudoers file is removed on disconnect regardless of this setting.
-- Active managed usernames are persisted to `/var/lib/ziti-ssh-host/managed-users`. On startup, `CleanupOrphans` reads this file and deletes any listed users (they had sessions open when the process was last killed), preventing accumulation of stale accounts after crashes.
+- When the last session from an identity closes, the sudoers file is removed and the account's supplementary groups are cleared. With `ZITI_USER_CLEANUP=true`, the cleanup sequence then runs: `loginctl terminate-user` drains the systemd session, the user's processes (matched by UID) are polled until they exit, escalating to SIGTERM and then SIGKILL, and `userdel -r` removes the account and home directory and its ownership record. Accounts not in the registry with a matching UID are never touched.
+- By default the Linux account is kept after disconnect, together with any background processes the user started. Set `ZITI_TERMINATE_ON_DISCONNECT=true` to end those processes and remove the account's crontab and `at` jobs when the last session closes (the account and home directory are kept; the account is expired until its identity's next authorized connection), or `ZITI_USER_CLEANUP=true` to delete the account when the last session closes.
+- Usernames with active sessions are persisted to `/var/lib/ziti-ssh-host/managed-users`. On startup, `CleanupOrphans` reads this file: with `ZITI_USER_CLEANUP=true` it deletes each listed account that is still registered (they had sessions open when the process was last killed); otherwise it removes their leftover sudoers files, clears their supplementary groups, and keeps the accounts.
 
 **Connecting in per-identity mode:**
 ```sh
-ziti-ssh dba-alice@web-server-prod
+ziti-ssh web-server-prod
 ```
-The username before `@` is the Ziti identity name (which is also the derived Linux username when it contains only lowercase letters, digits, hyphens, and underscores).
+With no `user@`, `ziti-ssh` and `ziti-scp` use the certificate's principal — in per-identity mode the CA issues it for the identity's derived Linux username. An explicit user must be that derived name, not the Ziti identity name: identity `Alice@Corp.com` logs in as `alice_corp_com` (`ziti-ssh alice_corp_com@web-server-prod`); `alice@corp.com@web-server-prod` is refused by sshd because it does not match the certificate.
 
 > **Important:** `--mode` must be set consistently on both `ziti-ssh-ca` and `ziti-ssh-host run`. If the CA issues certs with per-identity principals but the host is in shared mode (or vice versa), SSH authentication will fail.
 
@@ -63,7 +83,7 @@ For each connecting identity, `ziti-ssh-host` resolves permissions as follows:
 
 1. **Exact match** — if the config has an entry whose key is the exact Ziti identity name, that entry is used. Global fallbacks are ignored.
 
-2. **Most-specific glob match** — if no exact key exists, all glob patterns in the config (keys containing `*` or `?`) are tested via `path.Match`. The pattern with the longest literal prefix before the first wildcard wins. Global fallbacks are ignored for the matched identity.
+2. **Most-specific glob match** — if no exact key exists, all glob patterns in the config (keys containing `*` or `?`) are tested: `*` matches any run of characters (including none, and including `/`), `?` matches exactly one character, and every other character — including `[`, `]` and `\` — matches itself. The pattern with the longest literal prefix before the first wildcard wins, then the one with the most literal characters; any remaining tie goes to the pattern that sorts first. Global fallbacks are ignored for the matched identity.
 
 3. **`"*"` catch-all** — if neither an exact key nor a more-specific glob matches, a key of `"*"` in the config is used. This is the preferred way to define a default permission set, because the config propagates live to all running `ziti-ssh-host` instances without requiring an env file edit or service restart.
 
@@ -75,7 +95,32 @@ An entry that omits a field means that field gets nothing — globals are not me
 
 #### Live config reload
 
-When a `ziti-ssh-host.v1` config is updated in the Ziti controller, the change propagates to all running `ziti-ssh-host` instances bound to that service within seconds via the service-changed event. Already-open sessions are not affected — the updated permissions apply only to connections established after the reload. No restart of `ziti-ssh-host` is required.
+When a `ziti-ssh-host.v1` config is updated in the Ziti controller, the change reaches all running `ziti-ssh-host` instances bound to that service at their next service refresh — within 30 seconds by default (`ZITI_SERVICE_REFRESH`) — via the service-changed event. Until then a host keeps applying the previous config, so removing a grant (for example `sudo`) takes effect for new connections only after that interval. Already-open sessions are not affected — the updated permissions apply only to connections established after the reload. No restart of `ziti-ssh-host` is required.
+
+### Host grant policy
+
+A `ziti-ssh-host.v1` config is written on the Ziti controller, by whoever can edit configs there. Each host's owner decides, **per service**, what such a config is allowed to grant on that host. Without an opt-in, a config cannot grant root.
+
+| Setting (`/etc/ziti-ssh-host/env`) | Default | Effect |
+|---|---|---|
+| `ZITI_ALLOW_SUDOERS` | none | Services (comma-separated, or `*`) whose config may set `sudoers_rule`. |
+| `ZITI_ALLOW_GROUPS` | none | Privileged groups a service's config may grant: `<service>:<group>`, or `*:<group>` for every service. Privileged groups are `root`, `sudo`, `admin`, `wheel`, `docker`, `lxd`, `disk`, `shadow`, `libvirt`; any other group may be granted by default. |
+| `ZITI_RESTRICT_GROUPS` | `false` | `true`: a config may grant only groups listed in `ZITI_ALLOW_GROUPS` — use this if custom groups on the host carry sudo rights the built-in list cannot know about. |
+
+A config entry that asks for more than the policy allows **rejects the connection** for that identity on that service (log: `rejecting connection: permissions refused by host grant policy`). Violations are also logged when the config is loaded or reloaded, and `ziti-ssh-host inspect` prints the policy and lists refused entries. The host's own fallbacks (`ZITI_SSH_GROUPS`, `ZITI_SUDOERS_RULE`) are set by the host owner and are never refused.
+
+**Granting root deliberately** — the role-tier example below, where only the ops service may grant root:
+
+```sh
+# /etc/ziti-ssh-host/env on the DB server
+ZITI_SSH_SERVICE=ssh-ops,ssh-db
+ZITI_ALLOW_SUDOERS=ssh-ops
+ZITI_ALLOW_GROUPS=ssh-ops:sudo,ssh-ops:docker
+```
+
+The `ssh-ops` config can now give `ops-alice` the `sudo` group or a `sudoers_rule`; nothing in the `ssh-db` config can, even on the same host.
+
+**Upgrading:** entries that already grant `sudoers_rule` or a privileged group are refused until the host opts in. Run `ziti-ssh-host inspect --service <name>` before upgrading to list them.
 
 ### Multi-service binding
 
@@ -89,7 +134,7 @@ ziti-ssh-host run --ssh-service ssh-ops --ssh-service ssh-db
 
 Ops identities are granted dial access to `ssh-ops` in Ziti service policy; DBA identities are granted dial access to `ssh-db`. An identity granted access to both gets whichever permission set corresponds to the service it dialled.
 
-> **Note:** If the same Ziti identity connects through two different services to the same host at the same time, the Linux user is created once on the first connection and the permissions from that first connection are used for the lifetime of the account. The second service's config is not applied retroactively. This is a known limitation and is logged at info level.
+> **Note:** A Linux account has one set of groups and one sudoers file shared by all its sessions. So while an identity has sessions open through one service, a connection through a **different** service that resolves to **different** permissions is **rejected** (`rejecting connection: account has open sessions through another service with different permissions`); close the open sessions first. A second service with the same permissions is allowed, and a new connection through the same service always applies the current config.
 
 ### Deployment patterns
 
@@ -106,11 +151,108 @@ Each host has its own service (e.g., `ssh-web-01`, `ssh-web-02`) with a fully in
 
 ### Constraints
 
-- **Groups must exist on the host.** `ziti-ssh-host` does not create Linux groups. If a config entry references a group that does not exist, `usermod -aG` will fail. The failure is logged and the session proceeds with the user account created but without the requested group membership.
-- **First-connection-wins for concurrent cross-service sessions.** If the same identity connects through two services simultaneously, the Linux account is created once with the permissions from the first connection. The second service's config is not applied retroactively.
+- **Groups must exist on the host.** `ziti-ssh-host` does not create Linux groups. If a config entry references a group that does not exist, `usermod -G` fails and **the connection is rejected** (`rejecting connection: could not apply permissions`). The identity cannot log in to that host until the config is fixed or the group is created. Check with `ziti-ssh-host inspect` after every config change.
+- **No concurrent sessions with different permissions through different services.** A Linux account has one set of groups and one sudoers file shared by all its sessions. So while an identity has sessions open through one service, a connection through a **different** service that resolves to **different** permissions is **rejected** (`rejecting connection: account has open sessions through another service with different permissions`); close the open sessions first. A second service with the same permissions is allowed, and a new connection through the same service always applies the current config.
 - **Any matched config entry suppresses global fallbacks entirely.** An identity matched by an exact key, a glob pattern, or the `"*"` catch-all receives only what that entry specifies — globals are not merged in.
 - **No config attached is not an error.** `ziti-ssh-host` logs a debug message and uses global fallbacks.
+- **A config that cannot be loaded fails closed.** If a service's `ziti-ssh-host.v1` config cannot be fetched or parsed (for example an invalid `sudoers_rule` or a username collision anywhere in it), per-identity connections on that service are **rejected** (`rejecting connection: permissions config for this service could not be loaded`) until a valid config loads. A failed live reload also discards the previously loaded config rather than keeping it. Fix the config and the next service-changed event reloads it.
 - **`shared` mode is unaffected.** The `ziti-ssh-host.v1` config is consulted only in `per-identity` mode.
+
+---
+
+## Managing account ownership
+
+In `per-identity` mode, `ziti-ssh-host` manages only accounts recorded in its ownership registry, `/var/lib/ziti-ssh-host/owned-users.json`. Two admin subcommands read and extend it; both must run as root.
+
+### `ziti-ssh-host users list`
+
+Lists every registered account with its Ziti identity, UID, creation time, source (`created` by `ziti-ssh-host` or `claimed` by an administrator), and current status. A `UID MISMATCH` status means the account was deleted and recreated outside `ziti-ssh-host`; it will not be managed until the situation is resolved by an administrator.
+
+### `ziti-ssh-host users claim --username <username> --identity <identity>`
+
+Registers an existing account as owned by a Ziti identity. This is the **upgrade path** for accounts created by releases before the registry existed: those accounts are not in the registry, so connections from their identities are rejected with
+
+```
+refusing to manage pre-existing account "<username>" (identity "<identity>"): it was not created by ziti-ssh-host; if it should be, run "ziti-ssh-host users claim"
+```
+
+until claimed. The command refuses unless:
+
+- `--username` equals the username derived from `--identity` (same rules as `ca.DeriveUsername`);
+- the account exists and has a UID of at least 1000;
+- the name is not reserved; and
+- the account is not already registered to a different identity.
+
+Example, after upgrading a host whose identity `dba-alice` already has an account:
+
+```sh
+sudo ziti-ssh-host users claim --username dba-alice --identity dba-alice
+sudo ziti-ssh-host users list
+```
+
+Claims take effect on the next connection; no restart is needed. Only claim accounts you know were created for that identity — claiming hands the account, including its home directory and any sudoers rule the identity's config grants, to that identity.
+
+### Legacy sudoers files
+
+Earlier releases wrote sudoers rules to `/etc/sudoers.d/<username>`; they are now written to `/etc/sudoers.d/ziti-ssh-host-<username>`. For a **registered** account, the old file is removed at daemon startup and on the account's next connection if — and only if — it contains the single `<username> <rule>` line that `ziti-ssh-host` wrote.
+
+For accounts that are **not** registered, a file of that shape is never removed automatically, because administrators often write their own sudoers files the same way. Instead, `ziti-ssh-host run` logs a warning at startup (`legacy-format sudoers file for an account ziti-ssh-host does not manage`) and `ziti-ssh-host users list` lists the files. Review each one: if an earlier `ziti-ssh-host` release wrote it, either delete it or claim the account (`users claim`) so it is migrated. Until then, such a file still grants sudo to that account.
+
+### Rejection log lines
+
+| Log message (prefix) | Meaning |
+|---|---|
+| `rejecting connection: could not apply permissions` (`step` field) | Setting groups or writing/removing the sudoers file failed — usually a group in the config that does not exist on the host, or a sudoers rule `visudo` rejects. Fix the `ziti-ssh-host.v1` entry (or `ZITI_SSH_GROUPS` / `ZITI_SUDOERS_RULE`) or create the group. |
+| `refusing to manage pre-existing account` | Account exists but is not registered. Claim it if it belongs to that identity; otherwise rename or remove the Ziti identity. |
+| `username "<u>" (derived from "<id>") is already in use by Ziti identity` | Two identities derive the same username. Rename one of the identities. |
+| `does not match registered uid` | Account was replaced outside `ziti-ssh-host`. |
+| `account has open sessions through another service with different permissions` | The identity is logged in through another service whose config grants different groups/sudoers. Close those sessions, or give both services the same entry for the identity. |
+| `connection limit reached; closing new connections` | The service already has `--max-connections` (`ZITI_MAX_CONNECTIONS`, default 128) connections open; further ones are closed immediately. Logged at most every 10 s with a count. |
+| `is reserved and will not be managed` / `must not start with '-'` | The identity's derived username is not allowed. Rename the identity. |
+| `rejected connection: invalid per-identity principal` (`ziti-ssh-ca`) | The CA refused to sign for a reserved derived principal (`root`, system accounts, `ubuntu`, `admin`, `ziti`) or one starting with `-`. Rename the identity. |
+
+---
+
+## Host identity (terminator names)
+
+`ziti-ssh connect web-server-prod` asks the Ziti network for the terminator **named** `web-server-prod` on the `ssh` service. In OpenZiti, a terminator name is an address chosen by whoever binds the service (`ziti-ssh-host` uses its own identity name), not a verified identity. The controller only ensures that, at any moment, all terminators with one name belong to the same identity. When the real host is offline, **any identity with Bind on the service** can register that name — OpenZiti does not tell the dialer which identity answered. `ziti-ssh` and `ziti-scp` mitigate this by remembering each address's SSH host key on first use and refusing a changed key (or, for a service dialed directly, asking before trusting an additional pool member's key) — see [Host keys](usage.md#host-keys-trust-on-first-use). That detects impersonation after a first connection, not on it.
+
+What this means in practice:
+
+- **Access control is per service, not per host.** Dial on `ssh` reaches every host bound to `ssh`; Bind on `ssh` lets an identity answer for any host name that is not currently taken. Grant Bind only to host identities (`#ssh-hosts`).
+- **A compromised or misconfigured host identity can impersonate other hosts while they are offline**, receiving what the user types (including `sudo` passwords) and any forwarded agent. This is why `-A` is refused unless `--forward-agent-unverified` is given, and why the CA does not grant `permit-agent-forwarding` by default.
+- **For hosts that need a strong identity guarantee, use one service per host** (or per small group of equally trusted hosts) with a Bind policy naming only that host's identity, and dial the service by name (`ziti-ssh ziggy@ssh-web-server-prod` when `ssh-web-server-prod` is a service). The Ziti policy then enforces who can answer.
+
+Verifiable host identity at the dialer is being pursued upstream (openziti/ziti#4172, a controller-signed circuit token naming the terminating identity; openziti/sdk-golang#980, SDK verification). `ziti-ssh` will verify the host against it once available.
+
+---
+
+## Caller identity verification
+
+`ziti-ssh-ca` (all modes) and `ziti-ssh-host` (`per-identity` mode) identify each caller by the **dialer identity name that the caller's edge router attaches to the connection**. The router derives it from the identity it authenticated, so the client cannot influence it. The separate client-supplied caller ID header is ignored for all decisions. If it differs from the router-supplied name, a warning is logged:
+
+```
+client-supplied caller id does not match router-verified dialer identity; using router-verified identity
+```
+
+The log line includes `dialer_identity` and `claimed_caller_id` fields. A stock `ziti-ssh` client always sends its own identity name, so a mismatch indicates a modified client and is worth investigating.
+
+### Requirement
+
+Every edge router that clients connect through must run **OpenZiti v2.0.0 or later**. Older routers do not attach the dialer identity.
+
+### Symptom: connections rejected
+
+If the router does not supply a dialer identity, the connection is closed (fail closed) and the service logs:
+
+```
+rejected connection: edge router did not supply a dialer identity (OpenZiti v2.0.0+ routers required)
+```
+
+On `ziti-ssh-ca` the client receives no certificate; on `ziti-ssh-host` in `per-identity` mode no Linux user is created and the connection never reaches sshd. Check, in order:
+
+1. **Router version.** Run `ziti edge list edge-routers -j` (full JSON output) and confirm that `versionInfo.version` is v2.0.0 or later for the router the client is connected through. (The default table output does not include versions.)
+2. **Recently created identity.** The router resolves the dialer identity from its local copy of the controller's data model. Retry after a short wait; if the rejection persists for an established identity, collect the edge router's logs for the time of the connection.
 
 ---
 
@@ -219,11 +361,23 @@ ziti edge update identity alice@corp.com --role-attributes 'ssh-staging-clients'
 
 ### What happens on the host (per-identity mode)
 
-When the connection closes, `ziti-ssh-host` sees EOF on the proxied `net.Conn`, decrements the session ref-count for the identity, and runs the normal cleanup sequence when the last session ends: the sudoers file is removed, `loginctl terminate-user` drains the systemd session, and `userdel -r` removes the account and home directory. No special handling is required — revocation flows through the same path as a normal disconnect.
+Revoking an identity does not end SSH sessions that are already open; they continue until they disconnect. When the last session for the identity closes, `ziti-ssh-host` sees EOF on the proxied `net.Conn`, decrements the session ref-count, and removes the identity's sudoers file.
+
+In every mode the account's supplementary groups are cleared at that point. What happens next depends on `ZITI_USER_CLEANUP` and `ZITI_TERMINATE_ON_DISCONNECT`:
+
+| `ZITI_USER_CLEANUP` | `ZITI_TERMINATE_ON_DISCONNECT` | Account and home | Background processes (`nohup`, `tmux`, systemd user services) |
+|---|---|---|---|
+| `false` (default) | `false` (default) | Kept | **Kept running** — a revoked identity's processes, crontab and `at` jobs continue. The daemon logs a startup warning in this configuration. |
+| `false` | `true` | Kept (expired until the next authorized connection) | Ended: the account is expired (`usermod -e 1`, so neither sshd nor cron accepts it until the identity's next authorized connection re-enables it), its crontab and `at` jobs are removed, lingering is disabled, `loginctl terminate-user`, then SIGTERM and SIGKILL to the account's UID |
+| `true` | any | Deleted (`userdel -r`), and the user's files in `/tmp`, `/var/tmp` and `/dev/shm` removed | Ended (same sequence, before deletion) |
+
+The host cannot distinguish a revocation from an ordinary disconnect — it only sees the last session close — so for revocation to also stop running processes, enable `ZITI_TERMINATE_ON_DISCONNECT=true` or `ZITI_USER_CLEANUP=true`. Users then lose background jobs whenever their last session closes. Otherwise an administrator must end them manually on each host (`loginctl terminate-user <username>`, and `userdel -r <username>` to remove the account).
 
 ### Outstanding SSH certificates
 
-Revoking Ziti access does not invalidate the user's SSH certificate — it may still have up to 8 hours of validity remaining. However, the certificate is useless without a live Ziti connection to reach any SSH host, so this is not a practical concern in normal operation. The certificate cannot be used to connect directly to port 22 because that port is firewalled; it can only be used through the Ziti overlay.
+Revoking Ziti access does not invalidate the user's SSH certificate — it may still have up to the CA's certificate TTL of validity remaining (default 5 minutes, `--cert-ttl`). However, the certificate is useless without a live Ziti connection to reach any SSH host. Each certificate carries the `source-address` critical option (default `127.0.0.1/32,::1/128`, `--cert-source-address` on `ziti-ssh-ca`), so sshd accepts it only from loopback — that is, only when the connection arrives through the host's own `ziti-ssh-host` proxy. Even if port 22 is reachable directly (security group, LAN, VPN), sshd rejects the certificate there and logs the source-address mismatch.
+
+Change `--cert-source-address` only if something other than `ziti-ssh-host` on the same machine delivers connections to sshd; `none` removes the restriction and should be paired with a firewall that keeps port 22 unreachable.
 
 If the CA itself needs to be rotated (for example, after a credential compromise), see [CA key rotation](#ca-key-rotation) below.
 
@@ -257,7 +411,7 @@ Once running, `ziti-ssh-host run` continues to track the controller cluster memb
 **Event-driven updates:** Before authenticating, `ziti-ssh-host run` subscribes to the `EventControllerUrlsUpdated` event. This event fires at startup (during `Authenticate`) and again at each hourly session renewal. When it fires, the daemon:
 
 1. Persists the full controller URL list to the identity JSON file (`ztAPIs` field) via `config.PersistZtAPIs`. This atomic write (write-then-rename) ensures the identity file always reflects the live cluster membership so that a process restart can bootstrap from any cluster member, not just the one originally enrolled against.
-2. Fetches the current intermediate CA public keys from the updated controller set and compares them (order-independent) against the contents of `/etc/ssh/ziti_ca.pub`. If the set has changed, the file is rewritten and sshd is reloaded. Additions are logged with the controller URL; removals are logged by count.
+2. Fetches the current intermediate CA public keys from the updated controller set and compares them (order-independent) against the contents of `/etc/ssh/ziti_ca.pub`. If the set has changed, the file is rewritten and sshd is reloaded. Additions are logged with the controller URL; removals are logged by count. **A controller that does not answer never causes a key to be removed:** if any controller in the list cannot be reached, the newly collected keys are merged with the currently trusted ones, so a brief outage does not break logins for certificates its CA signed. A key is removed only when every controller in the cluster list answered and none presented it. An empty controller list is ignored and never persisted. Controller URLs must be `https` with a host and no user info, query or fragment; other entries are logged (`ignoring controller URL`) and dropped before CA keys are fetched or the list is saved, duplicates are removed, and the identity file is only rewritten when the list actually changes. Each controller's CA key is taken from the TLS chain verified against the enrollment root CA, never from extra certificates the server appends. Refreshes from the event and the poller are serialised.
 
 **Periodic poll:** Because `EventControllerUrlsUpdated` only fires at `Authenticate` and the hourly session renewal, the daemon also polls the controller's `/controllers` API endpoint every **5 minutes**. This means a newly added cluster node is trusted within 5 minutes of joining, without waiting up to an hour for the next session renewal.
 
@@ -344,10 +498,13 @@ See [provisioning.md](provisioning.md) for the full systemd unit file examples f
 |---|---|---|
 | `/etc/ziti-ssh-host/identity.json` | 0600 | Enrolled Ziti identity (private key material) |
 | `/etc/ssh/ziti_ca.pub` | 0644 | CA public key in authorized_keys format |
-| `/etc/ssh/sshd_config.d/ziti-ssh.conf` | 0644 | `TrustedUserCAKeys /etc/ssh/ziti_ca.pub` |
+| `/etc/ssh/sshd_config.d/ziti-ssh.conf` | 0644 | `TrustedUserCAKeys /etc/ssh/ziti_ca.pub`, plus a `Match Group ziti-ssh-managed` block setting `AuthorizedKeysFile none` and `AuthorizedKeysCommand none`. Rewritten by `run` at startup if it differs. |
 
 ### `run` (per-identity mode only)
 
 | Path | Mode | Contents |
 |---|---|---|
-| `/var/lib/ziti-ssh-host/managed-users` | 0644 | One derived username per line — the set of Linux users currently managed by the daemon. Used for orphan cleanup on restart. |
+| `/var/lib/ziti-ssh-host/managed-users` | 0600 | One derived username per line — the Linux users with active sessions. Used for orphan cleanup on restart. |
+| `/var/lib/ziti-ssh-host/owned-users.json` | 0600 | Ownership registry: username → Ziti identity, UID, creation time, and whether it was claimed. The only authority for which accounts `ziti-ssh-host` may modify or delete. Never cleared on restart. |
+| `/var/lib/ziti-ssh-host/owned-users.json.lock` | 0600 | Lock file serialising registry access between the daemon and `ziti-ssh-host users`. |
+| `/etc/sudoers.d/ziti-ssh-host-<username>` | 0440 | Sudoers rule for a managed user, when one is resolved. Removed when the last session closes. |
