@@ -24,8 +24,9 @@ import (
 
 // CheckUserFile refuses a file that another user could have written, as
 // OpenSSH does for its per-user client config ("Bad owner or permissions"):
-// it must be owned by the current user (or root) and not writable by group
-// or others. A missing file is not an error.
+// it must be owned by the current user (or root), not writable by others,
+// and not writable by its group unless that group is the owner's private
+// group (Debian/Ubuntu default umask 002). A missing file is not an error.
 func CheckUserFile(path string) error {
 	fi, err := os.Stat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -34,9 +35,11 @@ func CheckUserFile(path string) error {
 	if err != nil {
 		return err
 	}
-	if fi.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("bad permissions on %s (%04o): it must not be writable by group or others (chmod go-w %s)",
-			path, fi.Mode().Perm(), path)
+	// Group write is accepted only for the owner's private group (see
+	// privateGroup), as OpenSSH does; world write never.
+	if perm := fi.Mode().Perm(); perm&0o002 != 0 || (perm&0o020 != 0 && !privateGroup(fi)) {
+		return fmt.Errorf("bad permissions on %s (%04o): it must not be writable by others or by a shared group (chmod go-w %s)",
+			path, perm, path)
 	}
 	if uid, ok := fileOwner(fi); ok && uid != 0 && uid != os.Getuid() {
 		return fmt.Errorf("bad owner of %s (uid %d): it must be owned by you or root", path, uid)

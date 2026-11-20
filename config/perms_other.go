@@ -21,3 +21,5 @@ package config
 import "os"
 
 func fileOwner(os.FileInfo) (int, bool) { return 0, false }
+
+func privateGroup(os.FileInfo) bool { return false }

@@ -130,7 +130,7 @@ Config file at `~/.config/ziti-ssh/config.yaml` (XDG_CONFIG_HOME respected). Fie
 ### SSH Session / SFTP Library (`client/ssh.go`, `client/sftp.go`)
 
 - `NewCertSigner(keyPath string) (ssh.Signer, error)` — loads key and cert; returns `ssh.CertSigner` if cert present. `NewCertSignerPrompt(keyPath, prompt)` additionally asks for the passphrase (`TTYPassphrasePrompt`, `/dev/tty`) when the key is encrypted and no agent holds it; `connect` and `ziti-scp` use it.
-- `config.CheckUserFile(path)` — refuses `config.yaml` / `known_hosts` that are group/world-writable or owned by another user.
+- `config.CheckUserFile(path)` — refuses `config.yaml` / `known_hosts` that are world-writable, group-writable by a shared group (the owner's private group — Debian/Ubuntu umask 002 — is accepted, as in OpenSSH), or owned by another user.
 - `CertNeedsRefresh(certPath string) bool` — true if cert absent or less than 20% of its lifetime remains (between 30 s and 5 min — 1 minute for the default 5-minute certificate).
 - `ReadCAResponse(r) (string, error)` / `ValidateSignedCert(line, pubKeyLine) ([]byte, error)` (`client/certs.go`) — bounded read of the CA reply; returns `*CARejectedError` for `error: …` replies and rejects anything but a user cert for the caller's key, so a bad reply never overwrites a valid cert.
 - `NewSSHClient(conn net.Conn, user, host string, signer ssh.Signer, hostKeyCallback ssh.HostKeyCallback) (*ssh.Client, error)` — performs the SSH handshake and returns a raw `*ssh.Client` for forwarding use cases.

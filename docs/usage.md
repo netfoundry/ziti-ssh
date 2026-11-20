@@ -60,7 +60,7 @@ If a certificate is missing or less than 20% of its lifetime remains (between 30
 
 If the SSH private key is passphrase-protected, `ziti-ssh connect` falls back to the SSH agent (`SSH_AUTH_SOCK`). It locates the matching key in the agent and, if a certificate is present on disk, wraps it as an `ssh.CertSigner` so the certificate is offered during authentication. With the agent the passphrase is never exposed to this process. If no agent holds the key (`SSH_AUTH_SOCK` unset, or the key not added with `ssh-add`), `ziti-ssh connect` and `ziti-scp` ask for the passphrase on the terminal (`Enter passphrase for key '…':`, not echoed); without a terminal they exit with an error.
 
-`ziti-ssh` and `ziti-scp` refuse to use `config.yaml` or the Ziti `known_hosts` file if it is writable by group or others or owned by another user (as OpenSSH does for its own config): another user could otherwise point you at a different identity, key or host. Fix with `chmod go-w <file>`.
+`ziti-ssh` and `ziti-scp` refuse to use `config.yaml` or the Ziti `known_hosts` file if it is writable by others, writable by a group other than your own private group (on Debian/Ubuntu each user has one, and files are created group-writable by default — that is accepted), or owned by another user (as OpenSSH does for its own config): another user could otherwise point you at a different identity, key or host. Fix with `chmod go-w <file>`.
 
 ### Non-interactive command execution
 

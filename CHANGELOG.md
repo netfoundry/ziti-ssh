@@ -154,7 +154,7 @@ See security advisory GHSA-TBD for details.
 
 - When `ziti-ssh` generates a key it no longer passes an empty passphrase: `ssh-keygen` asks for one (Enter for none).
 - A passphrase-protected key that no SSH agent holds is unlocked by asking for the passphrase on the terminal, instead of failing (`client.NewCertSignerPrompt`).
-- `config.yaml` and the Ziti `known_hosts` file are refused if writable by group/others or owned by another user (`config.CheckUserFile`), as OpenSSH does for its client config.
+- `config.yaml` and the Ziti `known_hosts` file are refused if writable by others, writable by a shared group, or owned by another user (`config.CheckUserFile`), as OpenSSH does for its client config. Group write is accepted when the group is the owner's private group (Debian/Ubuntu default umask 002).
 
 #### MFA codes asked for by every client command
 
