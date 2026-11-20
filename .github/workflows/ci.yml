@@ -31,13 +31,15 @@ jobs:
       - name: Build
         run: go build ./...
 
-      # Scan with the same Go toolchain that builds release binaries (the
-      # go.mod toolchain directive), not the action's default of "stable",
-      # so standard-library vulnerabilities in shipped binaries are reported.
-      # go-version-input must be emptied: the action defaults it to "stable"
-      # and setup-go ignores go-version-file whenever go-version is set.
+      # Scan with the Go toolchain that builds release binaries (go.mod's
+      # toolchain directive, installed by setup-go above). govulncheck-action
+      # is not used: its bundled setup-go reads only the go directive (1.26.0)
+      # or defaults to "stable", so it never scanned the release toolchain.
+      # The pinned version is verified against the Go checksum database;
+      # bump it by hand (Dependabot does not track go run versions).
       - name: Vulnerability scan
-        uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1.1.0
-        with:
-          go-version-input: ""
-          go-version-file: go.mod
+        env:
+          GOVULNCHECK_VERSION: v1.9.0
+        run: |
+          go version
+          go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}" ./...
