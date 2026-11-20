@@ -2,11 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased] - 2026-11-19
+## [0.3.0] - 2026-11-20
 
-### Security
+### Security: upgrade required
 
-See security advisory GHSA-TBD for details.
+This release fixes security issues in how the CA and the host daemon identify callers, in per-identity account
+handling, in certificate scope and in the clients. All deployments should upgrade. Before upgrading:
+
+- **OpenZiti routers v2.0.0 or later are required.** The caller's identity is taken only from the router-set dialer
+  identity; connections without it are refused.
+- **Upgrade `ziti-ssh-ca` and `ziti-ssh-host` together.** Certificates are now valid only through the local
+  `ziti-ssh-host` proxy (`source-address`), and derived usernames fold only ASCII case.
+- **Breaking changes:** a `ziti-ssh-host.v1` config may grant privileged groups or a `sudoers_rule` only where the
+  host opts the service in (`ZITI_ALLOW_GROUPS`, `ZITI_ALLOW_SUDOERS`); certificates no longer grant agent forwarding
+  by default, and `ziti-ssh -A` needs `--forward-agent-unverified`; permission keys match `*` and `?` only (`[` and
+  `\` are literal).
+- **Per-identity hosts:** accounts created by earlier releases are not managed until claimed with
+  `ziti-ssh-host users claim --username <u> --identity <id>` (`ziti-ssh-host users list` shows them).
+- **Shared mode:** add the shared account to the `ziti-ssh-managed` group (`usermod -aG ziti-ssh-managed ziggy`) so it
+  can only log in with a CA certificate.
+- **Revocation:** by default a disconnected (or revoked) user's background processes and scheduled jobs keep
+  running. Set `ZITI_TERMINATE_ON_DISCONNECT=true` or `ZITI_USER_CLEANUP=true` on hosts where that is not acceptable.
+
+Details of each change follow.
 
 #### Certificates restricted to the Ziti path (`source-address`)
 

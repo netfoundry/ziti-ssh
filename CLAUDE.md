@@ -420,43 +420,56 @@ The key file should remain mode 0600 and owned by the controller service user. `
 ziti-ssh/
 ├── cmd/
 │   ├── ziti-ssh/
-│   │   ├── main.go         # Full SSH client (connect, sign, enroll, list, mfa)
-│   │   └── oidc.go         # Browser-based OIDC auth flow (browser launch, callback server)
+│   │   ├── main.go         # Full SSH client (connect, proxy, sign, enroll, list, mfa, known-hosts)
+│   │   ├── oidc.go         # Browser-based OIDC auth flow wiring
+│   │   └── main_test.go    # Target/forward parsing, agent-forwarding gate, proxy never prompts
 │   ├── ziti-scp/
-│   │   └── main.go         # SCP-style file copy tool (upload, download, recursive, enroll)
+│   │   ├── main.go         # SCP-style file copy tool (upload, download, recursive, enroll)
+│   │   └── main_test.go    # scp argument parsing
 │   ├── ziti-ssh-ca/
 │   │   ├── main.go         # CA service entry point, run loop, enroll subcommand
-│   │   └── config.go       # config subcommand (print, apply, remove)
+│   │   ├── config.go       # config subcommand (print, apply, remove)
+│   │   ├── ctrltrust.go    # Controller TLS trust for config (cacerts fetch, TOFU, saved bundles)
+│   │   └── *_test.go
 │   └── ziti-ssh-host/
 │       ├── main.go         # enroll, run (multi-service), inspect subcommands
-│       └── users.go        # users list / claim (ownership registry admin)
+│       ├── users.go        # users list / claim (ownership registry admin)
+│       └── main_test.go
 ├── ca/
-│   ├── ca.go               # CA key loading, cert signing, DeriveUsername
-│   └── ca_test.go          # Unit tests for DeriveUsername
+│   ├── ca.go               # CA key loading, cert signing (serial, source-address), DeriveUsername, key allowlist
+│   └── ca_test.go
 ├── client/
-│   ├── ssh.go              # NewCertSigner, CertNeedsRefresh, RunSession, RunCommand
-│   └── sftp.go             # RunSFTP — SFTP file copy over net.Conn
+│   ├── ssh.go              # NewCertSigner(Prompt), CertNeedsRefresh, RunSession, RunCommand, forwards, SOCKS5
+│   ├── certs.go            # CA reply validation, refresh threshold, CertPrincipal
+│   ├── hostkeys.go         # Trust-on-first-use host keys (KnownHosts, NewHostKeyCallback)
+│   ├── sftp.go             # RunSFTP — SFTP file copy over net.Conn
+│   └── *_test.go           # incl. forward_test.go (in-process SSH server), sftp_copy_test.go
 ├── host/
-│   ├── host.go             # ProxyHooks, Proxy, UserManager, PermissionsConfig, sshd config
-│   ├── accounts.go         # accountOps (useradd/usermod/userdel/getent…), username validation, deleteUser
+│   ├── host.go             # ProxyHooks, Proxy(Limited), UserManager, PermissionsConfig, MatchPattern, sshd config
+│   ├── accounts.go         # accountOps (useradd/usermod/userdel/getent…), termination, deleteUser
 │   ├── registry.go         # OwnerRegistry — persistent account ownership (owned-users.json)
 │   ├── claim.go            # ClaimAccount — adopt pre-registry accounts
-│   ├── accounts_test.go    # Account ownership tests using a fake accountOps
-│   ├── caller_test.go      # Router-verified caller identity tests
-│   └── host_test.go        # Unit tests for PermissionsConfig.Resolve and UserManager
+│   ├── grant.go            # GrantPolicy — host-side limits on what configs may grant
+│   └── *_test.go           # accounts (fake accountOps), caller, grant, match, sessions, sshd
 ├── config/
 │   ├── config.go           # Shared configuration (flags + env vars)
-│   └── ztapis.go           # Controller URL persistence (PersistZtAPIs, EventControllerUrlsUpdated)
+│   ├── atomic.go           # AtomicWriteFile
+│   ├── ztapis.go           # Controller URL persistence (PersistZtAPIs)
+│   ├── ctrlurls.go         # Controller URL validation (CheckControllerURL, FilterControllerURLs)
+│   └── perms*.go           # CheckUserFile — refuse files another user could have written
 ├── internal/
-│   ├── mfa/
-│   │   └── mfa.go          # MFA TOTP prompt (terminal, hidden, bounded attempts)
-│   ├── oidc/
-│   │   └── oidc.go         # OIDC authorization code flow (PKCE, token exchange)
-│   └── ratelimit/
-│       ├── ratelimit.go    # Per-identity token-bucket rate limiter
-│       └── ratelimit_test.go
+│   ├── mfa/                # MFA TOTP prompt (terminal, hidden, bounded attempts)
+│   ├── oidc/               # OIDC authorization code flow (PKCE, loopback callback); flow_test.go: fake IdP
+│   └── ratelimit/          # Per-identity token-bucket rate limiter
+├── packaging/              # nfpm configs, postinstall/preremove/postremove scripts, systemd units
 ├── scripts/
-│   └── build-packages.sh   # Builds deb and/or rpm packages into dist/ (FORMAT=deb,rpm ARCHS=amd64,arm64)
+│   ├── build-packages.sh   # Builds deb and/or rpm packages into dist/ (FORMAT=deb,rpm ARCHS=amd64,arm64)
+│   ├── docker-build-packages.sh
+│   └── Dockerfile.packages
+├── suites/                 # ziti-test-suite integration suites (AWS)
+│   ├── ziti-ssh/           # shared mode; install scripts shared by both suites
+│   └── ziti-ssh-per-identity/  # per-identity mode (accounts, grant policy, reload, revocation)
+├── docs/                   # building, configuration, operations, provisioning, usage
 ├── go.mod
 ├── go.sum
 ├── ARCHITECTURE.md         # High-level architecture narrative
