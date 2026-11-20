@@ -160,6 +160,10 @@ See security advisory GHSA-TBD for details.
 
 - `ziti-ssh connect/sign/proxy/list` and `ziti-scp` now ask for an MFA TOTP code when the controller requires one; previously only the `mfa` subcommands did, so other commands could not authenticate an MFA-enrolled identity. Codes are read from the terminal (`/dev/tty`) without echo — never from stdin — and authentication stops after three wrong codes or at end of input (the `mfa` prompt previously looped forever on closed stdin). Shared code in `internal/mfa`.
 
+#### SOCKS5 proxy method negotiation
+
+- `ziti-ssh -D` replies "no acceptable methods" (`0xFF`) and closes when a SOCKS5 client does not offer the no-authentication method, as RFC 1928 requires; previously it always selected no-authentication.
+
 #### Client target parsing
 
 - `ziti-ssh` and `ziti-scp` split `[user@]target` at the last `@` (as OpenSSH does), so per-identity user names such as `alice@corp.com` work (`ziti-ssh alice@corp.com@web1`). Previously the target became `corp.com@web1`.

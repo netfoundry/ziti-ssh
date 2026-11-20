@@ -693,6 +693,13 @@ func handleSocks5Conn(ctx context.Context, sshClient *ssh.Client, conn net.Conn)
 		slog.Debug("socks5: read methods failed", "err", err)
 		return
 	}
+	// Only "no authentication" (0x00) is supported; RFC 1928 §3 requires
+	// replying 0xFF and closing when the client did not offer it.
+	if !bytes.Contains(methods, []byte{0x00}) {
+		slog.Debug("socks5: client offered no acceptable auth method", "methods", methods)
+		_, _ = conn.Write([]byte{0x05, 0xFF})
+		return
+	}
 	// Respond: VER=5, METHOD=0 (no auth).
 	if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
 		slog.Debug("socks5: write auth response failed", "err", err)
