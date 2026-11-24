@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.3.1] - 2026-11-24
 
 Fixes from an end-to-end test of 0.3.0 on Ubuntu 24.04, Ubuntu 26.04 and RHEL 10.
 
