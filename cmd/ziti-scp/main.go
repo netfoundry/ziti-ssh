@@ -298,11 +298,7 @@ func runSign(p signParams) error {
 	}
 	defer conn.Close()
 
-	if _, err := fmt.Fprintf(conn, "%s\n", pubKeyLine); err != nil {
-		return fmt.Errorf("send public key to CA: %w", err)
-	}
-
-	certLine, err := client.ReadCAResponse(conn)
+	certLine, err := client.RequestCert(conn, pubKeyLine)
 	if err != nil {
 		return err
 	}
@@ -612,8 +608,8 @@ Examples:
   ziti-scp file1 file2 alice@web-server:/remote/dir/
 
 Certificates are obtained from the ziti-ssh-ca service and cached in
-~/.ssh/<key>-cert.pub, refreshed automatically when fewer than 5 minutes
-of validity remain.`,
+~/.ssh/<key>-cert.pub, refreshed automatically when less than 20% of
+their lifetime remains (between 30 s and 5 min).`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if versionFlag {
 				return nil

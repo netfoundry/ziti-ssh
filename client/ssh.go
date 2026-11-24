@@ -23,8 +23,8 @@
 //     exists, wraps it in an ssh.CertSigner so the certificate
 //     is presented during authentication.
 //
-//   - CertNeedsRefresh   — returns true when the cert file is missing or will
-//     expire within 5 minutes.
+//   - CertNeedsRefresh   — returns true when the cert file is missing or less
+//     than 20% of its lifetime remains (between 30 s and 5 min).
 //
 //   - NewSSHClient       — performs the SSH handshake over a pre-dialed net.Conn
 //     and returns an *ssh.Client ready for sessions or forwards.
@@ -60,6 +60,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -301,7 +302,7 @@ func RunSession(conn net.Conn, user, host string, signer ssh.Signer, forwardAgen
 
 	clientConn, chans, reqs, err := ssh.NewClientConn(conn, host, cfg)
 	if err != nil {
-		return fmt.Errorf("SSH handshake with %q: %w", host, err)
+		return handshakeError(host, err)
 	}
 	c := ssh.NewClient(clientConn, chans, reqs)
 	defer c.Close()
@@ -445,7 +446,7 @@ func RunCommand(conn net.Conn, user, host, command string, signer ssh.Signer, ho
 
 	clientConn, chans, reqs, err := ssh.NewClientConn(conn, host, cfg)
 	if err != nil {
-		return fmt.Errorf("SSH handshake with %q: %w", host, err)
+		return handshakeError(host, err)
 	}
 	c := ssh.NewClient(clientConn, chans, reqs)
 	defer c.Close()
@@ -487,7 +488,7 @@ func NewSSHClient(conn net.Conn, user, host string, signer ssh.Signer, hostKeyCa
 	}
 	clientConn, chans, reqs, err := ssh.NewClientConn(conn, host, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("SSH handshake with %q: %w", host, err)
+		return nil, handshakeError(host, err)
 	}
 	return ssh.NewClient(clientConn, chans, reqs), nil
 }
@@ -813,4 +814,18 @@ func biCopy(ctx context.Context, a, b net.Conn) {
 	case <-done:
 	case <-ctx.Done():
 	}
+}
+
+// handshakeError wraps an SSH handshake failure. When the connection closed
+// before authentication (EOF), ziti-ssh-host usually refused the identity
+// after the Ziti dial succeeded — host grant policy, sessions open through
+// another service with different permissions, or a config it could not load —
+// and the reason is only in the host's log, so say where to look.
+func handshakeError(host string, err error) error {
+	if errors.Is(err, io.EOF) || strings.Contains(err.Error(), "connection closed") {
+		return fmt.Errorf("SSH handshake with %q: %w (the host closed the connection before SSH "+
+			"authentication: ziti-ssh-host may have refused this identity; the reason is in its log, "+
+			"journalctl -u ziti-ssh-host)", host, err)
+	}
+	return fmt.Errorf("SSH handshake with %q: %w", host, err)
 }

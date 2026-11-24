@@ -73,7 +73,7 @@ func RunSFTP(
 
 	clientConn, chans, reqs, err := ssh.NewClientConn(conn, host, cfg)
 	if err != nil {
-		return fmt.Errorf("SSH handshake with %q: %w", host, err)
+		return handshakeError(host, err)
 	}
 	sshClient := ssh.NewClient(clientConn, chans, reqs)
 	defer sshClient.Close()
