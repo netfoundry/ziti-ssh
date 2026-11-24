@@ -6,6 +6,18 @@ CONF_DIR="${ZITI_SSH_CA_CONF_DIR:-/etc/ziti-ssh-ca}"
 DROPIN_DIR="${ZITI_SSH_CA_DROPIN_DIR:-/etc/systemd/system/ziti-ssh-ca.service.d}"
 DROPIN_FILE="${DROPIN_DIR}/10-controller-user.conf"
 DROPIN_MARKER="# Managed by the ziti-ssh-ca package"
+SYSTEMD_DIR="${ZITI_SSH_SYSTEMD_DIR:-/run/systemd/system}"
+
+# is_upgrade reports whether this run upgrades an installed package:
+# deb postinst "configure <old-version>", rpm %post with $1 >= 2. Fresh
+# installs, reconfigures without an old version and dpkg abort-* calls are not.
+is_upgrade() {
+    case "${1:-}" in
+        configure) [ -n "${2:-}" ] ;;
+        [2-9] | [1-9][0-9]*) true ;;
+        *) false ;;
+    esac
+}
 
 if [ ! -f "${CONF_DIR}/env" ]; then
     cat > "${CONF_DIR}/env" <<'ENVEOF'
@@ -131,6 +143,16 @@ User=ziti. If the controller runs as a different user, run:
 EOF
 fi
 
-if [ -d /run/systemd/system ]; then
+if [ -d "${SYSTEMD_DIR}" ]; then
     systemctl daemon-reload || true
+    # On upgrade, restart the service if it is running so the new binary takes
+    # effect (try-restart leaves a stopped service stopped). Without this, the
+    # old daemon keeps running until the next restart or reboot.
+    if is_upgrade "$@"; then
+        if systemctl try-restart ziti-ssh-ca.service; then
+            echo "ziti-ssh-ca: restarted ziti-ssh-ca.service (if it was running) to use the new version" >&2
+        else
+            echo "ziti-ssh-ca: warning: could not restart ziti-ssh-ca.service; run: systemctl restart ziti-ssh-ca.service" >&2
+        fi
+    fi
 fi

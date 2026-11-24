@@ -1,8 +1,23 @@
 #!/bin/sh
 set -e
 
-if [ ! -f /etc/ziti-ssh-host/env ]; then
-    cat > /etc/ziti-ssh-host/env <<'ENVEOF'
+# Paths (overridable only to allow testing this script outside a real install).
+CONF_DIR="${ZITI_SSH_HOST_CONF_DIR:-/etc/ziti-ssh-host}"
+SYSTEMD_DIR="${ZITI_SSH_SYSTEMD_DIR:-/run/systemd/system}"
+
+# is_upgrade reports whether this run upgrades an installed package:
+# deb postinst "configure <old-version>", rpm %post with $1 >= 2. Fresh
+# installs, reconfigures without an old version and dpkg abort-* calls are not.
+is_upgrade() {
+    case "${1:-}" in
+        configure) [ -n "${2:-}" ] ;;
+        [2-9] | [1-9][0-9]*) true ;;
+        *) false ;;
+    esac
+}
+
+if [ ! -f "${CONF_DIR}/env" ]; then
+    cat > "${CONF_DIR}/env" <<'ENVEOF'
 # ziti-ssh-host environment configuration
 # Uncomment and set these variables before starting the service.
 
@@ -60,7 +75,7 @@ if [ ! -f /etc/ziti-ssh-host/env ]; then
 # RESTRICT_GROUPS: true = config may grant only groups listed in ALLOW_GROUPS.
 #ZITI_RESTRICT_GROUPS=false
 ENVEOF
-    chmod 640 /etc/ziti-ssh-host/env
+    chmod 640 "${CONF_DIR}/env"
 fi
 
 # Accounts in this group may only log in with a CA certificate (the sshd
@@ -70,6 +85,16 @@ if command -v groupadd >/dev/null 2>&1; then
     groupadd -f --system ziti-ssh-managed
 fi
 
-if [ -d /run/systemd/system ]; then
+if [ -d "${SYSTEMD_DIR}" ]; then
     systemctl daemon-reload || true
+    # On upgrade, restart the service if it is running so the new binary takes
+    # effect (try-restart leaves a stopped service stopped). Without this, the
+    # old daemon keeps running until the next restart or reboot.
+    if is_upgrade "$@"; then
+        if systemctl try-restart ziti-ssh-host.service; then
+            echo "ziti-ssh-host: restarted ziti-ssh-host.service (if it was running) to use the new version" >&2
+        else
+            echo "ziti-ssh-host: warning: could not restart ziti-ssh-host.service; run: systemctl restart ziti-ssh-host.service" >&2
+        fi
+    fi
 fi
