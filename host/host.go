@@ -259,7 +259,9 @@ func ProxyLimited(listener net.Listener, target string, hooks *ProxyHooks, wg *s
 		conn, err := listener.Accept()
 		if err != nil {
 			// listener was closed — normal shutdown
-			slog.Info("proxy listener closed", "err", err)
+			// Log the message only: slog formats error values with %+v, which
+			// prints the SDK's stack trace for an ordinary listener close.
+			slog.Info("proxy listener closed", "reason", err.Error())
 			return
 		}
 		if slots != nil {
@@ -343,7 +345,11 @@ func proxyConn(src net.Conn, target string, hooks *ProxyHooks) {
 	// OnConnect lifecycle — must succeed before we proxy anything.
 	if hooks != nil && hooks.OnConnect != nil && username != "" {
 		if err := hooks.OnConnect(username); err != nil {
-			slog.Error("OnConnect hook failed", "username", username, "err", err)
+			if IsLogged(err) {
+				slog.Debug("OnConnect hook rejected connection", "username", username, "err", err.Error())
+			} else {
+				slog.Error("OnConnect hook failed", "username", username, "err", err.Error())
+			}
 			return
 		}
 	}
@@ -490,16 +496,63 @@ func atomicWriteFile(dest string, data []byte, mode os.FileMode) error {
 	return nil
 }
 
+// loggedError marks an error whose details have already been logged where it
+// was decided (with the service, identity and reason), so Proxy does not log
+// the same rejection a second time.
+type loggedError struct{ err error }
+
+func (e *loggedError) Error() string { return e.err.Error() }
+func (e *loggedError) Unwrap() error { return e.err }
+
+// Logged marks err as already logged; errors.Is/As still see the wrapped error.
+func Logged(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &loggedError{err: err}
+}
+
+// IsLogged reports whether err (or an error it wraps) was marked by Logged.
+func IsLogged(err error) bool {
+	var le *loggedError
+	return errors.As(err, &le)
+}
+
 // sshdState describes how sshd is running under systemd.
 type sshdState struct {
-	ServiceActive bool // ssh.service is active (a long-running sshd daemon)
-	SocketActive  bool // ssh.socket is active
-	SocketPerConn bool // ssh.socket has Accept=yes (one sshd per connection)
+	Service       string // active sshd service unit ("ssh.service" on Debian/Ubuntu, "sshd.service" on RHEL), or ""
+	Socket        string // active sshd socket unit ("ssh.socket" / "sshd.socket"), or ""
+	ServiceActive bool   // the service unit is active (a long-running sshd daemon)
+	SocketActive  bool   // the socket unit is active
+	SocketPerConn bool   // the socket unit has Accept=yes (one sshd per connection)
+}
+
+// sshdServiceUnits and sshdSocketUnits are the systemd unit names sshd uses:
+// Debian and Ubuntu name them ssh.*, RHEL and Fedora sshd.* (on Ubuntu,
+// sshd.service is an alias of ssh.service).
+var (
+	sshdServiceUnits = []string{"ssh.service", "sshd.service"}
+	sshdSocketUnits  = []string{"ssh.socket", "sshd.socket"}
+)
+
+// firstActiveUnit returns the first of names for which isActive is true, or "".
+func firstActiveUnit(isActive func(unit string) bool, names ...string) string {
+	for _, n := range names {
+		if isActive(n) {
+			return n
+		}
+	}
+	return ""
+}
+
+// unitActive reports whether a systemd unit is active.
+func unitActive(unit string) bool {
+	return command("systemctl", "is-active", "--quiet", unit).Run() == nil
 }
 
 // sshdReloadPlan is what ReloadSSHD does for a given sshdState.
 type sshdReloadPlan struct {
-	ReloadService bool // run "systemctl reload ssh"
+	ReloadService bool // run "systemctl reload <service unit>"
 	HUPOrphans    bool // SIGHUP top-level sshd processes (PPID 1)
 }
 
@@ -533,33 +586,33 @@ func ReloadSSHD() error {
 	// tree (including sshd_config.d drop-ins) and checks that referenced files
 	// such as TrustedUserCAKeys exist and are well-formed. Failing here is
 	// preferable to reloading with a broken config that locks out cert auth.
-	if out, err := exec.Command("sshd", "-t").CombinedOutput(); err != nil {
+	if out, err := command("sshd", "-t").CombinedOutput(); err != nil {
 		return fmt.Errorf("sshd config validation failed (not reloading): %w\n%s", err, strings.TrimSpace(string(out)))
 	}
 
 	st := sshdState{
-		ServiceActive: exec.Command("systemctl", "is-active", "--quiet", "ssh.service").Run() == nil,
-		SocketActive:  exec.Command("systemctl", "is-active", "--quiet", "ssh.socket").Run() == nil,
+		Service: firstActiveUnit(unitActive, sshdServiceUnits...),
+		Socket:  firstActiveUnit(unitActive, sshdSocketUnits...),
 	}
+	st.ServiceActive = st.Service != ""
+	st.SocketActive = st.Socket != ""
 	if st.SocketActive {
-		out, err := exec.Command("systemctl", "show", "ssh.socket", "-p", "Accept", "--value").Output()
+		out, err := command("systemctl", "show", st.Socket, "-p", "Accept", "--value").Output()
 		// If the mode cannot be determined, assume per-connection (Accept=yes)
 		// so live sessions are never signalled.
 		st.SocketPerConn = err != nil || strings.TrimSpace(string(out)) != "no"
 	}
 	plan := planSSHDReload(st)
-	slog.Info("reloading sshd", "service_active", st.ServiceActive, "socket_active", st.SocketActive,
+	slog.Info("reloading sshd", "service", st.Service, "socket", st.Socket,
 		"socket_per_connection", st.SocketPerConn, "reload_service", plan.ReloadService, "hup_orphans", plan.HUPOrphans)
 
 	if plan.ReloadService {
-		cmd := exec.Command("systemctl", "reload", "ssh.service")
-		cmd.Env = childEnv()
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("systemctl reload ssh.service: %w (output: %s)", err, out)
+		if out, err := command("systemctl", "reload", st.Service).CombinedOutput(); err != nil {
+			return fmt.Errorf("systemctl reload %s: %w (output: %s)", st.Service, err, out)
 		}
 	}
 	if plan.HUPOrphans {
-		if err := exec.Command("pkill", "-HUP", "-P", "1", "-x", "sshd").Run(); err != nil {
+		if err := command("pkill", "-HUP", "-P", "1", "-x", "sshd").Run(); err != nil {
 			slog.Debug("pkill sshd: no additional listener processes to signal", "err", err)
 		}
 	}
@@ -569,6 +622,14 @@ func ReloadSSHD() error {
 
 	slog.Info("sshd reloaded")
 	return nil
+}
+
+// command is exec.Command with the child environment from childEnv. Every
+// external program ziti-ssh-host runs must be started through it.
+func command(name string, args ...string) *exec.Cmd {
+	cmd := exec.Command(name, args...)
+	cmd.Env = childEnv()
+	return cmd
 }
 
 // childEnv returns the current process environment with NOTIFY_SOCKET removed.
@@ -788,7 +849,7 @@ func (m *UserManager) checkPermissionConflict(username, service string, perms Id
 	}
 	slog.Error("rejecting connection: account has open sessions through another service with different permissions",
 		"username", username, "service", service, "active_service", prev, "sessions", m.sessions[username])
-	return fmt.Errorf("%w (%q); close those sessions first", ErrPermissionConflict, prev)
+	return Logged(fmt.Errorf("%w (%q); close those sessions first", ErrPermissionConflict, prev))
 }
 
 // samePermissions reports whether a and b grant the same groups (in any
@@ -814,7 +875,7 @@ func (m *UserManager) applyPermissions(zitiIdentity, username string, perms Iden
 	reject := func(what string, err error) error {
 		slog.Error("rejecting connection: could not apply permissions",
 			"identity", zitiIdentity, "username", username, "step", what, "err", err)
-		return fmt.Errorf("identity %q: %s for %q: %w", zitiIdentity, what, username, err)
+		return Logged(fmt.Errorf("identity %q: %s for %q: %w", zitiIdentity, what, username, err))
 	}
 	groups := withManagedGroup(perms.Groups)
 	if err := m.ops.SetGroups(username, groups); err != nil {
@@ -1184,8 +1245,7 @@ func createSudoers(username, rule string) error {
 	}
 
 	// visudo -c -f validates syntax without installing the file.
-	visudo := exec.Command("visudo", "-c", "-f", tmpPath)
-	visudo.Env = childEnv()
+	visudo := command("visudo", "-c", "-f", tmpPath)
 	if out, err := visudo.CombinedOutput(); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("visudo validation failed for %q: %w (output: %s)", username, err, out)
