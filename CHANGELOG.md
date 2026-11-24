@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.2] - 2026-11-24
+
+### Fixed
+
+- **Package upgrades restart the services:** upgrading the `ziti-ssh-host` or `ziti-ssh-ca` package now restarts the
+  service if it is running (`systemctl try-restart`; fresh installs and stopped services are left alone). Before,
+  the old daemon kept running after an upgrade until it was restarted — Ubuntu's `needrestart` usually did that, but
+  RHEL-family systems and Debian without `needrestart` kept the previous version, including after upgrading to 0.3.0
+  for its security fixes. Upgrading to this release restarts the services; a host that was upgraded earlier and not
+  restarted since may still run its previous version — see `docs/provisioning.md` → Upgrading.
+
 ## [0.3.1] - 2026-11-24
 
 Fixes from an end-to-end test of 0.3.0 on Ubuntu 24.04, Ubuntu 26.04 and RHEL 10.

@@ -464,7 +464,7 @@ ziti-ssh/
 │   ├── mfa/                # MFA TOTP prompt (terminal, hidden, bounded attempts)
 │   ├── oidc/               # OIDC authorization code flow (PKCE, loopback callback); flow_test.go: fake IdP
 │   └── ratelimit/          # Per-identity token-bucket rate limiter
-├── packaging/              # nfpm configs, postinstall/preremove/postremove scripts, systemd units
+├── packaging/              # nfpm configs, postinstall/preremove/postremove scripts (try-restart on upgrade; scripts_test.go runs them against stubs), systemd units
 ├── scripts/
 │   ├── build-packages.sh   # Builds deb and/or rpm packages into dist/ (FORMAT=deb,rpm ARCHS=amd64,arm64)
 │   ├── docker-build-packages.sh
