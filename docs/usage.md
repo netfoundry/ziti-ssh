@@ -60,6 +60,8 @@ If a certificate is missing or less than 20% of its lifetime remains (between 30
 
 If the SSH private key is passphrase-protected, `ziti-ssh connect` falls back to the SSH agent (`SSH_AUTH_SOCK`). It locates the matching key in the agent and, if a certificate is present on disk, wraps it as an `ssh.CertSigner` so the certificate is offered during authentication. With the agent the passphrase is never exposed to this process. If no agent holds the key (`SSH_AUTH_SOCK` unset, or the key not added with `ssh-add`), `ziti-ssh connect` and `ziti-scp` ask for the passphrase on the terminal (`Enter passphrase for key '…':`, not echoed); without a terminal they exit with an error.
 
+If the connection fails with `ssh: handshake failed: EOF` (or `connection closed for writes`), the Ziti dial succeeded but the host closed the connection before SSH authentication — in per-identity mode, `ziti-ssh-host` refused your identity (for example the host grant policy, or a session open through another service with different permissions). The host's log (`journalctl -u ziti-ssh-host`) has the reason; see [Rejection log lines](operations.md#rejection-log-lines).
+
 `ziti-ssh` and `ziti-scp` refuse to use `config.yaml` or the Ziti `known_hosts` file if it is writable by others, writable by a group other than your own private group (on Debian/Ubuntu each user has one, and files are created group-writable by default — that is accepted), or owned by another user (as OpenSSH does for its own config): another user could otherwise point you at a different identity, key or host. Fix with `chmod go-w <file>`.
 
 ### Non-interactive command execution
@@ -109,7 +111,7 @@ This catches a host being impersonated **after** you have connected to it once; 
 
 ## Port forwarding
 
-`ziti-ssh connect` supports the same `-L`, `-R`, and `-D` forwarding flags as `ssh(1)`. All forwards run over the Ziti overlay — no port 22 exposure required.
+`ziti-ssh connect` — and the bare `ziti-ssh <target>` form — supports the same `-L`, `-R`, and `-D` forwarding flags as `ssh(1)`. All forwards run over the Ziti overlay — no port 22 exposure required.
 
 Write IPv6 addresses in brackets, as with `ssh`: `-L [::1]:8080:[2001:db8::1]:80`, `-D [::1]:1080`. Ports must be 1–65535.
 

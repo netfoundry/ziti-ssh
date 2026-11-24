@@ -90,7 +90,7 @@ Each `ziti-ssh-host` instance listens on a Ziti service with its identity name a
 
 Seven subcommands:
 
-**`connect [user@]<target>`** (also the default when a bare argument is given):
+**`connect [user@]<target>`** (also the default when a bare argument is given; the bare form takes the same flags, `root.Flags().AddFlagSet(connectCmd.Flags())`):
 - Auto-refreshes the SSH cert if missing or less than 20% of its lifetime remains (between 30 s and 5 min — 1 minute for the default 5-minute certificate).
 - Resolves whether the target is a direct Ziti service name or a terminator address on `--ssh-service`.
 - Uses `ziti.DialOptions{Identity: terminatorAddr}` when dialling via a terminator.
@@ -132,6 +132,7 @@ Config file at `~/.config/ziti-ssh/config.yaml` (XDG_CONFIG_HOME respected). Fie
 - `NewCertSigner(keyPath string) (ssh.Signer, error)` — loads key and cert; returns `ssh.CertSigner` if cert present. `NewCertSignerPrompt(keyPath, prompt)` additionally asks for the passphrase (`TTYPassphrasePrompt`, `/dev/tty`) when the key is encrypted and no agent holds it; `connect` and `ziti-scp` use it.
 - `config.CheckUserFile(path)` — refuses `config.yaml` / `known_hosts` that are world-writable, group-writable by a shared group (the owner's private group — Debian/Ubuntu umask 002 — is accepted, as in OpenSSH), or owned by another user.
 - `CertNeedsRefresh(certPath string) bool` — true if cert absent or less than 20% of its lifetime remains (between 30 s and 5 min — 1 minute for the default 5-minute certificate).
+- `RequestCert(rw, pubKeyLine) (string, error)` (`client/certs.go`) — sends the key and reads the reply; if the write fails (the CA refuses before reading, e.g. rate limit) it still reads the reply and returns the CA's `*CARejectedError`. Used by `ziti-ssh` and `ziti-scp`.
 - `ReadCAResponse(r) (string, error)` / `ValidateSignedCert(line, pubKeyLine) ([]byte, error)` (`client/certs.go`) — bounded read of the CA reply; returns `*CARejectedError` for `error: …` replies and rejects anything but a user cert for the caller's key, so a bad reply never overwrites a valid cert.
 - `NewSSHClient(conn net.Conn, user, host string, signer ssh.Signer, hostKeyCallback ssh.HostKeyCallback) (*ssh.Client, error)` — performs the SSH handshake and returns a raw `*ssh.Client` for forwarding use cases.
 - `RunSession(conn net.Conn, user, host string, signer ssh.Signer, forwardAgent bool, hostKeyCallback ssh.HostKeyCallback) error` — PTY SSH session over an existing `net.Conn`; when `forwardAgent` is true, calls `ForwardAgent` before `session.Shell()`.
@@ -366,6 +367,8 @@ ziti-ssh web-server-prod
 With no `user@`, `ziti-ssh` and `ziti-scp` use the certificate's principal — in per-identity mode the CA issues it for the identity's derived Linux username (`client.CertPrincipal`). An explicit user must be that derived name, not the Ziti identity name: identity `Alice@Corp.com` logs in as `alice_corp_com` (`ziti-ssh alice_corp_com@web-server-prod`); `alice@corp.com@web-server-prod` is refused by sshd because it does not match the certificate.
 
 ## SSH Host Configuration
+
+`host.ReloadSSHD` validates with `sshd -t`, then reloads the active service unit (`ssh.service` on Debian/Ubuntu, `sshd.service` on RHEL; `firstActiveUnit`) and SIGHUPs leftover PPID-1 listeners unless an `Accept=yes` socket is in use (`planSSHDReload`). All external commands in `host/` go through `command()` (strips `NOTIFY_SOCKET`). Rejections that already logged their reason return `host.Logged(err)` so `Proxy` does not log them again.
 
 Written by `ziti-ssh-host enroll` to `/etc/ssh/sshd_config.d/ziti-ssh.conf` (and refreshed by `run` at startup if it differs, e.g. after an upgrade — `host.EnsureSSHDDropIn`):
 

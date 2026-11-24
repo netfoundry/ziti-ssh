@@ -86,7 +86,7 @@ Three subcommands share persistent flags (`--identity`, `--ca-service`, `--ziti-
 3. Marshal the resulting config to JSON and write it to `/etc/ziti-ssh-host/identity.json` (mode 0600, parent dir mode 0700).
 4. Call `intermediateCAPublicKey(cfg)` to extract the intermediate CA public key from the enrollment response (see below). No network call to `ssh-ca` is required.
 5. Call `host.WriteSSHConfig` to write `/etc/ssh/ziti_ca.pub` and `/etc/ssh/sshd_config.d/ziti-ssh.conf`.
-6. Call `host.ReloadSSHD` to make sshd pick up the new config: validate with `sshd -t`, `systemctl reload ssh.service` if it is running (including when `ssh.socket` with `Accept=no` has started it, the Ubuntu 22.10+ default), and send SIGHUP to any leftover top-level sshd listeners (PPID 1) — skipped only for an `Accept=yes` socket, where every connection's sshd has PPID 1.
+6. Call `host.ReloadSSHD` to make sshd pick up the new config: validate with `sshd -t`, `systemctl reload` of the running sshd service (`ssh.service` on Debian/Ubuntu, `sshd.service` on RHEL-family systems) (including when `ssh.socket` with `Accept=no` has started it, the Ubuntu 22.10+ default), and send SIGHUP to any leftover top-level sshd listeners (PPID 1) — skipped only for an `Accept=yes` socket, where every connection's sshd has PPID 1.
 
 **Intermediate CA extraction:**
 

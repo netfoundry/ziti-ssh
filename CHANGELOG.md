@@ -2,6 +2,46 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+Fixes from an end-to-end test of 0.3.0 on Ubuntu 24.04, Ubuntu 26.04 and RHEL 10.
+
+### Fixed
+
+- **`ziti-ssh-host` on RHEL-family systems:** sshd reloads now find `sshd.service` / `sshd.socket` as well as
+  Debian's `ssh.service` / `ssh.socket` and run `systemctl reload` on the active unit. Before, RHEL hosts reached sshd
+  only through the SIGHUP fallback and logged `service_active=false`. The log line now names the units
+  (`service=…`, `socket=…`).
+- **`ziti-ssh-host`:** no more `Got notification message from PID …, but reception only permitted for main PID`
+  warnings from systemd (seen with systemd 255): every external command now runs without `NOTIFY_SOCKET`.
+- **`ziti-ssh-host`:** a normal shutdown no longer logs a Go stack trace with `proxy listener closed`.
+- **`ziti-ssh-host`:** each rejected per-identity connection is logged once, by the check that rejected it, instead
+  of also as `OnConnect hook failed`.
+- **`ziti-ssh-host inspect`:** wildcard keys (`*`, `dba-*`) show `(pattern)` instead of a derived username such as
+  `_`.
+- **`ziti-ssh` / `ziti-scp`:** a rate-limited certificate request reports `CA refused the request: rate limit
+  exceeded` every time; before, it was sometimes reported as `send public key to CA: connection closed for writes`.
+- **`ziti-ssh`:** the bare form accepts the `connect` flags (`ziti-ssh -N -L 8080:db:5432 web-server-prod`); only
+  `ziti-ssh connect …` did before.
+- **`ziti-ssh`, `ziti-ssh-ca`, `ziti-ssh-host`:** runtime errors (for example a changed host key) no longer print the
+  full usage text; flag and argument errors still do.
+- **`ziti-ssh` / `ziti-scp` help:** the certificate refresh rule is described correctly (less than 20% of the lifetime
+  left, between 30 s and 5 min).
+
+### Changed
+
+- **`ziti-ssh` / `ziti-scp`:** when the host closes the connection before SSH authentication (`handshake failed:
+  EOF`), the error says that `ziti-ssh-host` may have refused the identity and that its log has the reason.
+
+### Documentation
+
+- `docs/provisioning.md`: `ziti edge update config` takes the JSON with `--data`; the sshd reload on enrollment is
+  described for RHEL too.
+- `docs/operations.md`: the `ziti-ssh-managed` block also overrides an `AuthorizedKeysCommand` given on sshd's
+  command line (EC2 Instance Connect), and the expected `AuthorizedKeysCommand path is not absolute` log line;
+  host grant policy and unloadable config added to the rejection log table.
+- `docs/usage.md`: what `handshake failed: EOF` means; forward flags work without `connect`.
+
 ## [0.3.0] - 2026-11-20
 
 ### Security: upgrade required
