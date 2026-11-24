@@ -22,7 +22,7 @@ curl -sSL https://get.netfoundry.io/linux-install.bash | sudo bash -s ziti-ssh
 curl -sSL https://get.netfoundry.io/linux-install.bash | sudo bash -s ziti-scp
 ```
 
-The install script configures the repository and installs the latest stable package. Subsequent upgrades are handled by the system package manager (`apt upgrade` / `yum update`).
+The install script configures the repository and installs the latest stable package. Subsequent upgrades are handled by the system package manager (`apt upgrade` / `yum update`); see [Upgrading](provisioning.md#upgrading) for restarting the services.
 
 ### Verifying packages
 

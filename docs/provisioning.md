@@ -514,6 +514,20 @@ go build -o /usr/local/bin/ziti-scp  ./cmd/ziti-scp
 
 ---
 
+## Upgrading
+
+Upgrade with the system package manager (`apt-get install --only-upgrade ziti-ssh-host`, `dnf upgrade ziti-ssh-host`, and likewise for `ziti-ssh-ca`). Upgrading `ziti-ssh-host` or `ziti-ssh-ca` to 0.3.2 or later restarts the service if it is running (`systemctl try-restart`, run by the new package's install script), so the new version takes effect at once; a stopped service stays stopped. A restart of `ziti-ssh-host` stops new connections and gives open sessions up to 30 seconds to finish before closing them ([Graceful shutdown](operations.md#graceful-shutdown)), so upgrade hosts when that is acceptable.
+
+**Hosts upgraded to 0.3.1 or earlier:** upgrades to those versions did not restart the service, so the version that was running before may still be running. Ubuntu's `needrestart` usually restarted it during `apt upgrade`; on RHEL-family systems, and on Debian without `needrestart`, it did not. To check, look at the running process's executable: `(deleted)` means it is the replaced binary. Then restart the service (or upgrade to 0.3.2+, which restarts it):
+
+```sh
+sudo readlink /proc/$(systemctl show -p MainPID --value ziti-ssh-host)/exe   # or ziti-ssh-ca
+# /usr/bin/ziti-ssh-host (deleted)  -> still the previous version
+sudo systemctl restart ziti-ssh-host
+```
+
+---
+
 ## Uninstalling
 
 Packages install binaries to `/usr/bin` (earlier releases used `/usr/local/bin`; upgrading moves them automatically).
