@@ -446,11 +446,7 @@ func runSign(p signParams) error {
 	}
 	defer conn.Close()
 
-	if _, err := fmt.Fprintf(conn, "%s\n", pubKeyLine); err != nil {
-		return fmt.Errorf("send public key to CA: %w", err)
-	}
-
-	certLine, err := client.ReadCAResponse(conn)
+	certLine, err := client.RequestCert(conn, pubKeyLine)
 	if err != nil {
 		return err
 	}
@@ -1235,10 +1231,17 @@ func runMFARemove(identityFile string, zitiTimeout time.Duration) error {
 var version = "dev"
 
 // connectCmd is declared at package scope so that the root command's RunE can
-// reference it after it is assigned in main().
+// reference it after it is assigned in newRootCmd().
 var connectCmd *cobra.Command
 
 func main() {
+	if err := newRootCmd().Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+// newRootCmd builds the ziti-ssh command tree.
+func newRootCmd() *cobra.Command {
 	var (
 		// Persistent flags (available to every subcommand).
 		identityFlag    string
@@ -1260,7 +1263,8 @@ func main() {
 When invoked with a target argument it opens an interactive SSH session using
 short-lived SSH certificates. Certificates are obtained from the ziti-ssh-ca
 service and cached in ~/.ssh/<key>-cert.pub. They are refreshed automatically
-when fewer than 5 minutes of validity remain.
+when less than 20% of their lifetime remains (between 30 s and 5 min; 1 minute
+for the default 5-minute certificate).
 
 If a command is provided after the target (after -- or as trailing arguments),
 it is executed non-interactively on the remote host instead of opening a shell.
@@ -1270,6 +1274,7 @@ Usage:
 
   ziti-ssh alice@web-server-prod                    # interactive session
   ziti-ssh alice@web-server-prod -- ls -la /tmp     # non-interactive command
+  ziti-ssh -N -L 8080:db:5432 web-server-prod       # port forward only
   ziti-ssh connect alice@web-server-prod            # same (explicit subcommand)
   ziti-ssh sign                                     # obtain/refresh certificate only
   ziti-ssh enroll --jwt alice.jwt                   # enroll a new Ziti identity
@@ -1277,6 +1282,9 @@ Usage:
   ziti-ssh mfa enable                               # enable MFA TOTP`,
 		Args: cobra.ArbitraryArgs,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			// Flags and arguments are valid by now: later errors are runtime
+			// errors, which the usage text does not help with.
+			cmd.SilenceUsage = true
 			if versionFlag {
 				fmt.Printf("ziti-ssh version %s\n", version)
 				os.Exit(0)
@@ -1454,6 +1462,9 @@ Examples:
 	connectCmd.Flags().StringArrayVarP(&localFwdFlags, "local-forward", "L", nil, "Local port forward: [bind:]localport:remotehost:remoteport (may be repeated)")
 	connectCmd.Flags().StringArrayVarP(&remoteFwdFlags, "remote-forward", "R", nil, "Remote port forward: [bind:]remoteport:localhost:localport (may be repeated)")
 	connectCmd.Flags().StringArrayVarP(&dynamicFwdFlags, "dynamic", "D", nil, "Dynamic SOCKS5 proxy: [bind:]port (may be repeated)")
+	// "ziti-ssh <target>" runs connect, so it accepts the same flags; the
+	// shared *pflag.Flag values write to the same variables.
+	root.Flags().AddFlagSet(connectCmd.Flags())
 	root.AddCommand(connectCmd)
 
 	// ------------------------------------------------------------------ proxy
@@ -1675,10 +1686,7 @@ Example:
 	}
 	root.AddCommand(versionCmd)
 	root.AddCommand(newKnownHostsCmd())
-
-	if err := root.Execute(); err != nil {
-		os.Exit(1)
-	}
+	return root
 }
 
 // Compile-time assertion: confirm the time package is referenced.

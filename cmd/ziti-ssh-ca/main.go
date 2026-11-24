@@ -78,6 +78,9 @@ func main() {
 		Use:   "ziti-ssh-ca",
 		Short: "SSH Certificate Authority service over OpenZiti",
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			// Flags and arguments are valid by now: later errors are runtime
+			// errors, which the usage text does not help with.
+			cmd.SilenceUsage = true
 			if versionFlag {
 				fmt.Printf("ziti-ssh-ca version %s\n", version)
 				os.Exit(0)

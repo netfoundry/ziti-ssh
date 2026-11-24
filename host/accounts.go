@@ -93,8 +93,7 @@ type accountOps interface {
 type osAccountOps struct{}
 
 func (osAccountOps) LookupUID(username string) (int, bool, error) {
-	cmd := exec.Command("getent", "passwd", "--", username)
-	cmd.Env = childEnv()
+	cmd := command("getent", "passwd", "--", username)
 	out, err := cmd.Output()
 	if err != nil {
 		// getent exits 2 when the key is not found.
@@ -116,8 +115,7 @@ func (osAccountOps) LookupUID(username string) (int, bool, error) {
 }
 
 func (osAccountOps) CreateUser(username string) error {
-	cmd := exec.Command("useradd", "-m", "-s", "/bin/bash", "--", username)
-	cmd.Env = childEnv()
+	cmd := command("useradd", "-m", "-s", "/bin/bash", "--", username)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 9 {
@@ -129,8 +127,7 @@ func (osAccountOps) CreateUser(username string) error {
 }
 
 func (osAccountOps) SetGroups(username string, groups []string) error {
-	cmd := exec.Command("usermod", "-G", strings.Join(groups, ","), "--", username)
-	cmd.Env = childEnv()
+	cmd := command("usermod", "-G", strings.Join(groups, ","), "--", username)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("usermod -G %q: %w (output: %s)", username, err, strings.TrimSpace(string(out)))
 	}
@@ -184,8 +181,7 @@ func userProcessesGone(uid int, timeout time.Duration) bool {
 	const pollInterval = 200 * time.Millisecond
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		pgrep := exec.Command("pgrep", "-u", strconv.Itoa(uid))
-		pgrep.Env = childEnv()
+		pgrep := command("pgrep", "-u", strconv.Itoa(uid))
 		err := pgrep.Run()
 		if err != nil {
 			// pgrep exits 1 when no processes match — user is clear.
@@ -221,15 +217,13 @@ func terminateUserProcesses(username string, uid int) error {
 	}
 	removeScheduledJobs(username)
 
-	linger := exec.Command("loginctl", "disable-linger", "--", username)
-	linger.Env = childEnv()
+	linger := command("loginctl", "disable-linger", "--", username)
 	if out, err := linger.CombinedOutput(); err != nil {
 		slog.Info("loginctl disable-linger returned non-zero (ignored)",
 			"username", username, "err", err, "output", strings.TrimSpace(string(out)))
 	}
 
-	loginctl := exec.Command("loginctl", "terminate-user", "--", username)
-	loginctl.Env = childEnv()
+	loginctl := command("loginctl", "terminate-user", "--", username)
 	if out, err := loginctl.CombinedOutput(); err != nil {
 		slog.Info("loginctl terminate-user returned non-zero (ignored)",
 			"username", username, "err", err, "output", strings.TrimSpace(string(out)))
@@ -240,8 +234,7 @@ func terminateUserProcesses(username string, uid int) error {
 		return nil
 	}
 	slog.Info("user processes still running after loginctl; sending SIGTERM", "username", username, "uid", uid)
-	pkillTerm := exec.Command("pkill", "-TERM", "-u", uidStr)
-	pkillTerm.Env = childEnv()
+	pkillTerm := command("pkill", "-TERM", "-u", uidStr)
 	if out, err := pkillTerm.CombinedOutput(); err != nil {
 		slog.Info("pkill -TERM returned non-zero (ignored)",
 			"username", username, "err", err, "output", strings.TrimSpace(string(out)))
@@ -250,8 +243,7 @@ func terminateUserProcesses(username string, uid int) error {
 		return nil
 	}
 	slog.Warn("user processes still running after SIGTERM; sending SIGKILL", "username", username, "uid", uid)
-	pkillKill := exec.Command("pkill", "-KILL", "-u", uidStr)
-	pkillKill.Env = childEnv()
+	pkillKill := command("pkill", "-KILL", "-u", uidStr)
 	if out, err := pkillKill.CombinedOutput(); err != nil {
 		slog.Info("pkill -KILL returned non-zero (ignored)",
 			"username", username, "err", err, "output", strings.TrimSpace(string(out)))
@@ -265,8 +257,7 @@ func terminateUserProcesses(username string, uid int) error {
 // runChild runs a command with the sanitised child environment and returns
 // its trimmed combined output.
 func runChild(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
-	cmd.Env = childEnv()
+	cmd := command(name, args...)
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
@@ -340,8 +331,7 @@ func deleteUser(username string, uid int) error {
 		slog.Info("removed user's files from shared temporary directories", "username", username, "uid", uid, "count", n)
 	}
 
-	cmd := exec.Command("userdel", "-r", "--", username)
-	cmd.Env = childEnv()
+	cmd := command("userdel", "-r", "--", username)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 8 {
@@ -430,11 +420,10 @@ func (m *UserManager) reconcileLegacySudoersIn(dir string) {
 // EnsureManagedGroup creates ManagedGroup as a system group if it does not
 // exist.
 func EnsureManagedGroup() error {
-	if err := exec.Command("getent", "group", "--", ManagedGroup).Run(); err == nil {
+	if err := command("getent", "group", "--", ManagedGroup).Run(); err == nil {
 		return nil
 	}
-	cmd := exec.Command("groupadd", "--system", "--", ManagedGroup)
-	cmd.Env = childEnv()
+	cmd := command("groupadd", "--system", "--", ManagedGroup)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("groupadd %s: %w (output: %s)", ManagedGroup, err, strings.TrimSpace(string(out)))
 	}
@@ -444,7 +433,7 @@ func EnsureManagedGroup() error {
 
 // ManagedGroupMembers returns the supplementary members of ManagedGroup.
 func ManagedGroupMembers() ([]string, error) {
-	out, err := exec.Command("getent", "group", "--", ManagedGroup).Output()
+	out, err := command("getent", "group", "--", ManagedGroup).Output()
 	if err != nil {
 		return nil, fmt.Errorf("getent group %s: %w", ManagedGroup, err)
 	}

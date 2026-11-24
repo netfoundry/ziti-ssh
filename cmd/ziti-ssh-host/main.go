@@ -89,6 +89,11 @@ func main() {
 	root := &cobra.Command{
 		Use:   "ziti-ssh-host",
 		Short: "SSH host daemon for OpenZiti networks",
+		// Flags and arguments are valid once this runs: later errors are
+		// runtime errors, which the usage text does not help with.
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			cmd.SilenceUsage = true
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if versionFlag {
 				fmt.Printf("ziti-ssh-host version %s\n", version)
@@ -1126,7 +1131,7 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 					if loadErr != nil {
 						slog.Error("rejecting connection: permissions config for this service could not be loaded",
 							"service", svcName, "identity", zitiIdentity, "err", loadErr)
-						return fmt.Errorf("service %q: permissions config unavailable: %w", svcName, loadErr)
+						return host.Logged(fmt.Errorf("service %q: permissions config unavailable: %w", svcName, loadErr))
 					}
 					perms, fromConfig := pc.ResolveWithSource(zitiIdentity, globalGroups, globalSudoersRule)
 					// The host owner's per-service limit on what the
@@ -1134,7 +1139,7 @@ func runProxy(identityFile string, sshServices []string, mode string, zitiTimeou
 					if err := grantPolicy.Enforce(svcName, perms, fromConfig); err != nil {
 						slog.Error("rejecting connection: permissions refused by host grant policy",
 							"service", svcName, "identity", zitiIdentity, "err", err)
-						return fmt.Errorf("identity %q on service %q: %w", zitiIdentity, svcName, err)
+						return host.Logged(fmt.Errorf("identity %q on service %q: %w", zitiIdentity, svcName, err))
 					}
 					slog.Info("per-identity connect",
 						"service", svcName,
@@ -1310,7 +1315,7 @@ func printPermissionsTable(pc *host.PermissionsConfig) {
 
 	for _, id := range identities {
 		perms := pc.Permissions[id]
-		username := ca.DeriveUsername(id)
+		username := inspectUsername(id)
 
 		groupsStr := "(none)"
 		if len(perms.Groups) > 0 {
@@ -1465,4 +1470,14 @@ func mergeTrustedKeys(current []byte, collected []clusterCA) []clusterCA {
 		}
 	}
 	return out
+}
+
+// inspectUsername is the "Linux username" column of inspect: the derived
+// username for an identity name, or "(pattern)" for a key that matches
+// several identities ("*", "dba-*", "a?c"), which has no single username.
+func inspectUsername(key string) string {
+	if strings.ContainsAny(key, "*?") {
+		return "(pattern)"
+	}
+	return ca.DeriveUsername(key)
 }

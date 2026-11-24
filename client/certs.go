@@ -57,6 +57,24 @@ func ReadCAResponse(r io.Reader) (string, error) {
 	return strings.TrimSpace(line), nil
 }
 
+// RequestCert sends pubKeyLine to ziti-ssh-ca over rw and returns the CA's
+// one-line reply (pass it to ValidateSignedCert). ziti-ssh-ca checks its rate
+// limit before reading the request, answers "error: ..." and closes, so the
+// write can fail although the refusal is waiting to be read: the reply is
+// read anyway and a refusal is returned as *CARejectedError instead of the
+// less useful write error.
+func RequestCert(rw io.ReadWriter, pubKeyLine string) (string, error) {
+	if _, werr := fmt.Fprintf(rw, "%s\n", pubKeyLine); werr != nil {
+		if line, rerr := ReadCAResponse(rw); rerr == nil {
+			if rest, ok := strings.CutPrefix(line, "error:"); ok {
+				return "", &CARejectedError{Reason: strings.TrimSpace(rest)}
+			}
+		}
+		return "", fmt.Errorf("send public key to CA: %w", werr)
+	}
+	return ReadCAResponse(rw)
+}
+
 // ValidateSignedCert checks the CA's response line before it is written to
 // disk. It returns the certificate re-encoded in authorized_keys format.
 //
