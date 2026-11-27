@@ -15,7 +15,7 @@ require (
 	github.com/openziti/sdk-golang v1.8.4
 	github.com/pkg/sftp v1.13.12
 	github.com/spf13/cobra v1.10.2
-	github.com/zitadel/oidc/v3 v3.52.0
+	github.com/zitadel/oidc/v3 v3.53.0
 	go.yaml.in/yaml/v3 v3.0.6
 	golang.org/x/crypto v0.59.0
 	golang.org/x/term v0.48.0
